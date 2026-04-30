@@ -11,7 +11,7 @@ export type AppSession = {
   exp: number;
 };
 
-function getSessionSecret() {
+export function getSessionSecret() {
   const configuredSecret = process.env.AUTH_SECRET?.trim();
   if (configuredSecret) {
     return configuredSecret;
@@ -22,6 +22,10 @@ function getSessionSecret() {
   }
 
   return 'dev-only-auth-secret-change-me';
+}
+
+export function ensureSessionSecretConfigured() {
+  getSessionSecret();
 }
 
 function sign(data: string) {

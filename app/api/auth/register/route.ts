@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { NextResponse } from 'next/server';
 import pool, { query } from '@/lib/db';
 import { SESSION_COOKIE_NAME, SESSION_DURATION_MS } from '@/lib/auth-constants';
-import { buildSession, serializeSession } from '@/lib/session';
+import { buildSession, ensureSessionSecretConfigured, serializeSession } from '@/lib/session';
 import { hashPassword } from '@/lib/password';
 
 function toSlug(value: string) {
@@ -16,6 +16,8 @@ function toSlug(value: string) {
 
 export async function POST(request: Request) {
   try {
+    ensureSessionSecretConfigured();
+
     const body = await request.json();
     const companyName = String(body.companyName || '').trim();
     const desiredSlug = String(body.slug || '').trim();
@@ -24,21 +26,21 @@ export async function POST(request: Request) {
     const password = String(body.password || '');
 
     if (!companyName || !name || !email || !password) {
-      return NextResponse.json({ error: 'Preencha todos os campos obrigatórios.' }, { status: 400 });
+      return NextResponse.json({ error: 'Preencha todos os campos obrigatorios.' }, { status: 400 });
     }
 
     if (password.length < 8) {
-      return NextResponse.json({ error: 'A senha deve ter no mínimo 8 caracteres.' }, { status: 400 });
+      return NextResponse.json({ error: 'A senha deve ter no minimo 8 caracteres.' }, { status: 400 });
     }
 
     const slug = toSlug(desiredSlug || companyName);
     if (!slug || slug.length < 3) {
-      return NextResponse.json({ error: 'Slug inválido. Use pelo menos 3 caracteres.' }, { status: 400 });
+      return NextResponse.json({ error: 'Slug invalido. Use pelo menos 3 caracteres.' }, { status: 400 });
     }
 
     const existing = await query<{ id: string }>('SELECT id FROM tenants WHERE slug = $1 LIMIT 1', [slug]);
     if (existing.rowCount) {
-      return NextResponse.json({ error: 'Este slug já está em uso por outra empresa.' }, { status: 409 });
+      return NextResponse.json({ error: 'Este slug ja esta em uso por outra empresa.' }, { status: 409 });
     }
 
     const tenantId = randomUUID();
@@ -85,6 +87,9 @@ export async function POST(request: Request) {
     return response;
   } catch (error) {
     console.error('register error', error);
-    return NextResponse.json({ error: 'Não foi possível criar sua conta agora.' }, { status: 500 });
+    if (error instanceof Error && error.message.includes('AUTH_SECRET')) {
+      return NextResponse.json({ error: 'Configuracao de autenticacao ausente no servidor.' }, { status: 500 });
+    }
+    return NextResponse.json({ error: 'Nao foi possivel criar sua conta agora.' }, { status: 500 });
   }
 }

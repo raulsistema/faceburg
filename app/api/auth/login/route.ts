@@ -2,7 +2,7 @@ import { NextResponse } from 'next/server';
 import { query } from '@/lib/db';
 import { verifyPassword } from '@/lib/password';
 import { SESSION_COOKIE_NAME, SESSION_DURATION_MS } from '@/lib/auth-constants';
-import { buildSession, serializeSession } from '@/lib/session';
+import { buildSession, ensureSessionSecretConfigured, serializeSession } from '@/lib/session';
 
 type LoginRow = {
   user_id: string;
@@ -18,6 +18,8 @@ type LoginRow = {
 
 export async function POST(request: Request) {
   try {
+    ensureSessionSecretConfigured();
+
     const body = await request.json();
     const slug = String(body.slug || '').trim().toLowerCase();
     const email = String(body.email || '').trim().toLowerCase();
@@ -46,7 +48,7 @@ export async function POST(request: Request) {
     );
 
     if (!result.rowCount) {
-      return NextResponse.json({ error: 'Credenciais inválidas.' }, { status: 401 });
+      return NextResponse.json({ error: 'Credenciais invalidas.' }, { status: 401 });
     }
 
     const user = result.rows[0];
@@ -56,7 +58,7 @@ export async function POST(request: Request) {
 
     const validPassword = verifyPassword(password, user.password_hash);
     if (!validPassword) {
-      return NextResponse.json({ error: 'Credenciais inválidas.' }, { status: 401 });
+      return NextResponse.json({ error: 'Credenciais invalidas.' }, { status: 401 });
     }
 
     const session = buildSession({
@@ -87,6 +89,9 @@ export async function POST(request: Request) {
     return response;
   } catch (error) {
     console.error('login error', error);
+    if (error instanceof Error && error.message.includes('AUTH_SECRET')) {
+      return NextResponse.json({ error: 'Configuracao de autenticacao ausente no servidor.' }, { status: 500 });
+    }
     return NextResponse.json({ error: 'Falha ao autenticar.' }, { status: 500 });
   }
 }
