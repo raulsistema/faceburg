@@ -1,0 +1,6 @@
+{
+  "name": "GastroSaaS - Gestão de Lanchonete & PDV",
+  "description": "Sistema SaaS White Label para gestão multi-tenant de lanchonetes e pizzarias, incluindo PDV, Kanban de pedidos e catálogo digital.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["Multi-tenant Support", "Real-time POS", "Order Management"]
+}

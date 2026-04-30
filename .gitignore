@@ -1,0 +1,16 @@
+node_modules/
+.next/
+coverage/
+.DS_Store
+*.log
+.env*
+!.env.example
+tsconfig.tsbuildinfo
+.wwebjs_cache/
+tmp-swbot/
+tmp_*.js
+faceburg-hub/node_modules/
+faceburg-hub/dist/
+faceburg-hub/.wwebjs_cache/
+faceburg-hub/*.log
+faceburg-hub/*.tmp

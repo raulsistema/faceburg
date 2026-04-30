@@ -1,0 +1,53 @@
+@import "tailwindcss";
+
+@theme {
+  --color-brand-sidebar: #0f172a;
+  --color-brand-primary: #38bdf8;
+  --color-brand-action: #10b981;
+  --color-brand-secondary: #f43f5e;
+  --color-surface: #f8fafc;
+  --color-surface-muted: #f1f5f9;
+  --color-border: #e2e8f0;
+}
+
+:root {
+  --font-sans: 'Inter', system-ui, -apple-system, sans-serif;
+}
+
+body {
+  background-color: var(--color-surface);
+  color: #1e293b;
+  font-family: var(--font-sans);
+}
+
+.kanban-column {
+  @apply flex flex-col gap-3 bg-slate-200 p-3 rounded-lg min-h-[70vh];
+}
+
+.column-header {
+  @apply px-4 py-2 font-bold text-xs text-slate-500 uppercase tracking-wider flex justify-between items-center;
+}
+
+.card-order {
+  @apply bg-white p-4 rounded-md shadow-sm border-l-4 border-blue-500 transition-all hover:shadow-md cursor-pointer;
+}
+
+.btn-primary {
+  @apply px-4 py-2 bg-brand-action text-white rounded-md font-bold text-sm transition-all hover:opacity-90 active:scale-[0.98] flex items-center gap-2;
+}
+
+.btn-secondary {
+  @apply px-4 py-2 bg-white border border-slate-200 text-slate-600 rounded-md font-bold text-sm transition-all hover:bg-slate-50 active:scale-[0.98];
+}
+
+.sidebar-link {
+  @apply flex items-center gap-3 px-6 py-3 text-sm transition-all;
+}
+
+.sidebar-link-active {
+  @apply bg-white/10 text-white border-r-4 border-brand-primary;
+}
+
+.sidebar-link-inactive {
+  @apply text-slate-400 hover:text-white hover:bg-white/5;
+}
