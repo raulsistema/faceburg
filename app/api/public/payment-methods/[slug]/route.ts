@@ -5,9 +5,6 @@ type PaymentMethodRow = {
   id: string;
   name: string;
   method_type: string;
-  fee_percent: string;
-  fee_fixed: string;
-  settlement_days: number;
 };
 
 export async function GET(_request: Request, { params }: { params: Promise<{ slug: string }> }) {
@@ -27,7 +24,7 @@ export async function GET(_request: Request, { params }: { params: Promise<{ slu
 
   const tenantId = tenantResult.rows[0].id;
   const result = await query<PaymentMethodRow>(
-    `SELECT id, name, method_type, fee_percent::text, fee_fixed::text, settlement_days
+    `SELECT id, name, method_type
      FROM payment_methods
      WHERE tenant_id = $1 AND active = TRUE
      ORDER BY name ASC`,
@@ -39,9 +36,6 @@ export async function GET(_request: Request, { params }: { params: Promise<{ slu
       id: row.id,
       name: row.name,
       methodType: row.method_type,
-      feePercent: Number(row.fee_percent || 0),
-      feeFixed: Number(row.fee_fixed || 0),
-      settlementDays: Number(row.settlement_days || 0),
     })),
   });
 }

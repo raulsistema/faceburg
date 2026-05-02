@@ -1,8 +1,10 @@
 'use client';
 
-import { FormEvent, useEffect, useState } from 'react';
+import { ChangeEvent, FormEvent, useEffect, useState } from 'react';
+import AppImage from '@/components/ui/AppImage';
 
 type IssuerForm = {
+  logoUrl: string;
   issuerName: string;
   issuerTradeName: string;
   issuerDocument: string;
@@ -22,6 +24,7 @@ type SettingsResponse = {
   prepTimeMinutes: number;
   deliveryFeeBase: number;
   storeOpen: boolean;
+  logoUrl: string;
   whatsappPhone: string;
   issuerName: string;
   issuerTradeName: string;
@@ -40,6 +43,7 @@ type SettingsResponse = {
 
 function buildIssuerForm(data?: Partial<SettingsResponse> | null): IssuerForm {
   return {
+    logoUrl: data?.logoUrl || '',
     issuerName: data?.issuerName || '',
     issuerTradeName: data?.issuerTradeName || '',
     issuerDocument: data?.issuerDocument || '',
@@ -78,6 +82,7 @@ export default function EmitenteSettings({ initialData }: { initialData?: Partia
   const [form, setForm] = useState<IssuerForm>(() => buildIssuerForm(initialData));
   const [loading, setLoading] = useState(!initialData);
   const [saving, setSaving] = useState(false);
+  const [readingLogo, setReadingLogo] = useState(false);
   const [searchingCnpj, setSearchingCnpj] = useState(false);
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
@@ -110,6 +115,48 @@ export default function EmitenteSettings({ initialData }: { initialData?: Partia
     if (initialData) return;
     void load();
   }, [initialData]);
+
+  async function handleLogoFileChange(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    const allowedTypes = new Set(['image/png', 'image/jpeg', 'image/webp']);
+    if (!allowedTypes.has(file.type)) {
+      setError('Envie uma logo em PNG, JPG ou WebP.');
+      event.target.value = '';
+      return;
+    }
+
+    if (file.size > 2 * 1024 * 1024) {
+      setError('A logo deve ter no maximo 2 MB.');
+      event.target.value = '';
+      return;
+    }
+
+    setReadingLogo(true);
+    setError('');
+    setMessage('');
+
+    try {
+      const dataUrl = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result || ''));
+        reader.onerror = () => reject(new Error('Falha ao ler a imagem.'));
+        reader.readAsDataURL(file);
+      });
+
+      setForm((current) => ({
+        ...current,
+        logoUrl: dataUrl,
+      }));
+      setMessage('Logo carregada e pronta para salvar no banco.');
+    } catch {
+      setError('Nao foi possivel carregar a logo.');
+    } finally {
+      setReadingLogo(false);
+      event.target.value = '';
+    }
+  }
 
   async function lookupCnpj() {
     const digits = form.issuerDocument.replace(/\D/g, '');
@@ -175,6 +222,46 @@ export default function EmitenteSettings({ initialData }: { initialData?: Partia
         <p className="text-sm text-slate-500">Carregando...</p>
       ) : (
         <form onSubmit={onSubmit} className="space-y-3">
+          <div className="rounded-xl border border-slate-200 bg-slate-50 p-4">
+            <p className="text-xs font-bold uppercase tracking-[0.18em] text-slate-400 mb-3">Logo da empresa</p>
+            <div className="flex flex-col gap-3 md:flex-row md:items-start">
+              <div className="flex h-24 w-24 items-center justify-center overflow-hidden rounded-2xl border border-slate-200 bg-white">
+                {form.logoUrl ? (
+                  <AppImage src={form.logoUrl} alt="Logo da empresa" width={96} height={96} className="h-full w-full object-cover" />
+                ) : (
+                  <span className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-300">Sem logo</span>
+                )}
+              </div>
+              <div className="flex-1 space-y-2">
+                <input
+                  type="file"
+                  accept="image/png,image/jpeg,image/webp"
+                  className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm bg-white"
+                  onChange={(event) => void handleLogoFileChange(event)}
+                  disabled={readingLogo || saving}
+                />
+                <div className="flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    className="btn-secondary"
+                    onClick={() => {
+                      setForm((current) => ({ ...current, logoUrl: '' }));
+                      setMessage('');
+                      setError('');
+                    }}
+                    disabled={!form.logoUrl || readingLogo || saving}
+                  >
+                    Remover logo
+                  </button>
+                </div>
+                <p className="text-xs text-slate-500">
+                  Selecione a imagem da logo para gravar no banco. Formatos aceitos: PNG, JPG e WebP ate 2 MB.
+                </p>
+                {readingLogo ? <p className="text-xs text-sky-600">Carregando imagem...</p> : null}
+              </div>
+            </div>
+          </div>
+
           <div className="grid md:grid-cols-2 gap-3">
             <input className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm" placeholder="Nome da empresa" value={form.issuerName} onChange={(e) => setForm((c) => ({ ...c, issuerName: e.target.value }))} />
             <input className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm" placeholder="Nome fantasia" value={form.issuerTradeName} onChange={(e) => setForm((c) => ({ ...c, issuerTradeName: e.target.value }))} />
@@ -199,7 +286,7 @@ export default function EmitenteSettings({ initialData }: { initialData?: Partia
             <input className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm" placeholder="UF" value={form.issuerState} onChange={(e) => setForm((c) => ({ ...c, issuerState: e.target.value.toUpperCase() }))} maxLength={2} />
           </div>
 
-          <button disabled={saving} className="btn-primary">
+          <button disabled={saving || readingLogo} className="btn-primary">
             {saving ? 'Salvando...' : 'Salvar dados da empresa'}
           </button>
           {message ? <p className="text-sm text-emerald-600">{message}</p> : null}

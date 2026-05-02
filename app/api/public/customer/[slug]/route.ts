@@ -31,6 +31,17 @@ type AddressRow = {
   is_default: boolean;
 };
 
+type OrderRow = {
+  id: string;
+  delivery_address: string | null;
+  total: string;
+  status: 'pending' | 'processing' | 'delivering' | 'completed' | 'cancelled';
+  type: 'delivery' | 'pickup' | 'table';
+  payment_method: string | null;
+  created_at: string;
+  items_summary: string | null;
+};
+
 function normalizePhone(value: string) {
   return value.replace(/\D/g, '');
 }
@@ -51,7 +62,7 @@ async function getTenantBySlug(slug: string) {
 
 async function loadCustomerAndAddresses(tenantId: string, phone: string) {
   if (phone.length < 10) {
-    return { found: false, customer: null, addresses: [] };
+    return { found: false, customer: null, addresses: [], orders: [] };
   }
   const customerResult = await query<CustomerRow>(
     `SELECT id, name, phone, email, is_company, company_name, document_number
@@ -64,7 +75,7 @@ async function loadCustomerAndAddresses(tenantId: string, phone: string) {
   );
 
   if (!customerResult.rowCount) {
-    return { found: false, customer: null, addresses: [] };
+    return { found: false, customer: null, addresses: [], orders: [] };
   }
 
   const customer = customerResult.rows[0];
@@ -76,6 +87,37 @@ async function loadCustomerAndAddresses(tenantId: string, phone: string) {
        AND active = TRUE
      ORDER BY is_default DESC, created_at DESC`,
     [tenantId, customer.id],
+  );
+
+  const ordersResult = await query<OrderRow>(
+    `SELECT
+      o.id,
+      o.delivery_address,
+      o.total::text,
+      o.status,
+      o.type,
+      o.payment_method,
+      o.created_at,
+      COALESCE(
+        STRING_AGG(
+          (oi.quantity::text || 'x ' || COALESCE(p.name, 'Produto removido')),
+          ', '
+          ORDER BY COALESCE(p.name, 'Produto removido')
+        ),
+        ''
+      ) AS items_summary
+    FROM orders o
+    LEFT JOIN order_items oi
+      ON oi.order_id = o.id
+    LEFT JOIN products p
+      ON p.id = oi.product_id
+     AND p.tenant_id = o.tenant_id
+    WHERE o.tenant_id = $1
+      AND regexp_replace(o.customer_phone, '\D', '', 'g') = $2
+    GROUP BY o.id
+    ORDER BY o.created_at DESC
+    LIMIT 10`,
+    [tenantId, phone],
   );
 
   return {
@@ -101,6 +143,16 @@ async function loadCustomerAndAddresses(tenantId: string, phone: string) {
       zipCode: address.zip_code,
       reference: address.reference,
       isDefault: address.is_default,
+    })),
+    orders: ordersResult.rows.map((order) => ({
+      id: order.id,
+      deliveryAddress: order.delivery_address || '',
+      total: Number(order.total || 0),
+      status: order.status,
+      type: order.type,
+      paymentMethod: order.payment_method || 'pix',
+      createdAt: order.created_at,
+      itemsSummary: order.items_summary || '',
     })),
   };
 }

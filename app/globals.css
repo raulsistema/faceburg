@@ -29,7 +29,7 @@ body {
 }
 
 .card-order {
-  @apply bg-white p-4 rounded-md shadow-sm border-l-4 border-blue-500 transition-all hover:shadow-md cursor-pointer;
+  @apply overflow-hidden bg-white p-4 rounded-2xl border border-violet-200 shadow-[0_8px_22px_rgba(15,23,42,0.08)] transition-all hover:shadow-[0_10px_26px_rgba(15,23,42,0.13)] cursor-pointer;
 }
 
 .btn-primary {

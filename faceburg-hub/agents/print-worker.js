@@ -1,17 +1,17 @@
 /* eslint-disable no-console */
 /* Print Worker — forked from Faceburg Hub main process */
-const fs = require('node:fs');
 const os = require('node:os');
-const path = require('node:path');
-const { execFile } = require('node:child_process');
 const WebSocket = require('ws');
+const { printTextWindows } = require('./native-printer');
 
 const SERVER_URL = String(process.env.HUB_SERVER_URL || process.env.PRINT_SERVER_URL || 'http://localhost:3000').replace(/\/$/, '');
 const AGENT_KEY = String(process.env.HUB_AGENT_KEY || process.env.PRINT_AGENT_KEY || '');
 const PRINTER_NAME = String(process.env.HUB_PRINTER_NAME || process.env.PRINTER_NAME || '');
 
 const POLL_FALLBACK_MS = Number(process.env.HUB_PRINT_POLL_FALLBACK_MS || process.env.PRINT_POLL_FALLBACK_MS || 15000);
-const WS_RECONNECT_MS = 3000;
+const WS_RECONNECT_BASE_MS = Number(process.env.HUB_PRINT_WS_RECONNECT_MS || process.env.PRINT_WS_RECONNECT_MS || 3000);
+const WS_RECONNECT_MAX_MS = Number(process.env.HUB_PRINT_WS_RECONNECT_MAX_MS || process.env.PRINT_WS_RECONNECT_MAX_MS || 60000);
+const WS_LOG_COOLDOWN_MS = Number(process.env.HUB_PRINT_WS_LOG_COOLDOWN_MS || process.env.PRINT_WS_LOG_COOLDOWN_MS || 60000);
 const HEARTBEAT_MS = Number(process.env.HUB_PRINT_HEARTBEAT_MS || process.env.PRINT_HEARTBEAT_MS || 180000);
 const AUTH_BACKOFF_MS = Number(process.env.HUB_PRINT_AUTH_BACKOFF_MS || process.env.PRINT_AUTH_BACKOFF_MS || 600000);
 
@@ -20,11 +20,15 @@ let ws = null;
 let wsConnected = false;
 let reconnectTimer = null;
 let heartbeatTimer = null;
-let lastConnectedSyncAt = 0;
 let lastErrorMessage = '';
 let shuttingDown = false;
 let authBlockedUntil = 0;
 let currentStatus = 'connecting';
+let wsReconnectAttempt = 0;
+let wsLastLogAt = 0;
+let wsLastErrorReason = '';
+let wsFallbackActive = false;
+let wsConnectedOnce = false;
 
 /* ─── IPC to main ────────────────────────────────────────────────── */
 
@@ -56,24 +60,48 @@ async function fetchJson(url, opts = {}) {
   return json;
 }
 
-/* ─── printing ───────────────────────────────────────────────────── */
-
-function printTextWindows(text) {
-  return new Promise((resolve, reject) => {
-    const filePath = path.join(os.tmpdir(), `faceburg-print-${Date.now()}.txt`);
-    fs.writeFileSync(filePath, text, 'utf8');
-    const safe = filePath.replace(/'/g, "''");
-    const safePrinter = PRINTER_NAME.replace(/'/g, "''");
-    const cmd = PRINTER_NAME
-      ? `Get-Content -Raw '${safe}' | Out-Printer -Name '${safePrinter}'`
-      : `Get-Content -Raw '${safe}' | Out-Printer`;
-
-    execFile('powershell', ['-NoProfile', '-Command', cmd], (err) => {
-      try { fs.unlinkSync(filePath); } catch {}
-      if (err) reject(err); else resolve();
-    });
-  });
+function formatRetryDelay(ms) {
+  return `${Math.max(1, Math.round(ms / 1000))}s`;
 }
+
+function getWsReconnectDelay() {
+  const attempt = Math.max(0, wsReconnectAttempt - 1);
+  return Math.min(WS_RECONNECT_MAX_MS, WS_RECONNECT_BASE_MS * (2 ** attempt));
+}
+
+function shouldLogWsFallback() {
+  return !wsLastLogAt || Date.now() - wsLastLogAt >= WS_LOG_COOLDOWN_MS;
+}
+
+function announceWsFallback(reason, delayMs) {
+  const safeReason = String(reason || 'gateway indisponivel').trim();
+  if (!wsFallbackActive) {
+    wsFallbackActive = true;
+    wsLastLogAt = Date.now();
+    sendLog(`Realtime indisponivel (${safeReason}). Usando fallback por polling. Nova tentativa em ${formatRetryDelay(delayMs)}.`);
+    return;
+  }
+
+  if (shouldLogWsFallback()) {
+    wsLastLogAt = Date.now();
+    sendLog(`Realtime ainda indisponivel (${safeReason}). Tentando novamente em ${formatRetryDelay(delayMs)}.`);
+  }
+}
+
+function markWsConnected() {
+  const recoveredFromFallback = wsFallbackActive || !wsConnectedOnce;
+  wsConnected = true;
+  wsReconnectAttempt = 0;
+  wsLastErrorReason = '';
+  wsFallbackActive = false;
+  updateState({ status: currentStatus === 'error' ? 'ready' : currentStatus, lastError: currentStatus === 'error' ? '' : undefined });
+  if (recoveredFromFallback) {
+    sendLog('Realtime conectado.');
+  }
+  wsConnectedOnce = true;
+}
+
+/* ─── printing ───────────────────────────────────────────────────── */
 
 /* ─── server communication ───────────────────────────────────────── */
 
@@ -103,7 +131,11 @@ async function pollOnce() {
   const job = pollData.job;
   try {
     if (process.platform === 'win32') {
-      await printTextWindows(String(job.payloadText || ''));
+      const printResult = await printTextWindows(String(job.payloadText || ''), PRINTER_NAME);
+      sendLog(`Job ${job.id} enviado via ${printResult.strategy.toUpperCase()}${printResult.printerName ? ` (${printResult.printerName})` : ''}.`);
+      if (printResult.fallbackUsed && printResult.previousFailures?.length) {
+        sendLog(`Fallback de impressao acionado no job ${job.id}: ${printResult.previousFailures.join(' | ')}`);
+      }
     } else {
       sendLog(`[simulacao] ${job.payloadText}`);
     }
@@ -113,9 +145,11 @@ async function pollOnce() {
       body: JSON.stringify({ jobId: job.id, success: true }),
     });
     sendLog(`Job ${job.id} impresso com sucesso.`);
+    lastErrorMessage = '';
     updateState({ status: 'ready', lastError: '', lastJobAt: new Date().toLocaleString('pt-BR') });
   } catch (err) {
     const msg = err instanceof Error ? err.message : 'Falha impressao';
+    lastErrorMessage = msg;
     await fetchJson(`${SERVER_URL}/api/print/ack`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', 'x-agent-key': AGENT_KEY },
@@ -143,7 +177,6 @@ async function drainJobs(reason) {
     }
     if (!wsConnected) await sleep(3000);
   } finally { draining = false; }
-  if (reason === 'connected-sync') lastConnectedSyncAt = Date.now();
 }
 
 /* ─── realtime websocket ─────────────────────────────────────────── */
@@ -155,37 +188,53 @@ function buildWsUrl() {
   return `${proto}//${parsed.hostname}:${port}/ws/agents`;
 }
 
-function scheduleReconnect() {
+function scheduleReconnect(reason = '') {
   if (reconnectTimer || shuttingDown) return;
-  reconnectTimer = setTimeout(() => { reconnectTimer = null; connectRealtime(); }, WS_RECONNECT_MS);
+  wsReconnectAttempt += 1;
+  const delayMs = getWsReconnectDelay();
+  announceWsFallback(reason, delayMs);
+  reconnectTimer = setTimeout(() => { reconnectTimer = null; connectRealtime(); }, delayMs);
 }
 
 function connectRealtime() {
   if (!AGENT_KEY || shuttingDown) return;
   const url = `${buildWsUrl()}?kind=print`;
+  let opened = false;
   try {
     ws = new WebSocket(url, { headers: { 'x-agent-key': AGENT_KEY } });
-  } catch { scheduleReconnect(); return; }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error || 'falha ao iniciar websocket');
+    wsConnected = false;
+    updateState();
+    scheduleReconnect(message);
+    return;
+  }
 
   ws.on('open', () => {
-    wsConnected = true;
+    opened = true;
     lastErrorMessage = '';
     authBlockedUntil = 0;
-    updateState({ status: currentStatus === 'error' ? 'ready' : currentStatus, lastError: '' });
-    sendLog('Realtime conectado.');
+    markWsConnected();
     void postAgentState('ready');
     void drainJobs('ws-open');
   });
   ws.on('message', (raw) => {
     try { if (JSON.parse(String(raw))?.type === 'job_available') void drainJobs('ws-event'); } catch {}
   });
-  ws.on('close', () => {
+  ws.on('close', (code, reasonBuffer) => {
+    const closeReason = String(reasonBuffer || '').trim();
+    const failureReason =
+      wsLastErrorReason ||
+      closeReason ||
+      (opened ? `conexao encerrada (${code || 0})` : `nao foi possivel conectar (${code || 0})`);
+    wsLastErrorReason = '';
     wsConnected = false;
     updateState({ lastError: currentStatus === 'error' ? lastErrorMessage : '' });
-    sendLog('Realtime desconectado. Entrando em modo fallback.');
-    scheduleReconnect();
+    if (shuttingDown) return;
+    scheduleReconnect(failureReason);
   });
-  ws.on('error', () => {
+  ws.on('error', (error) => {
+    wsLastErrorReason = error instanceof Error ? error.message : String(error || 'erro websocket');
     wsConnected = false;
     updateState();
   });
@@ -199,10 +248,14 @@ async function main() {
   await postAgentState('connecting');
   connectRealtime();
   await drainJobs('startup');
+  if (!shuttingDown && currentStatus === 'connecting') {
+    updateState({ status: 'ready', lastError: '' });
+    await postAgentState('ready');
+  }
 
   heartbeatTimer = setInterval(() => {
     if (shuttingDown) return;
-    void postAgentState(wsConnected ? 'ready' : 'connecting');
+    void postAgentState(currentStatus === 'error' ? 'error' : 'ready');
   }, HEARTBEAT_MS);
 
   setInterval(() => {
@@ -227,5 +280,15 @@ function shutdown() {
 process.on('message', (msg) => { if (msg?.type === 'shutdown') shutdown(); });
 process.on('SIGTERM', shutdown);
 process.on('SIGINT', shutdown);
+process.on('uncaughtException', (err) => {
+  lastErrorMessage = err instanceof Error ? err.message : String(err || 'uncaught_exception');
+  sendLog(`uncaughtException: ${lastErrorMessage}`);
+  updateState({ status: 'error', lastError: lastErrorMessage });
+  setTimeout(() => process.exit(1), 50);
+});
+process.on('unhandledRejection', (reason) => {
+  const message = String(reason || 'unhandled_rejection');
+  sendLog(`unhandledRejection: ${message}`);
+});
 
 void main();

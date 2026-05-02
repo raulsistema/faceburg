@@ -2,7 +2,6 @@
 const { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage, safeStorage } = require('electron');
 const { fork, execFile } = require('node:child_process');
 const fs = require('node:fs');
-const os = require('node:os');
 const path = require('node:path');
 
 /* ─── constants ──────────────────────────────────────────────── */
@@ -23,6 +22,9 @@ const DEFAULT_SETTINGS = {
 };
 
 const LOG_MAX = 200;
+const WORKER_RESTART_DELAY_MS = 5000;
+const WHATSAPP_STOP_GRACE_MS = 5000;
+const PRINT_STOP_GRACE_MS = 3000;
 
 /* ─── state ──────────────────────────────────────────────────── */
 
@@ -34,6 +36,16 @@ let trayHintShown = false;
 
 let whatsWorker = null;
 let printWorker = null;
+let whatsWorkerRestartTimer = null;
+let printWorkerRestartTimer = null;
+let whatsStopRequested = false;
+let printStopRequested = false;
+let whatsRestartRequested = false;
+let printRestartRequested = false;
+let whatsRestartDelayMs = 1500;
+let printRestartDelayMs = 1500;
+let whatsRestartReason = 'reinicio solicitado pelo hub';
+let printRestartReason = 'reinicio solicitado pelo hub';
 
 let whatsState = { status: 'stopped', qrCode: '', phoneNumber: '', lastError: '' };
 let printState = { status: 'stopped', lastError: '', lastJobAt: '' };
@@ -42,10 +54,28 @@ let logs = [];
 const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) app.quit();
 
+const APP_USER_MODEL_ID = 'com.faceburg.hub';
+const WINDOW_ICON_FILE = 'logorbs.ico';
+const TRAY_ICON_FILE = 'logorbs-32.png';
+
 /* ─── settings ───────────────────────────────────────────────── */
 
 function settingsFilePath() {
   return path.join(app.getPath('userData'), 'settings.json');
+}
+
+function assetPath(fileName) {
+  return path.join(__dirname, 'assets', fileName);
+}
+
+function loadImageFromAssets(fileName, resizeOptions = null) {
+  try {
+    const image = nativeImage.createFromPath(assetPath(fileName));
+    if (!image.isEmpty()) {
+      return resizeOptions ? image.resize(resizeOptions) : image;
+    }
+  } catch {}
+  return nativeImage.createEmpty();
 }
 
 function encryptPassword(password) {
@@ -258,6 +288,88 @@ async function syncAutoStartAgents() {
   }
 }
 
+function clearWhatsAppWorkerRestartTimer() {
+  if (!whatsWorkerRestartTimer) return;
+  clearTimeout(whatsWorkerRestartTimer);
+  whatsWorkerRestartTimer = null;
+}
+
+function clearPrintWorkerRestartTimer() {
+  if (!printWorkerRestartTimer) return;
+  clearTimeout(printWorkerRestartTimer);
+  printWorkerRestartTimer = null;
+}
+
+function scheduleWhatsAppWorkerRestart(reason, delayMs = WORKER_RESTART_DELAY_MS) {
+  if (forceQuit || whatsWorker || whatsWorkerRestartTimer) return;
+  whatsWorkerRestartTimer = setTimeout(async () => {
+    whatsWorkerRestartTimer = null;
+    if (forceQuit || whatsWorker) return;
+
+    const settings = readSettings();
+    if (!settings.autoStartWhatsApp || !settings.whatsAgentKey || !settings.serverUrl) {
+      pushLog('whatsapp', 'Reinicio cancelado: auto-start do WhatsApp desativado.');
+      return;
+    }
+
+    const enabled = await checkServerAgentEnabled(settings.serverUrl, settings.whatsAgentKey, 'whatsapp');
+    if (!enabled) {
+      pushLog('whatsapp', 'Reinicio cancelado: agente WhatsApp desativado no sistema.');
+      return;
+    }
+
+    try {
+      startWhatsAppWorker();
+    } catch (err) {
+      pushLog('whatsapp', `Falha ao reiniciar worker: ${err?.message || err}`);
+      scheduleWhatsAppWorkerRestart('nova tentativa apos falha', delayMs);
+    }
+  }, delayMs);
+  pushLog('whatsapp', `Worker sera reiniciado em ${Math.max(1, Math.round(delayMs / 1000))}s (${reason}).`);
+}
+
+function schedulePrintWorkerRestart(reason, delayMs = WORKER_RESTART_DELAY_MS) {
+  if (forceQuit || printWorker || printWorkerRestartTimer) return;
+  printWorkerRestartTimer = setTimeout(async () => {
+    printWorkerRestartTimer = null;
+    if (forceQuit || printWorker) return;
+
+    const settings = readSettings();
+    if (!settings.autoStartPrint || !settings.printAgentKey || !settings.serverUrl) {
+      pushLog('print', 'Reinicio cancelado: auto-start da impressao desativado.');
+      return;
+    }
+
+    const enabled = await checkServerAgentEnabled(settings.serverUrl, settings.printAgentKey, 'print');
+    if (!enabled) {
+      pushLog('print', 'Reinicio cancelado: agente de impressao desativado no sistema.');
+      return;
+    }
+
+    try {
+      startPrintWorker();
+    } catch (err) {
+      pushLog('print', `Falha ao reiniciar worker: ${err?.message || err}`);
+      schedulePrintWorkerRestart('nova tentativa apos falha', delayMs);
+    }
+  }, delayMs);
+  pushLog('print', `Worker sera reiniciado em ${Math.max(1, Math.round(delayMs / 1000))}s (${reason}).`);
+}
+
+function restartWhatsAppWorker(reason = 'reinicio solicitado', delayMs = 1500) {
+  whatsRestartRequested = true;
+  whatsRestartDelayMs = delayMs;
+  whatsRestartReason = reason;
+  stopWhatsAppWorker({ restartAfterExit: true, reason, delayMs });
+}
+
+function restartPrintWorker(reason = 'reinicio solicitado', delayMs = 1500) {
+  printRestartRequested = true;
+  printRestartDelayMs = delayMs;
+  printRestartReason = reason;
+  stopPrintWorker({ restartAfterExit: true, reason, delayMs });
+}
+
 /* ─── printers ───────────────────────────────────────────────── */
 
 function listPrintersWindows() {
@@ -276,6 +388,9 @@ function startWhatsAppWorker() {
   if (whatsWorker) return;
   const settings = readSettings();
   if (!settings.whatsAgentKey || !settings.serverUrl) throw new Error('Faca login antes.');
+  clearWhatsAppWorkerRestartTimer();
+  whatsStopRequested = false;
+  whatsRestartRequested = false;
 
   const workerPath = path.join(__dirname, 'agents', 'whatsapp-worker.js');
   whatsWorker = fork(workerPath, [], {
@@ -287,11 +402,13 @@ function startWhatsAppWorker() {
     },
     silent: true,
   });
+  const workerRef = whatsWorker;
 
   whatsWorker.stdout?.on('data', (d) => pushLog('whatsapp', d.toString().trim()));
   whatsWorker.stderr?.on('data', (d) => pushLog('whatsapp', `[ERR] ${d.toString().trim()}`));
 
   whatsWorker.on('message', (msg) => {
+    if (whatsStopRequested) return;
     if (msg.type === 'state') {
       whatsState = { ...whatsState, ...msg.data };
       emit('whatsapp:state', whatsState);
@@ -300,11 +417,35 @@ function startWhatsAppWorker() {
     }
   });
 
-  whatsWorker.on('exit', (code) => {
-    pushLog('whatsapp', `Worker encerrado (code ${code}).`);
-    whatsWorker = null;
+  whatsWorker.on('error', (error) => {
+    pushLog('whatsapp', `Falha no processo do worker: ${error?.message || error}`);
+  });
+
+  whatsWorker.on('exit', (code, signal) => {
+    const expectedStop = whatsStopRequested || forceQuit;
+    const restartAfterExit = whatsRestartRequested;
+    pushLog(
+      'whatsapp',
+      expectedStop
+        ? `Worker encerrado (${signal || code || 0}).`
+        : `Worker caiu (${signal || code || 0}). Preparando recuperacao automatica.`,
+    );
+    if (whatsWorker === workerRef) {
+      whatsWorker = null;
+    }
+    whatsStopRequested = false;
+    whatsRestartRequested = false;
     whatsState.status = 'stopped';
     emit('whatsapp:state', whatsState);
+
+    if (restartAfterExit && !forceQuit) {
+      scheduleWhatsAppWorkerRestart(whatsRestartReason, whatsRestartDelayMs);
+      return;
+    }
+
+    if (!expectedStop && !forceQuit) {
+      scheduleWhatsAppWorkerRestart('saida inesperada do worker');
+    }
   });
 
   whatsState.status = 'connecting';
@@ -312,19 +453,35 @@ function startWhatsAppWorker() {
   pushLog('whatsapp', 'Agente WhatsApp iniciado.');
 }
 
-function stopWhatsAppWorker() {
-  if (!whatsWorker) return;
-  whatsWorker.send({ type: 'shutdown' });
+function stopWhatsAppWorker(options = {}) {
+  clearWhatsAppWorkerRestartTimer();
+  whatsStopRequested = true;
+  whatsRestartRequested = Boolean(options.restartAfterExit);
   const ref = whatsWorker;
+  if (!ref) {
+    whatsState = { status: 'stopped', qrCode: '', phoneNumber: '', lastError: '' };
+    emit('whatsapp:state', whatsState);
+    pushLog('whatsapp', options.restartAfterExit ? 'Reiniciando agente WhatsApp...' : 'Agente WhatsApp parado.');
+    whatsStopRequested = false;
+    whatsRestartRequested = false;
+    if (options.restartAfterExit && !forceQuit) {
+      scheduleWhatsAppWorkerRestart(String(options.reason || whatsRestartReason), Number(options.delayMs || whatsRestartDelayMs));
+    }
+    return;
+  }
+  if (ref) {
+    try {
+      ref.send({ type: 'shutdown' });
+    } catch {}
+  }
   setTimeout(() => {
-    if (ref && !ref.killed) {
+    if (ref && whatsWorker === ref && !ref.killed) {
       try { ref.kill('SIGTERM'); } catch {}
     }
-  }, 5000);
-  whatsWorker = null;
+  }, Number(options.killDelayMs || WHATSAPP_STOP_GRACE_MS));
   whatsState = { status: 'stopped', qrCode: '', phoneNumber: '', lastError: '' };
   emit('whatsapp:state', whatsState);
-  pushLog('whatsapp', 'Agente WhatsApp parado.');
+  pushLog('whatsapp', options.restartAfterExit ? 'Reiniciando agente WhatsApp...' : 'Agente WhatsApp parado.');
 }
 
 /* ─── Print worker ───────────────────────────────────────────── */
@@ -333,6 +490,9 @@ function startPrintWorker() {
   if (printWorker) return;
   const settings = readSettings();
   if (!settings.printAgentKey || !settings.serverUrl) throw new Error('Faca login antes.');
+  clearPrintWorkerRestartTimer();
+  printStopRequested = false;
+  printRestartRequested = false;
 
   const workerPath = path.join(__dirname, 'agents', 'print-worker.js');
   printWorker = fork(workerPath, [], {
@@ -344,11 +504,13 @@ function startPrintWorker() {
     },
     silent: true,
   });
+  const workerRef = printWorker;
 
   printWorker.stdout?.on('data', (d) => pushLog('print', d.toString().trim()));
   printWorker.stderr?.on('data', (d) => pushLog('print', `[ERR] ${d.toString().trim()}`));
 
   printWorker.on('message', (msg) => {
+    if (printStopRequested) return;
     if (msg.type === 'state') {
       printState = { ...printState, ...msg.data };
       emit('print:state', printState);
@@ -357,11 +519,35 @@ function startPrintWorker() {
     }
   });
 
-  printWorker.on('exit', (code) => {
-    pushLog('print', `Worker encerrado (code ${code}).`);
-    printWorker = null;
+  printWorker.on('error', (error) => {
+    pushLog('print', `Falha no processo do worker: ${error?.message || error}`);
+  });
+
+  printWorker.on('exit', (code, signal) => {
+    const expectedStop = printStopRequested || forceQuit;
+    const restartAfterExit = printRestartRequested;
+    pushLog(
+      'print',
+      expectedStop
+        ? `Worker encerrado (${signal || code || 0}).`
+        : `Worker caiu (${signal || code || 0}). Preparando recuperacao automatica.`,
+    );
+    if (printWorker === workerRef) {
+      printWorker = null;
+    }
+    printStopRequested = false;
+    printRestartRequested = false;
     printState.status = 'stopped';
     emit('print:state', printState);
+
+    if (restartAfterExit && !forceQuit) {
+      schedulePrintWorkerRestart(printRestartReason, printRestartDelayMs);
+      return;
+    }
+
+    if (!expectedStop && !forceQuit) {
+      schedulePrintWorkerRestart('saida inesperada do worker');
+    }
   });
 
   printState.status = 'connecting';
@@ -369,19 +555,35 @@ function startPrintWorker() {
   pushLog('print', 'Agente de impressao iniciado.');
 }
 
-function stopPrintWorker() {
-  if (!printWorker) return;
-  printWorker.send({ type: 'shutdown' });
+function stopPrintWorker(options = {}) {
+  clearPrintWorkerRestartTimer();
+  printStopRequested = true;
+  printRestartRequested = Boolean(options.restartAfterExit);
   const ref = printWorker;
+  if (!ref) {
+    printState = { status: 'stopped', lastError: '', lastJobAt: '' };
+    emit('print:state', printState);
+    pushLog('print', options.restartAfterExit ? 'Reiniciando agente de impressao...' : 'Agente de impressao parado.');
+    printStopRequested = false;
+    printRestartRequested = false;
+    if (options.restartAfterExit && !forceQuit) {
+      schedulePrintWorkerRestart(String(options.reason || printRestartReason), Number(options.delayMs || printRestartDelayMs));
+    }
+    return;
+  }
+  if (ref) {
+    try {
+      ref.send({ type: 'shutdown' });
+    } catch {}
+  }
   setTimeout(() => {
-    if (ref && !ref.killed) {
+    if (ref && printWorker === ref && !ref.killed) {
       try { ref.kill('SIGTERM'); } catch {}
     }
-  }, 3000);
-  printWorker = null;
+  }, Number(options.killDelayMs || PRINT_STOP_GRACE_MS));
   printState = { status: 'stopped', lastError: '', lastJobAt: '' };
   emit('print:state', printState);
-  pushLog('print', 'Agente de impressao parado.');
+  pushLog('print', options.restartAfterExit ? 'Reiniciando agente de impressao...' : 'Agente de impressao parado.');
 }
 
 function stopAllAgents() {
@@ -392,6 +594,11 @@ function stopAllAgents() {
 /* ─── system tray ────────────────────────────────────────────── */
 
 function buildTrayIcon() {
+  const assetIcon = loadImageFromAssets(TRAY_ICON_FILE, { width: 16, height: 16 });
+  if (!assetIcon.isEmpty()) {
+    return assetIcon;
+  }
+
   const svg = `
     <svg xmlns="http://www.w3.org/2000/svg" width="64" height="64">
       <rect width="64" height="64" rx="12" fill="#111827"/>
@@ -430,7 +637,12 @@ function createTray() {
   tray.setContextMenu(ctxMenu);
   tray.on('click', () => {
     if (!mainWindow) return;
-    mainWindow.isVisible() ? (mainWindow.hide(), mainWindow.setSkipTaskbar(true)) : showMainWindow();
+    if (mainWindow.isVisible()) {
+      mainWindow.hide();
+      mainWindow.setSkipTaskbar(true);
+      return;
+    }
+    showMainWindow();
   });
 }
 
@@ -444,6 +656,7 @@ function createMainWindow() {
     minHeight: 560,
     autoHideMenuBar: true,
     title: 'Faceburg Hub',
+    icon: assetPath(WINDOW_ICON_FILE),
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -558,8 +771,7 @@ ipcMain.handle('hub:update-printer', async (_ev, payload) => {
   saveSettings(next);
   // If print agent is running, restart it with new printer
   if (printWorker) {
-    stopPrintWorker();
-    setTimeout(() => startPrintWorker(), 1500);
+    restartPrintWorker('troca de impressora', 1500);
   }
   return next;
 });
@@ -576,8 +788,7 @@ ipcMain.handle('hub:stop-whatsapp', () => {
 });
 
 ipcMain.handle('hub:restart-whatsapp', () => {
-  stopWhatsAppWorker();
-  setTimeout(() => startWhatsAppWorker(), 2000);
+  restartWhatsAppWorker('reinicio manual do operador', 1500);
   return { ok: true };
 });
 
@@ -612,6 +823,7 @@ ipcMain.handle('hub:toggle-autostart', async (_ev, payload) => {
 
 app.whenReady().then(async () => {
   if (!gotLock) return;
+  app.setAppUserModelId(APP_USER_MODEL_ID);
   createMainWindow();
   createTray();
 

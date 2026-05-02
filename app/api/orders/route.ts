@@ -16,6 +16,7 @@ type OrderRow = {
   payment_method: string | null;
   cancellation_reason: string | null;
   created_at: string;
+  updated_at: string;
   items_summary: string | null;
 };
 
@@ -37,6 +38,7 @@ export async function GET() {
       o.payment_method,
       o.cancellation_reason,
       o.created_at,
+      o.updated_at,
       COALESCE(
         STRING_AGG(
           (oi.quantity::text || 'x ' || COALESCE(p.name, 'Produto removido')),
@@ -71,6 +73,7 @@ export async function GET() {
         paymentMethod: row.payment_method || 'pix',
         cancelReason: row.cancellation_reason || '',
         createdAt: row.created_at,
+        updatedAt: row.updated_at,
         itemsSummary: row.items_summary || '',
       })),
     },

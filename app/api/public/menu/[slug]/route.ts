@@ -6,6 +6,11 @@ type TenantRow = {
   name: string;
   slug: string;
   logo_url: string | null;
+  menu_cover_image_url: string | null;
+  issuer_street: string | null;
+  issuer_number: string | null;
+  issuer_city: string | null;
+  issuer_state: string | null;
   whatsapp_phone: string | null;
   prep_time_minutes: number;
   delivery_fee_base: string;
@@ -46,16 +51,26 @@ type OptionRow = {
   id: string;
   group_id: string;
   name: string;
+  image_url: string | null;
   price_addition: string;
   active: boolean;
   display_order: number;
+};
+
+type MenuStoryRow = {
+  id: string;
+  title: string;
+  subtitle: string | null;
+  image_url: string;
+  display_order: number;
+  expires_at: string | null;
 };
 
 export async function GET(_: Request, { params }: { params: Promise<{ slug: string }> }) {
   const { slug } = await params;
 
   const tenantResult = await query<TenantRow>(
-    `SELECT id, name, slug, logo_url, whatsapp_phone, prep_time_minutes, delivery_fee_base::text, store_open, primary_color, status
+    `SELECT id, name, slug, logo_url, menu_cover_image_url, issuer_street, issuer_number, issuer_city, issuer_state, whatsapp_phone, prep_time_minutes, delivery_fee_base::text, store_open, primary_color, status
      FROM tenants
      WHERE slug = $1
      LIMIT 1`,
@@ -99,19 +114,35 @@ export async function GET(_: Request, { params }: { params: Promise<{ slug: stri
   );
 
   const optionsResult = await query<OptionRow>(
-    `SELECT id, group_id, name, price_addition::text, active, display_order
+    `SELECT id, group_id, name, image_url, price_addition::text, active, display_order
      FROM product_options
      WHERE tenant_id = $1 AND active = TRUE
      ORDER BY display_order ASC, name ASC`,
     [tenant.id],
   );
 
-  const optionsByGroup = new Map<string, Array<{ id: string; name: string; priceAddition: number }>>();
+  const storiesResult = await query<MenuStoryRow>(
+    `SELECT id,
+            title,
+            subtitle,
+            image_url,
+            display_order,
+            expires_at
+       FROM menu_stories
+      WHERE tenant_id = $1
+        AND active = TRUE
+        AND (expires_at IS NULL OR expires_at > NOW())
+      ORDER BY display_order ASC, created_at ASC`,
+    [tenant.id],
+  );
+
+  const optionsByGroup = new Map<string, Array<{ id: string; name: string; imageUrl: string | null; priceAddition: number }>>();
   for (const option of optionsResult.rows) {
     const current = optionsByGroup.get(option.group_id) || [];
     current.push({
       id: option.id,
       name: option.name,
+      imageUrl: option.image_url,
       priceAddition: Number(option.price_addition),
     });
     optionsByGroup.set(option.group_id, current);
@@ -125,7 +156,7 @@ export async function GET(_: Request, { params }: { params: Promise<{ slug: stri
       minSelect: number;
       maxSelect: number;
       required: boolean;
-      options: Array<{ id: string; name: string; priceAddition: number }>;
+      options: Array<{ id: string; name: string; imageUrl: string | null; priceAddition: number }>;
     }>
   >();
 
@@ -147,12 +178,25 @@ export async function GET(_: Request, { params }: { params: Promise<{ slug: stri
       name: tenant.name,
       slug: tenant.slug,
       logoUrl: tenant.logo_url,
+      coverImageUrl: tenant.menu_cover_image_url,
+      issuerStreet: tenant.issuer_street,
+      issuerNumber: tenant.issuer_number,
+      issuerCity: tenant.issuer_city,
+      issuerState: tenant.issuer_state,
       whatsappPhone: tenant.whatsapp_phone,
       prepTimeMinutes: Number(tenant.prep_time_minutes || 40),
       deliveryFeeBase: Number(tenant.delivery_fee_base || 5),
       storeOpen: Boolean(tenant.store_open),
       primaryColor: tenant.primary_color,
     },
+    stories: storiesResult.rows.map((story) => ({
+      id: story.id,
+      title: story.title,
+      subtitle: story.subtitle || '',
+      imageUrl: story.image_url,
+      displayOrder: Number(story.display_order || 0),
+      expiresAt: story.expires_at,
+    })),
     categories: categoriesResult.rows,
     products: productsResult.rows.map((product) => ({
       ...product,

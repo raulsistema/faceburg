@@ -85,20 +85,22 @@ body {
 
 .logo-icon {
   width: 64px; height: 64px;
-  background: linear-gradient(135deg, var(--accent), #a78bfa);
+  background: #ffffff url('../assets/logorbs-128.png') center/cover no-repeat;
   border-radius: 16px;
   display: inline-flex; align-items: center; justify-content: center;
-  font-size: 28px; font-weight: 700; color: #fff;
+  font-size: 0; color: transparent;
   margin-bottom: 16px;
-  box-shadow: 0 4px 20px rgba(99, 102, 241, 0.3);
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.25);
+  overflow: hidden;
 }
 
 .logo-icon-sm {
   width: 36px; height: 36px;
-  background: linear-gradient(135deg, var(--accent), #a78bfa);
+  background: #ffffff url('../assets/logorbs-64.png') center/cover no-repeat;
   border-radius: 10px;
   display: inline-flex; align-items: center; justify-content: center;
-  font-size: 16px; font-weight: 700; color: #fff;
+  font-size: 0; color: transparent;
+  overflow: hidden;
 }
 
 .login-card h1 {

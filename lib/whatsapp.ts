@@ -9,6 +9,7 @@ type OrderHeaderRow = {
   customer_phone: string | null;
   delivery_address: string | null;
   payment_method: string | null;
+  delivery_fee_amount: string;
   total: string;
   status: string;
   type: string;
@@ -26,7 +27,19 @@ type AgentConfigRow = {
   tenant_id: string;
   enabled: boolean;
   agent_key: string | null;
+  session_status: string;
+  last_seen_at: string | null;
 };
+
+const HUB_HEARTBEAT_GRACE_MS = 2 * 60 * 1000;
+
+function isHubActive(sessionStatus: string, lastSeenAt: string | null) {
+  if (sessionStatus !== 'ready') return false;
+  if (!lastSeenAt) return false;
+  const parsed = Date.parse(lastSeenAt);
+  if (Number.isNaN(parsed)) return false;
+  return Date.now() - parsed <= HUB_HEARTBEAT_GRACE_MS;
+}
 
 function formatBrl(value: number) {
   return value.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
@@ -62,7 +75,7 @@ export async function buildOrderWhatsappText(
   executor: DbExecutor = { query },
 ) {
   const orderResult = await executor.query<OrderHeaderRow>(
-    `SELECT id, customer_name, customer_phone, delivery_address, payment_method, total::text, status, type, cancellation_reason, created_at
+    `SELECT id, customer_name, customer_phone, delivery_address, payment_method, delivery_fee_amount::text, total::text, status, type, cancellation_reason, created_at
      FROM orders
      WHERE tenant_id = $1
        AND id = $2
@@ -104,6 +117,7 @@ export async function buildOrderWhatsappText(
   const createdAt = new Date(order.created_at);
   const paymentLabel =
     order.payment_method === 'cash' ? 'Dinheiro' : order.payment_method === 'card' ? 'Cartao' : 'Pix';
+  const deliveryFee = Number(order.delivery_fee_amount || 0);
 
   const lines = [
     eventType === 'new_order' ? 'Pedido recebido com sucesso!' : 'Atualizacao do seu pedido',
@@ -121,6 +135,7 @@ export async function buildOrderWhatsappText(
     'Itens:',
     ...itemLines,
     '',
+    order.type === 'delivery' ? `Frete: ${formatBrl(deliveryFee)}` : '',
     `Total: ${formatBrl(Number(order.total || 0))}`,
     order.status === 'cancelled' ? `Motivo: ${order.cancellation_reason || 'Nao informado'}` : '',
   ].filter(Boolean);
@@ -138,7 +153,7 @@ export async function enqueueOrderWhatsappJob(
   executor: DbExecutor = { query },
 ) {
   const configResult = await executor.query<AgentConfigRow>(
-    `SELECT tenant_id, enabled, agent_key
+    `SELECT tenant_id, enabled, agent_key, session_status, last_seen_at
      FROM whatsapp_agents
      WHERE tenant_id = $1
      LIMIT 1`,
@@ -147,6 +162,17 @@ export async function enqueueOrderWhatsappJob(
 
   const config = configResult.rows[0];
   if (!config || !config.enabled || !config.agent_key) {
+    return false;
+  }
+  if (!isHubActive(String(config.session_status || ''), config.last_seen_at || null)) {
+    await executor.query(
+      `UPDATE whatsapp_agents
+       SET enabled = FALSE,
+           updated_at = NOW()
+       WHERE tenant_id = $1
+         AND enabled = TRUE`,
+      [tenantId],
+    );
     return false;
   }
 

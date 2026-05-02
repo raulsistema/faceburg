@@ -60,6 +60,7 @@ async function initializeDb() {
           issuer_city TEXT,
           issuer_state TEXT,
           logo_url TEXT,
+          menu_cover_image_url TEXT,
           whatsapp_phone TEXT,
           prep_time_minutes INTEGER NOT NULL DEFAULT 40,
           delivery_fee_base NUMERIC(10,2) NOT NULL DEFAULT 5,
@@ -75,6 +76,7 @@ async function initializeDb() {
           tenant_id TEXT NOT NULL REFERENCES tenants(id),
           name TEXT NOT NULL,
           icon TEXT,
+          product_type TEXT NOT NULL DEFAULT 'prepared',
           active BOOLEAN DEFAULT TRUE,
           display_order INTEGER DEFAULT 0
         );
@@ -111,6 +113,7 @@ async function initializeDb() {
           tenant_id TEXT NOT NULL REFERENCES tenants(id),
           group_id TEXT NOT NULL REFERENCES product_option_groups(id),
           name TEXT NOT NULL,
+          image_url TEXT,
           price_addition NUMERIC(10,2) NOT NULL DEFAULT 0,
           active BOOLEAN NOT NULL DEFAULT TRUE,
           display_order INTEGER DEFAULT 0
@@ -125,6 +128,10 @@ async function initializeDb() {
           payment_method TEXT,
           cancellation_reason TEXT,
           change_for NUMERIC(10,2),
+          subtotal_amount NUMERIC(10,2) NOT NULL DEFAULT 0,
+          discount_amount NUMERIC(10,2) NOT NULL DEFAULT 0,
+          surcharge_amount NUMERIC(10,2) NOT NULL DEFAULT 0,
+          delivery_fee_amount NUMERIC(10,2) NOT NULL DEFAULT 0,
           total NUMERIC(10,2) NOT NULL,
           status TEXT CHECK(status IN ('pending', 'processing', 'delivering', 'completed', 'cancelled')) DEFAULT 'pending',
           type TEXT CHECK(type IN ('delivery', 'pickup', 'table')) DEFAULT 'delivery',
@@ -141,6 +148,20 @@ async function initializeDb() {
           quantity INTEGER NOT NULL,
           unit_price NUMERIC(10,2) NOT NULL,
           notes TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS order_payments (
+          id TEXT PRIMARY KEY,
+          tenant_id TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+          order_id TEXT NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
+          payment_method_id TEXT,
+          method_type TEXT NOT NULL,
+          method_name TEXT NOT NULL,
+          gross_amount NUMERIC(10,2) NOT NULL,
+          fee_amount NUMERIC(10,2) NOT NULL DEFAULT 0,
+          net_amount NUMERIC(10,2) NOT NULL,
+          settlement_days INTEGER NOT NULL DEFAULT 0,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         );
 
         CREATE TABLE IF NOT EXISTS tenant_users (
@@ -186,6 +207,43 @@ async function initializeDb() {
           active BOOLEAN NOT NULL DEFAULT TRUE,
           is_default BOOLEAN NOT NULL DEFAULT FALSE,
           created_at TIMESTAMPTZ DEFAULT NOW()
+        );
+
+        CREATE TABLE IF NOT EXISTS pdv_tabs (
+          id TEXT PRIMARY KEY,
+          tenant_id TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+          table_number TEXT NOT NULL,
+          customer_name TEXT,
+          customer_phone TEXT,
+          customer_id TEXT,
+          notes TEXT,
+          discount_amount NUMERIC(10,2) NOT NULL DEFAULT 0,
+          surcharge_amount NUMERIC(10,2) NOT NULL DEFAULT 0,
+          delivery_fee_amount NUMERIC(10,2) NOT NULL DEFAULT 0,
+          subtotal_amount NUMERIC(10,2) NOT NULL DEFAULT 0,
+          total_amount NUMERIC(10,2) NOT NULL DEFAULT 0,
+          status TEXT NOT NULL DEFAULT 'open',
+          opened_by_user_id TEXT REFERENCES tenant_users(id) ON DELETE SET NULL,
+          closed_by_user_id TEXT REFERENCES tenant_users(id) ON DELETE SET NULL,
+          order_id TEXT REFERENCES orders(id) ON DELETE SET NULL,
+          opened_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          closed_at TIMESTAMPTZ,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          CONSTRAINT chk_pdv_tabs_status CHECK (status IN ('open', 'closed', 'cancelled'))
+        );
+
+        CREATE TABLE IF NOT EXISTS pdv_tab_items (
+          id TEXT PRIMARY KEY,
+          tab_id TEXT NOT NULL REFERENCES pdv_tabs(id) ON DELETE CASCADE,
+          tenant_id TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+          product_id TEXT NOT NULL REFERENCES products(id),
+          quantity INTEGER NOT NULL,
+          unit_price NUMERIC(10,2) NOT NULL,
+          line_total NUMERIC(10,2) NOT NULL,
+          notes TEXT,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         );
 
         CREATE TABLE IF NOT EXISTS printer_agents (
@@ -261,6 +319,19 @@ async function initializeDb() {
           updated_at TIMESTAMPTZ DEFAULT NOW()
         );
 
+        CREATE TABLE IF NOT EXISTS menu_stories (
+          id TEXT PRIMARY KEY,
+          tenant_id TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+          title TEXT NOT NULL,
+          subtitle TEXT,
+          image_url TEXT NOT NULL,
+          active BOOLEAN NOT NULL DEFAULT TRUE,
+          display_order INTEGER NOT NULL DEFAULT 0,
+          expires_at TIMESTAMPTZ,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+
         CREATE TABLE IF NOT EXISTS cash_register_sessions (
           id TEXT PRIMARY KEY,
           tenant_id TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
@@ -331,6 +402,13 @@ async function initializeDb() {
             WHERE table_name = 'tenants' AND column_name = 'whatsapp_phone'
           ) THEN
             ALTER TABLE tenants ADD COLUMN whatsapp_phone TEXT;
+          END IF;
+
+          IF NOT EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_name = 'tenants' AND column_name = 'menu_cover_image_url'
+          ) THEN
+            ALTER TABLE tenants ADD COLUMN menu_cover_image_url TEXT;
           END IF;
 
           IF NOT EXISTS (
@@ -454,6 +532,13 @@ async function initializeDb() {
 
           IF NOT EXISTS (
             SELECT 1 FROM information_schema.columns
+            WHERE table_name = 'product_options' AND column_name = 'image_url'
+          ) THEN
+            ALTER TABLE product_options ADD COLUMN image_url TEXT;
+          END IF;
+
+          IF NOT EXISTS (
+            SELECT 1 FROM information_schema.columns
             WHERE table_name = 'categories' AND column_name = 'display_order'
           ) THEN
             ALTER TABLE categories ADD COLUMN display_order INTEGER DEFAULT 0;
@@ -471,6 +556,27 @@ async function initializeDb() {
             WHERE table_name = 'products' AND column_name = 'product_type'
           ) THEN
             ALTER TABLE products ADD COLUMN product_type TEXT NOT NULL DEFAULT 'prepared';
+          END IF;
+
+          IF NOT EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_name = 'categories' AND column_name = 'product_type'
+          ) THEN
+            ALTER TABLE categories ADD COLUMN product_type TEXT NOT NULL DEFAULT 'prepared';
+
+            UPDATE categories c
+               SET product_type = COALESCE(
+                 (
+                   SELECT p.product_type
+                     FROM products p
+                    WHERE p.tenant_id = c.tenant_id
+                      AND p.category_id = c.id
+                    GROUP BY p.product_type
+                    ORDER BY COUNT(*) DESC, p.product_type ASC
+                    LIMIT 1
+                 ),
+                 'prepared'
+               );
           END IF;
 
           IF NOT EXISTS (
@@ -520,6 +626,35 @@ async function initializeDb() {
 
           IF NOT EXISTS (
             SELECT 1 FROM information_schema.columns
+            WHERE table_name = 'orders' AND column_name = 'subtotal_amount'
+          ) THEN
+            ALTER TABLE orders ADD COLUMN subtotal_amount NUMERIC(10,2) NOT NULL DEFAULT 0;
+            UPDATE orders SET subtotal_amount = total WHERE subtotal_amount = 0;
+          END IF;
+
+          IF NOT EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_name = 'orders' AND column_name = 'discount_amount'
+          ) THEN
+            ALTER TABLE orders ADD COLUMN discount_amount NUMERIC(10,2) NOT NULL DEFAULT 0;
+          END IF;
+
+          IF NOT EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_name = 'orders' AND column_name = 'surcharge_amount'
+          ) THEN
+            ALTER TABLE orders ADD COLUMN surcharge_amount NUMERIC(10,2) NOT NULL DEFAULT 0;
+          END IF;
+
+          IF NOT EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_name = 'orders' AND column_name = 'delivery_fee_amount'
+          ) THEN
+            ALTER TABLE orders ADD COLUMN delivery_fee_amount NUMERIC(10,2) NOT NULL DEFAULT 0;
+          END IF;
+
+          IF NOT EXISTS (
+            SELECT 1 FROM information_schema.columns
             WHERE table_name = 'orders' AND column_name = 'cancellation_reason'
           ) THEN
             ALTER TABLE orders ADD COLUMN cancellation_reason TEXT;
@@ -553,6 +688,20 @@ async function initializeDb() {
             WHERE table_name = 'customers' AND column_name = 'is_company'
           ) THEN
             ALTER TABLE customers ADD COLUMN is_company BOOLEAN NOT NULL DEFAULT FALSE;
+          END IF;
+
+          IF NOT EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_name = 'pdv_tabs' AND column_name = 'surcharge_amount'
+          ) THEN
+            ALTER TABLE pdv_tabs ADD COLUMN surcharge_amount NUMERIC(10,2) NOT NULL DEFAULT 0;
+          END IF;
+
+          IF NOT EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_name = 'pdv_tabs' AND column_name = 'delivery_fee_amount'
+          ) THEN
+            ALTER TABLE pdv_tabs ADD COLUMN delivery_fee_amount NUMERIC(10,2) NOT NULL DEFAULT 0;
           END IF;
 
           IF NOT EXISTS (
@@ -654,6 +803,21 @@ async function initializeDb() {
       `);
 
       await client.query(`
+        CREATE INDEX IF NOT EXISTS idx_pdv_tabs_tenant_status_opened_at
+          ON pdv_tabs(tenant_id, status, opened_at DESC);
+      `);
+
+      await client.query(`
+        CREATE INDEX IF NOT EXISTS idx_pdv_tab_items_tab_id
+          ON pdv_tab_items(tab_id);
+      `);
+
+      await client.query(`
+        CREATE INDEX IF NOT EXISTS idx_pdv_tab_items_tenant_tab
+          ON pdv_tab_items(tenant_id, tab_id);
+      `);
+
+      await client.query(`
         CREATE INDEX IF NOT EXISTS idx_print_jobs_tenant_status_created
           ON print_jobs(tenant_id, status, created_at);
       `);
@@ -699,8 +863,18 @@ async function initializeDb() {
       `);
 
       await client.query(`
+        CREATE INDEX IF NOT EXISTS idx_order_payments_tenant_order
+          ON order_payments(tenant_id, order_id);
+      `);
+
+      await client.query(`
         CREATE INDEX IF NOT EXISTS idx_payment_methods_tenant_active
           ON payment_methods(tenant_id, active);
+      `);
+
+      await client.query(`
+        CREATE INDEX IF NOT EXISTS idx_menu_stories_tenant_active_order
+          ON menu_stories(tenant_id, active, display_order, expires_at);
       `);
 
       await client.query(`
@@ -736,12 +910,12 @@ async function initializeDb() {
       const seedOption3Id = `seed-${tenantId}-opt-3`;
 
       await client.query(
-        `INSERT INTO categories (id, tenant_id, name, icon)
+        `INSERT INTO categories (id, tenant_id, name, icon, product_type)
          VALUES
-          ($1, $3, $4, $5),
-          ($2, $3, $6, $7)
+          ($1, $3, $4, $5, $8),
+          ($2, $3, $6, $7, $9)
          ON CONFLICT (id) DO NOTHING`,
-        [category1Id, category2Id, tenantId, 'Pizzas', 'pizza', 'Burgers', 'hamburger'],
+        [category1Id, category2Id, tenantId, 'Pizzas', 'pizza', 'Burgers', 'hamburger', 'size_based', 'prepared'],
       );
 
       await client.query(

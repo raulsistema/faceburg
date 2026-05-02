@@ -2,10 +2,14 @@ import { NextResponse } from 'next/server';
 import { query } from '@/lib/db';
 import { getValidatedTenantSession } from '@/lib/tenant-auth';
 
+const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
+
 type TenantSettingsRow = {
   prep_time_minutes: number;
   delivery_fee_base: string;
   store_open: boolean;
+  logo_url: string | null;
+  menu_cover_image_url: string | null;
   whatsapp_phone: string | null;
   issuer_name: string | null;
   issuer_trade_name: string | null;
@@ -26,6 +30,8 @@ const SETTINGS_SELECT_SQL = `SELECT
   prep_time_minutes,
   delivery_fee_base::text,
   store_open,
+  logo_url,
+  menu_cover_image_url,
   whatsapp_phone,
   issuer_name,
   issuer_trade_name,
@@ -48,6 +54,23 @@ function hasOwn(body: Record<string, unknown>, key: string) {
   return Object.prototype.hasOwnProperty.call(body, key);
 }
 
+function estimateDataUrlBytes(value: string) {
+  const commaIndex = value.indexOf(',');
+  if (commaIndex === -1) return 0;
+  const base64 = value.slice(commaIndex + 1);
+  return Math.floor((base64.length * 3) / 4);
+}
+
+function validateImagePayload(imageUrl: string) {
+  if (!imageUrl) return null;
+  if (!imageUrl.startsWith('data:image/')) return null;
+  const bytes = estimateDataUrlBytes(imageUrl);
+  if (!bytes || bytes > MAX_IMAGE_BYTES) {
+    return 'Imagem deve ter no maximo 5 MB.';
+  }
+  return null;
+}
+
 export async function GET() {
   const session = await getValidatedTenantSession();
   if (!session) {
@@ -65,6 +88,8 @@ export async function GET() {
     prepTimeMinutes: Number(row.prep_time_minutes || 40),
     deliveryFeeBase: Number(row.delivery_fee_base || 5),
     storeOpen: Boolean(row.store_open),
+    logoUrl: row.logo_url || '',
+    coverImageUrl: row.menu_cover_image_url || '',
     whatsappPhone: row.whatsapp_phone || '',
     issuerName: row.issuer_name || '',
     issuerTradeName: row.issuer_trade_name || '',
@@ -110,6 +135,12 @@ export async function PATCH(request: Request) {
   const storeOpen = hasOwn(body, 'storeOpen')
     ? Boolean(body.storeOpen)
     : Boolean(current.store_open);
+  const logoUrl = hasOwn(body, 'logoUrl')
+    ? String(body.logoUrl ?? '').trim()
+    : String(current.logo_url || '').trim();
+  const coverImageUrl = hasOwn(body, 'coverImageUrl')
+    ? String(body.coverImageUrl ?? '').trim()
+    : String(current.menu_cover_image_url || '').trim();
   const whatsappPhone = hasOwn(body, 'whatsappPhone')
     ? String(body.whatsappPhone ?? '').trim()
     : String(current.whatsapp_phone || '').trim();
@@ -160,31 +191,43 @@ export async function PATCH(request: Request) {
   if (!Number.isFinite(deliveryFeeBase) || deliveryFeeBase < 0) {
     return NextResponse.json({ error: 'Taxa de entrega invalida.' }, { status: 400 });
   }
+  const logoImageValidationError = validateImagePayload(logoUrl);
+  if (logoImageValidationError) {
+    return NextResponse.json({ error: logoImageValidationError }, { status: 400 });
+  }
+  const coverImageValidationError = validateImagePayload(coverImageUrl);
+  if (coverImageValidationError) {
+    return NextResponse.json({ error: coverImageValidationError }, { status: 400 });
+  }
 
   await query(
     `UPDATE tenants
      SET prep_time_minutes = $1,
          delivery_fee_base = $2,
          store_open = $3,
-         whatsapp_phone = NULLIF($4, ''),
-         issuer_name = NULLIF($5, ''),
-         issuer_trade_name = NULLIF($6, ''),
-         issuer_document = NULLIF($7, ''),
-         issuer_state_registration = NULLIF($8, ''),
-         issuer_email = NULLIF($9, ''),
-         issuer_phone = NULLIF($10, ''),
-         issuer_zip_code = NULLIF($11, ''),
-         issuer_street = NULLIF($12, ''),
-         issuer_number = NULLIF($13, ''),
-         issuer_complement = NULLIF($14, ''),
-         issuer_neighborhood = NULLIF($15, ''),
-         issuer_city = NULLIF($16, ''),
-         issuer_state = NULLIF($17, '')
-     WHERE id = $18`,
+         logo_url = NULLIF($4, ''),
+         menu_cover_image_url = NULLIF($5, ''),
+         whatsapp_phone = NULLIF($6, ''),
+         issuer_name = NULLIF($7, ''),
+         issuer_trade_name = NULLIF($8, ''),
+         issuer_document = NULLIF($9, ''),
+         issuer_state_registration = NULLIF($10, ''),
+         issuer_email = NULLIF($11, ''),
+         issuer_phone = NULLIF($12, ''),
+         issuer_zip_code = NULLIF($13, ''),
+         issuer_street = NULLIF($14, ''),
+         issuer_number = NULLIF($15, ''),
+         issuer_complement = NULLIF($16, ''),
+         issuer_neighborhood = NULLIF($17, ''),
+         issuer_city = NULLIF($18, ''),
+         issuer_state = NULLIF($19, '')
+     WHERE id = $20`,
     [
       Math.round(prepTimeMinutes),
       deliveryFeeBase,
       storeOpen,
+      logoUrl,
+      coverImageUrl,
       whatsappPhone,
       issuerName,
       issuerTradeName,

@@ -3,13 +3,14 @@
 import React from 'react';
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
-import { LayoutDashboard, ShoppingBag, Monitor, UtensilsCrossed, Users, Settings, LogOut, Landmark, CreditCard, X } from 'lucide-react';
+import { LayoutDashboard, ShoppingBag, Monitor, UtensilsCrossed, Users, Settings, LogOut, Landmark, CreditCard, X, BarChart3 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
 const navItems = [
   { name: 'Dashboard', icon: LayoutDashboard, href: '/' },
   { name: 'Pedidos', icon: ShoppingBag, href: '/pedidos' },
   { name: 'PDV / Caixa', icon: Monitor, href: '/pdv' },
+  { name: 'Relatorios', icon: BarChart3, href: '/relatorios' },
   { name: 'Financeiro', icon: Landmark, href: '/financeiro' },
   { name: 'Formas Pagamento', icon: CreditCard, href: '/formas-pagamento' },
   { name: 'Clientes', icon: Users, href: '/clientes' },

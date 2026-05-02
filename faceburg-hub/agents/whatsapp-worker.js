@@ -13,11 +13,14 @@ const AGENT_KEY = String(process.env.HUB_AGENT_KEY || process.env.WHATS_AGENT_KE
 const SLUG = String(process.env.HUB_SLUG || process.env.WHATS_SLUG || '').trim().toLowerCase();
 
 const POLL_FALLBACK_MS = Number(process.env.HUB_WHATS_POLL_FALLBACK_MS || process.env.WHATS_POLL_FALLBACK_MS || 15000);
-const WS_RECONNECT_MS = 3000;
+const WS_RECONNECT_BASE_MS = Number(process.env.HUB_WHATS_WS_RECONNECT_MS || process.env.WHATS_WS_RECONNECT_MS || 3000);
+const WS_RECONNECT_MAX_MS = Number(process.env.HUB_WHATS_WS_RECONNECT_MAX_MS || process.env.WHATS_WS_RECONNECT_MAX_MS || 60000);
+const WS_LOG_COOLDOWN_MS = Number(process.env.HUB_WHATS_WS_LOG_COOLDOWN_MS || process.env.WHATS_WS_LOG_COOLDOWN_MS || 60000);
 const HEARTBEAT_MS = Number(process.env.HUB_WHATS_HEARTBEAT_MS || process.env.WHATS_HEARTBEAT_MS || 180000);
 const INIT_TIMEOUT_MS = 120000;
 const RESTART_DELAY_MS = 5000;
 const WATCHDOG_INTERVAL_MS = 30000;
+const TAKEOVER_TIMEOUT_MS = Number(process.env.HUB_WHATS_TAKEOVER_TIMEOUT_MS || process.env.WHATS_TAKEOVER_TIMEOUT_MS || 0);
 const AUTH_BACKOFF_MS = Number(process.env.HUB_WHATS_AUTH_BACKOFF_MS || process.env.WHATS_AUTH_BACKOFF_MS || 600000);
 const LOCK_PORT = Number(process.env.WHATS_AGENT_LOCK_PORT || 49331);
 
@@ -31,11 +34,18 @@ let drainingJobs = false;
 let ws = null;
 let wsConnected = false;
 let wsReconnectTimer = null;
-let lastConnectedSyncAt = 0;
 let heartbeatTimer = null;
 let lastErrorMessage = '';
 let lockServer = null;
 let authBlockedUntil = 0;
+let watchdogTimer = null;
+let wsReconnectAttempt = 0;
+let wsLastLogAt = 0;
+let wsLastErrorReason = '';
+let wsFallbackActive = false;
+let wsConnectedOnce = false;
+let lastAuthenticatedLogAt = 0;
+let lastStateLabel = '';
 
 /* ─── IPC to main ────────────────────────────────────────────────── */
 
@@ -112,6 +122,88 @@ async function fetchJson(url, opts = {}) {
   return json;
 }
 
+function formatRetryDelay(ms) {
+  return `${Math.max(1, Math.round(ms / 1000))}s`;
+}
+
+function getWsReconnectDelay() {
+  const attempt = Math.max(0, wsReconnectAttempt - 1);
+  return Math.min(WS_RECONNECT_MAX_MS, WS_RECONNECT_BASE_MS * (2 ** attempt));
+}
+
+function shouldLogWsFallback() {
+  return !wsLastLogAt || Date.now() - wsLastLogAt >= WS_LOG_COOLDOWN_MS;
+}
+
+function announceWsFallback(reason, delayMs) {
+  const safeReason = String(reason || 'gateway indisponivel').trim();
+  if (!wsFallbackActive) {
+    wsFallbackActive = true;
+    wsLastLogAt = Date.now();
+    sendLog(`Realtime indisponivel (${safeReason}). Usando fallback por polling. Nova tentativa em ${formatRetryDelay(delayMs)}.`);
+    return;
+  }
+
+  if (shouldLogWsFallback()) {
+    wsLastLogAt = Date.now();
+    sendLog(`Realtime ainda indisponivel (${safeReason}). Tentando novamente em ${formatRetryDelay(delayMs)}.`);
+  }
+}
+
+function markWsConnected() {
+  const recoveredFromFallback = wsFallbackActive || !wsConnectedOnce;
+  wsConnected = true;
+  wsReconnectAttempt = 0;
+  wsLastErrorReason = '';
+  wsFallbackActive = false;
+  updateState();
+  if (recoveredFromFallback) {
+    sendLog('Realtime conectado.');
+  }
+  wsConnectedOnce = true;
+}
+
+function getCurrentPhoneNumber() {
+  return String(client?.info?.wid?.user || '');
+}
+
+function bindBrowserDiagnostics(nextClient) {
+  if (!nextClient || nextClient.__faceburgDiagnosticsBound) return;
+  nextClient.__faceburgDiagnosticsBound = true;
+
+  const restartFromBrowser = (reason, detail) => {
+    if (client !== nextClient || shuttingDown) return;
+    ready = false;
+    lastErrorMessage = detail || reason;
+    updateState({
+      status: 'disconnected',
+      qrCode: '',
+      phoneNumber: getCurrentPhoneNumber(),
+      lastError: lastErrorMessage,
+    });
+    sendLog(`WhatsApp Chromium: ${reason}. Reiniciando sessao.`);
+    scheduleRestart(`chromium ${reason}`, { wipeSession: false, delayMs: 3000 });
+  };
+
+  if (nextClient.pupBrowser?.on) {
+    nextClient.pupBrowser.on('disconnected', () => {
+      restartFromBrowser('browser disconnected', 'browser_disconnected');
+    });
+  }
+
+  if (nextClient.pupPage?.on) {
+    nextClient.pupPage.on('error', (err) => {
+      restartFromBrowser('page error', err instanceof Error ? err.message : String(err || 'page_error'));
+    });
+    nextClient.pupPage.on('pageerror', (err) => {
+      restartFromBrowser('page runtime error', err instanceof Error ? err.message : String(err || 'page_runtime_error'));
+    });
+    nextClient.pupPage.on('close', () => {
+      restartFromBrowser('page closed', 'page_closed');
+    });
+  }
+}
+
 /* ─── server communication ───────────────────────────────────────── */
 
 async function postState(state) {
@@ -172,7 +264,6 @@ async function drainJobs(reason) {
     }
     if (!wsConnected) await sleep(4000);
   } finally { drainingJobs = false; }
-  if (reason === 'connected-sync') lastConnectedSyncAt = Date.now();
 }
 
 /* ─── realtime websocket ─────────────────────────────────────────── */
@@ -185,35 +276,51 @@ function buildWsUrl() {
   return `${proto}//${host}/ws/agents`;
 }
 
-function scheduleWsReconnect() {
+function scheduleWsReconnect(reason = '') {
   if (wsReconnectTimer || shuttingDown) return;
-  wsReconnectTimer = setTimeout(() => { wsReconnectTimer = null; connectRealtime(); }, WS_RECONNECT_MS);
+  wsReconnectAttempt += 1;
+  const delayMs = getWsReconnectDelay();
+  announceWsFallback(reason, delayMs);
+  wsReconnectTimer = setTimeout(() => { wsReconnectTimer = null; connectRealtime(); }, delayMs);
 }
 
 function connectRealtime() {
   if (!AGENT_KEY || shuttingDown) return;
   const url = `${buildWsUrl()}?kind=whatsapp`;
+  let opened = false;
   try {
     ws = new WebSocket(url, { headers: { 'x-agent-key': AGENT_KEY } });
-  } catch { scheduleWsReconnect(); return; }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error || 'falha ao iniciar websocket');
+    wsConnected = false;
+    updateState();
+    scheduleWsReconnect(message);
+    return;
+  }
 
   ws.on('open', () => {
-    wsConnected = true;
+    opened = true;
     authBlockedUntil = 0;
-    updateState();
-    sendLog('Realtime conectado.');
+    markWsConnected();
     void drainJobs('ws-open');
   });
   ws.on('message', (raw) => {
     try { if (JSON.parse(String(raw))?.type === 'job_available') void drainJobs('ws-event'); } catch {}
   });
-  ws.on('close', () => {
+  ws.on('close', (code, reasonBuffer) => {
+    const closeReason = String(reasonBuffer || '').trim();
+    const failureReason =
+      wsLastErrorReason ||
+      closeReason ||
+      (opened ? `conexao encerrada (${code || 0})` : `nao foi possivel conectar (${code || 0})`);
+    wsLastErrorReason = '';
     wsConnected = false;
     updateState();
-    sendLog('Realtime desconectado. Entrando em modo fallback.');
-    scheduleWsReconnect();
+    if (shuttingDown) return;
+    scheduleWsReconnect(failureReason);
   });
-  ws.on('error', () => {
+  ws.on('error', (error) => {
+    wsLastErrorReason = error instanceof Error ? error.message : String(error || 'erro websocket');
     wsConnected = false;
     updateState();
   });
@@ -251,6 +358,10 @@ async function startClient(opts = {}) {
   const browserPath = getBrowserPath();
   const nextClient = new Client({
     authStrategy: new LocalAuth({ clientId: getClientId(), dataPath: AUTH_PATH }),
+    takeoverOnConflict: true,
+    takeoverTimeoutMs: TAKEOVER_TIMEOUT_MS,
+    deviceName: `Faceburg-${os.hostname()}`.slice(0, 24),
+    browserName: 'Chrome',
     puppeteer: {
       executablePath: browserPath || undefined,
       headless: true,
@@ -258,6 +369,7 @@ async function startClient(opts = {}) {
       args: [
         '--disable-dev-shm-usage', '--disable-background-timer-throttling',
         '--disable-backgrounding-occluded-windows', '--disable-renderer-backgrounding',
+        '--disable-extensions', '--disable-sync', '--disable-cache',
         '--no-first-run', '--no-default-browser-check',
       ],
     },
@@ -279,14 +391,60 @@ async function startClient(opts = {}) {
     ready = true;
     const phone = String(nextClient.info?.wid?.user || '');
     lastErrorMessage = '';
+    bindBrowserDiagnostics(nextClient);
     updateState({ status: 'ready', qrCode: '', phoneNumber: phone, lastError: '' });
     sendLog(`Conectado ao WhatsApp (${phone || 'sem numero'}).`);
     await postState({ sessionStatus: 'ready', qrCode: '', phoneNumber: phone, lastError: '' });
     void drainJobs('whatsapp-ready');
   });
 
+  nextClient.on('authenticated', () => {
+    lastErrorMessage = '';
+    const now = Date.now();
+    if (now - lastAuthenticatedLogAt >= 10000) {
+      sendLog('Sessao WhatsApp autenticada.');
+      lastAuthenticatedLogAt = now;
+    }
+  });
+
+  nextClient.on('change_state', async (state) => {
+    const stateLabel = String(state || '').toUpperCase();
+    if (stateLabel && stateLabel !== lastStateLabel) {
+      sendLog(`Estado WhatsApp: ${stateLabel}`);
+      lastStateLabel = stateLabel;
+    }
+
+    if (stateLabel === 'OPENING' || stateLabel === 'PAIRING') {
+      updateState({ status: 'connecting', lastError: '' });
+      return;
+    }
+
+    if (stateLabel === 'CONFLICT') {
+      sendLog('Conflito detectado. Assumindo a sessao local automaticamente.');
+      return;
+    }
+
+    if (stateLabel === 'TIMEOUT' || stateLabel === 'PROXYBLOCK') {
+      ready = false;
+      lastErrorMessage = `state_${stateLabel.toLowerCase()}`;
+      updateState({ status: 'disconnected', qrCode: '', phoneNumber: getCurrentPhoneNumber(), lastError: lastErrorMessage });
+      await postState({ sessionStatus: 'disconnected', qrCode: '', phoneNumber: getCurrentPhoneNumber(), lastError: lastErrorMessage });
+      scheduleRestart(`state ${stateLabel.toLowerCase()}`, { wipeSession: false, delayMs: 3000 });
+      return;
+    }
+
+    if (stateLabel === 'DEPRECATED_VERSION') {
+      ready = false;
+      lastErrorMessage = 'deprecated_version';
+      updateState({ status: 'disconnected', qrCode: '', phoneNumber: getCurrentPhoneNumber(), lastError: lastErrorMessage });
+      await postState({ sessionStatus: 'disconnected', qrCode: '', phoneNumber: getCurrentPhoneNumber(), lastError: lastErrorMessage });
+      scheduleRestart('state deprecated_version', { wipeSession: false, delayMs: 3000 });
+    }
+  });
+
   nextClient.on('auth_failure', async () => {
     ready = false;
+    lastErrorMessage = 'auth_failure';
     updateState({ status: 'auth_failure', qrCode: '', phoneNumber: '', lastError: 'auth_failure' });
     sendLog('Falha de autenticacao no WhatsApp.');
     await postState({ sessionStatus: 'auth_failure', qrCode: '', phoneNumber: '', lastError: 'auth_failure' });
@@ -295,6 +453,7 @@ async function startClient(opts = {}) {
 
   nextClient.on('disconnected', async () => {
     ready = false;
+    lastErrorMessage = 'disconnected';
     updateState({ status: 'disconnected', qrCode: '', phoneNumber: '', lastError: 'disconnected' });
     sendLog('Sessao WhatsApp desconectada.');
     await postState({ sessionStatus: 'disconnected', qrCode: '', phoneNumber: '', lastError: 'disconnected' });
@@ -309,6 +468,7 @@ async function startClient(opts = {}) {
       nextClient.initialize(),
       sleep(INIT_TIMEOUT_MS).then(() => { throw new Error('Timeout ao inicializar WhatsApp.'); }),
     ]);
+    bindBrowserDiagnostics(nextClient);
   } finally { startingClient = false; }
 }
 
@@ -339,8 +499,16 @@ async function main() {
   }
 
   // watchdog
-  setInterval(() => {
+  watchdogTimer = setInterval(() => {
     if (shuttingDown || startingClient || restartTimer) return;
+    if (client?.pupBrowser?.isConnected && !client.pupBrowser.isConnected()) {
+      scheduleRestart('watchdog browser disconnected', { wipeSession: false, delayMs: 3000 });
+      return;
+    }
+    if (client?.pupPage?.isClosed?.()) {
+      scheduleRestart('watchdog page closed', { wipeSession: false, delayMs: 3000 });
+      return;
+    }
     if (!ready && lastQrAt > 0 && Date.now() - lastQrAt > 5 * 60 * 1000) {
       scheduleRestart('watchdog qr stale', { wipeSession: false, delayMs: 3000 });
     }
@@ -365,6 +533,7 @@ async function shutdown() {
   if (restartTimer) { clearTimeout(restartTimer); restartTimer = null; }
   if (wsReconnectTimer) { clearTimeout(wsReconnectTimer); wsReconnectTimer = null; }
   if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; }
+  if (watchdogTimer) { clearInterval(watchdogTimer); watchdogTimer = null; }
   if (ws) try { ws.close(); } catch {} 
   if (lockServer) {
     try { lockServer.close(); } catch {}

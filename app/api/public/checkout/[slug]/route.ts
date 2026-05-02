@@ -10,6 +10,14 @@ class CheckoutValidationError extends Error {}
 type TenantRow = {
   id: string;
   status: string;
+  store_open: boolean;
+  delivery_fee_base: string;
+};
+
+type PaymentMethodRow = {
+  id: string;
+  name: string;
+  method_type: string;
 };
 
 type CustomerRow = {
@@ -131,6 +139,10 @@ function normalizePaymentMethod(value: string) {
   return 'pix';
 }
 
+function roundMoney(value: number) {
+  return Number(value.toFixed(2));
+}
+
 function normalizeOrderType(value: string) {
   const type = value.trim().toLowerCase();
   if (type === 'delivery' || type === 'pickup' || type === 'table') {
@@ -182,6 +194,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ slu
         }
       : null;
   const paymentMethod = normalizePaymentMethod(String(body.paymentMethod || 'pix'));
+  const paymentMethodId = String(body.paymentMethodId || '').trim();
   const orderType = normalizeOrderType(String(body.orderType || 'delivery'));
   const changeForRaw = Number(body.changeFor || 0);
   const changeFor = Number.isFinite(changeForRaw) && changeForRaw > 0 ? changeForRaw : null;
@@ -195,12 +208,16 @@ export async function POST(request: Request, { params }: { params: Promise<{ slu
     return NextResponse.json({ error: 'Endereco obrigatorio para entrega.' }, { status: 400 });
   }
 
+  if (orderType === 'delivery' && !selectedAddressId && !addressPayload?.number.trim()) {
+    return NextResponse.json({ error: 'Numero do endereco obrigatorio para entrega.' }, { status: 400 });
+  }
+
   if (!Array.isArray(items) || items.length === 0) {
     return NextResponse.json({ error: 'Carrinho vazio.' }, { status: 400 });
   }
 
   const tenantResult = await query<TenantRow>(
-    `SELECT id, status
+    `SELECT id, status, store_open, delivery_fee_base::text
      FROM tenants
      WHERE slug = $1
      LIMIT 1`,
@@ -213,6 +230,9 @@ export async function POST(request: Request, { params }: { params: Promise<{ slu
   const tenant = tenantResult.rows[0];
   if (tenant.status !== 'active') {
     return NextResponse.json({ error: 'Empresa inativa.' }, { status: 403 });
+  }
+  if (!tenant.store_open) {
+    return NextResponse.json({ error: 'Delivery indisponivel no momento. Tente novamente mais tarde.' }, { status: 403 });
   }
 
   const normalizedItems = items
@@ -404,6 +424,55 @@ export async function POST(request: Request, { params }: { params: Promise<{ slu
     return NextResponse.json({ error: 'Total invalido.' }, { status: 400 });
   }
 
+  const subtotalAmount = roundMoney(total);
+  const deliveryFeeAmount = orderType === 'delivery' ? roundMoney(Number(tenant.delivery_fee_base || 0)) : 0;
+  let selectedPaymentMethod: PaymentMethodRow | null = null;
+  if (paymentMethodId) {
+    const byId = await query<PaymentMethodRow>(
+      `SELECT id, name, method_type
+       FROM payment_methods
+       WHERE tenant_id = $1
+         AND id = $2
+         AND active = TRUE
+       LIMIT 1`,
+      [tenant.id, paymentMethodId],
+    );
+    selectedPaymentMethod = byId.rows[0] || null;
+    if (!selectedPaymentMethod) {
+      return NextResponse.json({ error: 'Forma de pagamento invalida ou inativa.' }, { status: 400 });
+    }
+  } else {
+    const byType = await query<PaymentMethodRow>(
+      `SELECT id, name, method_type
+       FROM payment_methods
+       WHERE tenant_id = $1
+         AND method_type = $2
+         AND active = TRUE
+       ORDER BY created_at ASC
+       LIMIT 1`,
+      [tenant.id, paymentMethod],
+    );
+    selectedPaymentMethod = byType.rows[0] || null;
+  }
+
+  if (!selectedPaymentMethod) {
+    return NextResponse.json(
+      { error: 'A loja ainda nao configurou uma forma de pagamento valida para este pedido.' },
+      { status: 400 },
+    );
+  }
+
+  const baseTotal = roundMoney(subtotalAmount + deliveryFeeAmount);
+  const paymentFeeAmount = 0;
+  const orderTotal = baseTotal;
+  const paymentNetAmount = orderTotal;
+
+  const resolvedPaymentMethod = selectedPaymentMethod.method_type;
+
+  if (resolvedPaymentMethod === 'cash' && changeFor && changeFor < orderTotal) {
+    return NextResponse.json({ error: 'Troco deve ser maior ou igual ao total.' }, { status: 400 });
+  }
+
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
@@ -476,8 +545,14 @@ export async function POST(request: Request, { params }: { params: Promise<{ slu
         if (!selectedAddressResult.rowCount) {
           throw new CheckoutValidationError('Endereco selecionado nao encontrado.');
         }
+        if (!String(selectedAddressResult.rows[0].number || '').trim()) {
+          throw new CheckoutValidationError('Endereco selecionado precisa ter numero.');
+        }
         resolvedDeliveryAddress = formatAddressLine(selectedAddressResult.rows[0]);
       } else if (addressPayload?.street) {
+        if (!addressPayload.number.trim()) {
+          throw new CheckoutValidationError('Numero do endereco obrigatorio para entrega.');
+        }
         const firstAddressResult = await client.query<{ total: string }>(
           `SELECT COUNT(*)::text AS total
            FROM customer_addresses
@@ -546,8 +621,6 @@ export async function POST(request: Request, { params }: { params: Promise<{ slu
     }
 
     const orderId = randomUUID();
-    const feeAmount = 0;
-    const netAmount = total;
     await client.query(
       `INSERT INTO orders
        (
@@ -558,6 +631,10 @@ export async function POST(request: Request, { params }: { params: Promise<{ slu
          delivery_address,
          payment_method,
          payment_method_id,
+         subtotal_amount,
+         discount_amount,
+         surcharge_amount,
+         delivery_fee_amount,
          payment_fee_amount,
          payment_net_amount,
          change_for,
@@ -569,7 +646,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ slu
        )
        VALUES
        (
-        $1, $2, $3, $4, NULLIF($5, ''), $6, $7, $8, $9, $10, $11, 'pending', $12, 'pending', NOW()
+        $1, $2, $3, $4, NULLIF($5, ''), $6, $7, $8, 0, 0, $9, $10, $11, $12, $13, 'pending', $14, 'pending', NOW()
        )`,
       [
         orderId,
@@ -577,12 +654,14 @@ export async function POST(request: Request, { params }: { params: Promise<{ slu
         customerName,
         customerPhoneDigits,
         orderType === 'delivery' ? resolvedDeliveryAddress : '',
-        paymentMethod,
+        resolvedPaymentMethod,
         null,
-        feeAmount,
-        netAmount,
+        subtotalAmount,
+        deliveryFeeAmount,
+        paymentFeeAmount,
+        paymentNetAmount,
         changeFor,
-        total,
+        orderTotal,
         orderType,
       ],
     );
@@ -606,7 +685,9 @@ export async function POST(request: Request, { params }: { params: Promise<{ slu
     return NextResponse.json({
       ok: true,
       orderId,
-      total,
+      total: orderTotal,
+      paymentMethodId: null,
+      paymentFeeAmount,
       message: 'Pedido recebido com sucesso.',
       communication: {
         printQueued: wasJobQueued(printDispatch),

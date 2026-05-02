@@ -14,6 +14,14 @@ type WhatsAppConfig = {
   lastSeenAt: string | null;
 };
 
+type WhatsAppConfigSaveResponse = {
+  ok?: boolean;
+  enabled?: boolean;
+  requiresHubSetup?: boolean;
+  message?: string;
+  error?: string;
+};
+
 function sessionLabel(status: string) {
   if (status === 'ready') return 'Conectado';
   if (status === 'qr') return 'Aguardando leitura do QR';
@@ -37,6 +45,7 @@ export default function WhatsAppAgentSettings({ initialData }: { initialData?: W
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
+  const [messageTone, setMessageTone] = useState<'success' | 'warning'>('success');
   const [qrDataUrl, setQrDataUrl] = useState('');
   const [isInView, setIsInView] = useState(false);
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -205,12 +214,16 @@ export default function WhatsAppAgentSettings({ initialData }: { initialData?: W
           rotateKey,
         }),
       });
-      const json = await response.json();
+      const json = (await response.json()) as WhatsAppConfigSaveResponse;
       if (!response.ok) {
         setError(json.error || 'Falha ao salvar configuracao.');
         return;
       }
-      setMessage(rotateKey ? 'Nova chave do WhatsApp gerada.' : 'Configuracao do WhatsApp salva.');
+      if (typeof json.enabled === 'boolean') {
+        setEnabled(json.enabled);
+      }
+      setMessageTone(json.requiresHubSetup ? 'warning' : 'success');
+      setMessage(json.message || (rotateKey ? 'Nova chave do WhatsApp gerada.' : 'Configuracao do WhatsApp salva.'));
       await loadConfig();
     } catch {
       setError('Falha ao salvar configuracao do WhatsApp.');
@@ -223,6 +236,7 @@ export default function WhatsAppAgentSettings({ initialData }: { initialData?: W
     if (!data?.agentKey) return;
     try {
       await navigator.clipboard.writeText(data.agentKey);
+      setMessageTone('success');
       setMessage('Chave do WhatsApp copiada para a area de transferencia.');
     } catch {
       setError('Nao foi possivel copiar a chave.');
@@ -246,7 +260,7 @@ export default function WhatsAppAgentSettings({ initialData }: { initialData?: W
       </div>
 
       {error ? <p className="text-sm text-red-500">{error}</p> : null}
-      {message ? <p className="text-sm text-emerald-600">{message}</p> : null}
+      {message ? <p className={`text-sm ${messageTone === 'warning' ? 'text-amber-700' : 'text-emerald-600'}`}>{message}</p> : null}
 
       {loading ? (
         <p className="text-sm text-slate-500">Carregando...</p>

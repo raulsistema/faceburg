@@ -41,7 +41,7 @@ export async function GET(request: Request) {
     const agent = agentResult.rows[0];
     if (!agent.enabled) {
       await client.query('ROLLBACK');
-      return NextResponse.json({ error: 'Agent disabled.' }, { status: 403 });
+      return NextResponse.json({ ok: true, enabled: false, job: null });
     }
 
     await client.query(

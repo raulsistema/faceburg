@@ -14,6 +14,7 @@ type OrderRow = {
   payment_method: string | null;
   change_for: string | null;
   created_at: string;
+  updated_at: string;
 };
 
 type OrderItemRow = {
@@ -33,7 +34,7 @@ export async function GET(_: Request, { params }: { params: Promise<{ id: string
 
   const { id } = await params;
   const orderResult = await query<OrderRow>(
-    `SELECT id, customer_name, customer_phone, delivery_address, total::text, status, cancellation_reason, type, payment_method, change_for::text, created_at
+    `SELECT id, customer_name, customer_phone, delivery_address, total::text, status, cancellation_reason, type, payment_method, change_for::text, created_at, updated_at
      FROM orders
      WHERE tenant_id = $1
        AND id = $2
@@ -78,6 +79,7 @@ export async function GET(_: Request, { params }: { params: Promise<{ id: string
       paymentMethod: order.payment_method || 'pix',
       changeFor: Number(order.change_for || 0),
       createdAt: order.created_at,
+      updatedAt: order.updated_at,
       items: itemsResult.rows.map((item) => {
         let notesParsed: unknown = null;
         if (item.notes) {
@@ -98,5 +100,64 @@ export async function GET(_: Request, { params }: { params: Promise<{ id: string
         };
       }),
     },
+  });
+}
+
+export async function PATCH(request: Request, { params }: { params: Promise<{ id: string }> }) {
+  const session = await getValidatedTenantSession();
+  if (!session) {
+    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+  }
+
+  const { id } = await params;
+
+  let body: Record<string, unknown> = {};
+  try {
+    body = (await request.json()) as Record<string, unknown>;
+  } catch {
+    body = {};
+  }
+
+  const deliveryAddress = String(body.deliveryAddress ?? '').trim();
+  if (deliveryAddress.length < 5) {
+    return NextResponse.json({ error: 'Informe um endereco valido para o pedido.' }, { status: 400 });
+  }
+
+  const orderResult = await query<OrderRow>(
+    `SELECT id, customer_name, customer_phone, delivery_address, total::text, status, cancellation_reason, type, payment_method, change_for::text, created_at, updated_at
+     FROM orders
+     WHERE tenant_id = $1
+       AND id = $2
+     LIMIT 1`,
+    [session.tenantId, id],
+  );
+
+  if (!orderResult.rowCount) {
+    return NextResponse.json({ error: 'Pedido nao encontrado.' }, { status: 404 });
+  }
+
+  const order = orderResult.rows[0];
+  if (order.type !== 'delivery') {
+    return NextResponse.json({ error: 'Somente pedidos de entrega podem ter o endereco alterado.' }, { status: 400 });
+  }
+
+  if (order.status === 'completed' || order.status === 'cancelled') {
+    return NextResponse.json({ error: 'Nao e possivel alterar o endereco de um pedido finalizado ou cancelado.' }, { status: 400 });
+  }
+
+  const updateResult = await query<{ updated_at: string }>(
+    `UPDATE orders
+     SET delivery_address = $1,
+         updated_at = NOW()
+     WHERE tenant_id = $2
+       AND id = $3
+     RETURNING updated_at`,
+    [deliveryAddress, session.tenantId, id],
+  );
+
+  return NextResponse.json({
+    ok: true,
+    deliveryAddress,
+    updatedAt: updateResult.rows[0]?.updated_at ?? new Date().toISOString(),
   });
 }

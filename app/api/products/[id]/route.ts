@@ -1,5 +1,6 @@
 ﻿import { NextResponse } from 'next/server';
-import { query } from '@/lib/db';
+import pool, { query } from '@/lib/db';
+import { fetchProductOptionGroups, normalizeProductOptionGroups, syncProductOptionGroups } from '@/lib/product-options';
 import { getValidatedTenantSession } from '@/lib/tenant-auth';
 
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
@@ -89,6 +90,7 @@ function normalizeProductPatch(body: Record<string, unknown>, current: ProductRo
       ? body.productMeta
       : {}
     : current.product_meta || {};
+  const optionGroups = hasOwn(body, 'optionGroups') ? normalizeProductOptionGroups(body.optionGroups) : null;
 
   return {
     categoryId,
@@ -101,6 +103,7 @@ function normalizeProductPatch(body: Record<string, unknown>, current: ProductRo
     available,
     productType,
     productMeta,
+    optionGroups,
   };
 }
 
@@ -117,7 +120,14 @@ export async function GET(_request: Request, { params }: { params: Promise<{ id:
     return NextResponse.json({ error: 'Produto nao encontrado.' }, { status: 404 });
   }
 
-  return NextResponse.json({ product: result.rows[0] });
+  const optionGroups = await fetchProductOptionGroups(session.tenantId, id);
+
+  return NextResponse.json({
+    product: {
+      ...result.rows[0],
+      optionGroups,
+    },
+  });
 }
 
 export async function PATCH(request: Request, { params }: { params: Promise<{ id: string }> }) {
@@ -144,59 +154,89 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
     return NextResponse.json({ error: imageValidationError }, { status: 400 });
   }
 
-  const categoryCheck = await query<{ id: string }>(
-    'SELECT id FROM categories WHERE id = $1 AND tenant_id = $2 LIMIT 1',
+  const categoryCheck = await query<{ id: string; product_type: string }>(
+    'SELECT id, product_type FROM categories WHERE id = $1 AND tenant_id = $2 LIMIT 1',
     [payload.categoryId, session.tenantId],
   );
   if (!categoryCheck.rowCount) {
     return NextResponse.json({ error: 'Categoria invalida para esta empresa.' }, { status: 400 });
   }
+  if (categoryCheck.rows[0].product_type !== payload.productType) {
+    return NextResponse.json(
+      { error: 'A categoria selecionada nao pertence a este tipo de cadastro.' },
+      { status: 400 },
+    );
+  }
 
   try {
-    const result = await query<ProductRow>(
-      `UPDATE products
-          SET category_id = $3,
-              name = $4,
-              description = NULLIF($5, ''),
-              price = $6,
-              image_url = NULLIF($7, ''),
-              available = $8,
-              sku = NULLIF($9, ''),
-              product_type = $10,
-              product_meta = $11::jsonb,
-              status = $12
-        WHERE id = $1
-          AND tenant_id = $2
-      RETURNING id,
-                category_id,
-                ''::text AS category_name,
-                name,
-                description,
-                price::text,
-                image_url,
-                available,
-                sku,
-                product_type,
-                product_meta,
-                status,
-                display_order`,
-      [
-        id,
-        session.tenantId,
-        payload.categoryId,
-        payload.name,
-        payload.description,
-        payload.price,
-        payload.imageUrl,
-        payload.available,
-        payload.sku,
-        payload.productType,
-        JSON.stringify(payload.productMeta),
-        payload.status,
-      ],
-    );
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
 
-    return NextResponse.json({ product: result.rows[0] });
+      const result = await client.query<ProductRow>(
+        `UPDATE products
+            SET category_id = $3,
+                name = $4,
+                description = NULLIF($5, ''),
+                price = $6,
+                image_url = NULLIF($7, ''),
+                available = $8,
+                sku = NULLIF($9, ''),
+                product_type = $10,
+                product_meta = $11::jsonb,
+                status = $12
+          WHERE id = $1
+            AND tenant_id = $2
+        RETURNING id,
+                  category_id,
+                  ''::text AS category_name,
+                  name,
+                  description,
+                  price::text,
+                  image_url,
+                  available,
+                  sku,
+                  product_type,
+                  product_meta,
+                  status,
+                  display_order`,
+        [
+          id,
+          session.tenantId,
+          payload.categoryId,
+          payload.name,
+          payload.description,
+          payload.price,
+          payload.imageUrl,
+          payload.available,
+          payload.sku,
+          payload.productType,
+          JSON.stringify(payload.productMeta),
+          payload.status,
+        ],
+      );
+
+      const optionGroups =
+        payload.productType === 'ingredient'
+          ? await syncProductOptionGroups(session.tenantId, id, [], client)
+          : payload.optionGroups
+            ? await syncProductOptionGroups(session.tenantId, id, payload.optionGroups, client)
+            : await fetchProductOptionGroups(session.tenantId, id, client);
+
+      await client.query('COMMIT');
+
+      return NextResponse.json({
+        product: {
+          ...result.rows[0],
+          optionGroups,
+        },
+      });
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
   } catch (error: unknown) {
     if (typeof error === 'object' && error && 'code' in error && error.code === '23505') {
       return NextResponse.json({ error: 'SKU ja existe para esta empresa.' }, { status: 409 });

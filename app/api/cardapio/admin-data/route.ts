@@ -6,6 +6,7 @@ type CategoryRow = {
   id: string;
   name: string;
   icon: string | null;
+  product_type: string;
   active: boolean;
   display_order: number;
   product_count: string;
@@ -27,6 +28,16 @@ type ProductRow = {
   display_order: number;
 };
 
+type MenuStoryRow = {
+  id: string;
+  title: string;
+  subtitle: string | null;
+  image_url: string;
+  active: boolean;
+  display_order: number;
+  expires_at: string | null;
+};
+
 type TenantRow = {
   name: string;
   slug: string;
@@ -34,6 +45,7 @@ type TenantRow = {
   prep_time_minutes: number;
   delivery_fee_base: string;
   store_open: boolean;
+  menu_cover_image_url: string | null;
   whatsapp_phone: string | null;
 };
 
@@ -52,7 +64,7 @@ export async function GET(request: Request) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   }
 
-  const [tenantResult, categoriesResult, productsResult] = await Promise.all([
+  const [tenantResult, categoriesResult, productsResult, storiesResult] = await Promise.all([
     query<TenantRow>(
       `SELECT name,
               slug,
@@ -60,6 +72,7 @@ export async function GET(request: Request) {
               prep_time_minutes,
               delivery_fee_base::text,
               store_open,
+              menu_cover_image_url,
               whatsapp_phone
          FROM tenants
         WHERE id = $1
@@ -70,6 +83,7 @@ export async function GET(request: Request) {
       `SELECT c.id,
               c.name,
               c.icon,
+              c.product_type,
               c.active,
               c.display_order,
               COUNT(p.id)::text AS product_count
@@ -78,7 +92,7 @@ export async function GET(request: Request) {
            ON p.category_id = c.id
           AND p.tenant_id = c.tenant_id
         WHERE c.tenant_id = $1
-        GROUP BY c.id, c.name, c.icon, c.active, c.display_order
+        GROUP BY c.id, c.name, c.icon, c.product_type, c.active, c.display_order
         ORDER BY c.display_order ASC, c.name ASC`,
       [session.tenantId],
     ),
@@ -100,6 +114,19 @@ export async function GET(request: Request) {
          INNER JOIN categories c ON c.id = p.category_id
         WHERE p.tenant_id = $1
         ORDER BY p.display_order ASC, p.name ASC`,
+      [session.tenantId],
+    ),
+    query<MenuStoryRow>(
+      `SELECT id,
+              title,
+              subtitle,
+              image_url,
+              active,
+              display_order,
+              expires_at
+         FROM menu_stories
+        WHERE tenant_id = $1
+        ORDER BY display_order ASC, created_at ASC`,
       [session.tenantId],
     ),
   ]);
@@ -131,7 +158,17 @@ export async function GET(request: Request) {
       prepTimeMinutes: Number(tenant.prep_time_minutes || 40),
       deliveryFeeBase: Number(tenant.delivery_fee_base || 0),
       storeOpen: Boolean(tenant.store_open),
+      coverImageUrl: tenant.menu_cover_image_url || '',
       whatsappPhone: tenant.whatsapp_phone || '',
     },
+    stories: storiesResult.rows.map((story) => ({
+      id: story.id,
+      title: story.title,
+      subtitle: story.subtitle || '',
+      imageUrl: story.image_url,
+      active: Boolean(story.active),
+      displayOrder: Number(story.display_order || 0),
+      expiresAt: story.expires_at,
+    })),
   });
 }

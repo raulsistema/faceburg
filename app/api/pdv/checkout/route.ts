@@ -1,12 +1,12 @@
 import { randomUUID } from 'node:crypto';
 import { NextResponse } from 'next/server';
 import pool, { query } from '@/lib/db';
+import { ensureFinanceSchema } from '@/lib/finance-schema';
 import { getValidatedTenantSession } from '@/lib/tenant-auth';
 import { enqueueOrderPrintJob } from '@/lib/printing';
 
 type ProductPriceRow = {
   id: string;
-  name: string;
   price: string;
   available: boolean;
 };
@@ -25,7 +25,41 @@ type PaymentMethodRow = {
   settlement_days: number;
 };
 
+type PaymentSplitInput = {
+  paymentMethodId: string;
+  methodType: string;
+  amount: number;
+};
+
+type ResolvedPaymentSplit = {
+  method: PaymentMethodRow;
+  amount: number;
+  feeAmount: number;
+  netAmount: number;
+};
+
+function roundMoney(value: number) {
+  return Number(value.toFixed(2));
+}
+
+function normalizePaymentMethod(value: string) {
+  const method = value.trim().toLowerCase();
+  if (!method) return 'pix';
+  return method;
+}
+
+function amountsMatch(a: number, b: number) {
+  return Math.abs(a - b) <= 0.01;
+}
+
+function normalizeExtraAmount(value: unknown) {
+  const parsed = Number(value || 0);
+  if (!Number.isFinite(parsed)) return Number.NaN;
+  return roundMoney(Math.max(0, parsed));
+}
+
 export async function POST(request: Request) {
+  await ensureFinanceSchema();
   const session = await getValidatedTenantSession();
   if (!session) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
@@ -33,12 +67,17 @@ export async function POST(request: Request) {
 
   const body = await request.json();
   const customerName = String(body.customerName || '').trim();
-  const paymentMethod = String(body.paymentMethod || 'pix').trim();
+  const paymentMethod = normalizePaymentMethod(String(body.paymentMethod || 'pix'));
   const paymentMethodId = String(body.paymentMethodId || '').trim();
   const discountAmountRaw = Number(body.discountAmount || 0);
   const discountAmount = Number.isFinite(discountAmountRaw) ? Math.max(0, discountAmountRaw) : 0;
+  const surchargeAmount = normalizeExtraAmount(body.surchargeAmount);
+  const deliveryFeeAmount = normalizeExtraAmount(body.deliveryFeeAmount);
   const type = String(body.type || 'pickup').trim();
   const items = (body.items || []) as CheckoutItemInput[];
+  const paymentSplits: Array<Record<string, unknown>> = Array.isArray(body.payments)
+    ? (body.payments as Array<Record<string, unknown>>)
+    : [];
 
   if (!Array.isArray(items) || items.length === 0) {
     return NextResponse.json({ error: 'Carrinho vazio.' }, { status: 400 });
@@ -57,7 +96,7 @@ export async function POST(request: Request) {
 
   const productIds = normalizedItems.map((item) => item.productId);
   const productsResult = await query<ProductPriceRow>(
-    `SELECT id, name, price::text, available
+    `SELECT id, price::text, available
      FROM products
      WHERE tenant_id = $1
        AND id = ANY($2::text[])`,
@@ -94,61 +133,160 @@ export async function POST(request: Request) {
   if (discountAmount > subtotal) {
     return NextResponse.json({ error: 'Desconto maior que o subtotal.' }, { status: 400 });
   }
+  if (Number.isNaN(surchargeAmount)) {
+    return NextResponse.json({ error: 'Acrescimo invalido.' }, { status: 400 });
+  }
+  if (Number.isNaN(deliveryFeeAmount)) {
+    return NextResponse.json({ error: 'Taxa de entrega invalida.' }, { status: 400 });
+  }
 
-  const total = Number((subtotal - discountAmount).toFixed(2));
+  const total = roundMoney(subtotal - discountAmount + surchargeAmount + deliveryFeeAmount);
   if (!(total > 0)) {
     return NextResponse.json({ error: 'Total invalido.' }, { status: 400 });
+  }
+
+  const normalizedPaymentInputs: PaymentSplitInput[] = paymentSplits
+    .map((entry) => ({
+      paymentMethodId: String(entry?.paymentMethodId || '').trim(),
+      methodType: normalizePaymentMethod(String(entry?.methodType || '')),
+      amount: roundMoney(Number(entry?.amount || 0)),
+    }))
+    .filter((entry) => entry.amount > 0 && (entry.paymentMethodId || entry.methodType));
+
+  const paymentInputs =
+    normalizedPaymentInputs.length > 0
+      ? normalizedPaymentInputs
+      : [{ paymentMethodId, methodType: paymentMethod, amount: total }];
+
+  const paymentSum = roundMoney(paymentInputs.reduce((sum, payment) => sum + payment.amount, 0));
+  if (!amountsMatch(paymentSum, total)) {
+    return NextResponse.json({ error: 'A soma das formas de pagamento deve ser igual ao total da venda.' }, { status: 400 });
   }
 
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
 
-    const orderId = randomUUID();
-    let selectedMethod: PaymentMethodRow | null = null;
-    if (paymentMethodId) {
-      const byId = await client.query<PaymentMethodRow>(
+    const methodsById = new Map<string, PaymentMethodRow>();
+    const methodIds = Array.from(new Set(paymentInputs.map((payment) => payment.paymentMethodId).filter(Boolean)));
+    if (methodIds.length > 0) {
+      const methodsResult = await client.query<PaymentMethodRow>(
         `SELECT id, name, method_type, fee_percent::text, fee_fixed::text, settlement_days
          FROM payment_methods
-         WHERE tenant_id = $1 AND id = $2 AND active = TRUE
-         LIMIT 1`,
-        [session.tenantId, paymentMethodId],
+         WHERE tenant_id = $1
+           AND active = TRUE
+           AND id = ANY($2::text[])`,
+        [session.tenantId, methodIds],
       );
-      selectedMethod = byId.rows[0] || null;
+      for (const method of methodsResult.rows) {
+        methodsById.set(method.id, method);
+      }
     }
-    if (!selectedMethod) {
+
+    const methodsByType = new Map<string, PaymentMethodRow>();
+    const missingTypes = Array.from(new Set(paymentInputs.map((payment) => payment.methodType).filter(Boolean)));
+    for (const methodType of missingTypes) {
       const byType = await client.query<PaymentMethodRow>(
         `SELECT id, name, method_type, fee_percent::text, fee_fixed::text, settlement_days
          FROM payment_methods
-         WHERE tenant_id = $1 AND method_type = $2 AND active = TRUE
+         WHERE tenant_id = $1
+           AND method_type = $2
+           AND active = TRUE
          ORDER BY created_at ASC
          LIMIT 1`,
-        [session.tenantId, paymentMethod],
+        [session.tenantId, methodType],
       );
-      selectedMethod = byType.rows[0] || null;
+      if (byType.rowCount) {
+        methodsByType.set(methodType, byType.rows[0]);
+      }
     }
 
-    const feePercent = Number(selectedMethod?.fee_percent || 0);
-    const feeFixed = Number(selectedMethod?.fee_fixed || 0);
-    const feeAmount = Number((total * (feePercent / 100) + feeFixed).toFixed(2));
-    const netAmount = Number((total - feeAmount).toFixed(2));
+    const resolvedPayments: ResolvedPaymentSplit[] = [];
+    for (const payment of paymentInputs) {
+      const method =
+        (payment.paymentMethodId ? methodsById.get(payment.paymentMethodId) : null) || methodsByType.get(payment.methodType) || null;
+      if (!method) {
+        await client.query('ROLLBACK');
+        return NextResponse.json({ error: 'Forma de pagamento invalida ou inativa.' }, { status: 400 });
+      }
+      const feePercent = Number(method.fee_percent || 0);
+      const feeFixed = Number(method.fee_fixed || 0);
+      const feeAmount = roundMoney(payment.amount * (feePercent / 100) + feeFixed);
+      const netAmount = roundMoney(payment.amount - feeAmount);
+      if (netAmount < 0) {
+        await client.query('ROLLBACK');
+        return NextResponse.json({ error: `Taxa maior que o valor na forma ${method.name}.` }, { status: 400 });
+      }
+      resolvedPayments.push({
+        method,
+        amount: payment.amount,
+        feeAmount,
+        netAmount,
+      });
+    }
+
+    const totalFeeAmount = roundMoney(resolvedPayments.reduce((sum, payment) => sum + payment.feeAmount, 0));
+    const totalNetAmount = roundMoney(total - totalFeeAmount);
+    const orderId = randomUUID();
+    const singlePayment = resolvedPayments.length === 1 ? resolvedPayments[0] : null;
 
     await client.query(
       `INSERT INTO orders
-       (id, tenant_id, customer_name, payment_method, payment_method_id, payment_fee_amount, payment_net_amount, total, status, type, payment_status, updated_at)
-       VALUES ($1, $2, NULLIF($3, ''), $4, $5, $6, $7, $8, 'completed', $9, 'paid', NOW())`,
+       (
+         id,
+         tenant_id,
+         customer_name,
+         payment_method,
+         payment_method_id,
+         payment_fee_amount,
+         payment_net_amount,
+         subtotal_amount,
+         discount_amount,
+         surcharge_amount,
+         delivery_fee_amount,
+         total,
+         status,
+         type,
+         payment_status,
+         updated_at
+       )
+       VALUES ($1, $2, NULLIF($3, ''), $4, $5, $6, $7, $8, $9, $10, $11, $12, 'completed', $13, 'paid', NOW())`,
       [
         orderId,
         session.tenantId,
         customerName,
-        selectedMethod?.method_type || paymentMethod,
-        selectedMethod?.id || null,
-        feeAmount,
-        netAmount,
+        singlePayment ? singlePayment.method.method_type : 'split',
+        singlePayment ? singlePayment.method.id : null,
+        totalFeeAmount,
+        totalNetAmount,
+        subtotal,
+        discountAmount,
+        surchargeAmount,
+        deliveryFeeAmount,
         total,
         type === 'delivery' ? 'delivery' : type === 'table' ? 'table' : 'pickup',
       ],
     );
+
+    for (const payment of resolvedPayments) {
+      await client.query(
+        `INSERT INTO order_payments
+         (id, tenant_id, order_id, payment_method_id, method_type, method_name, gross_amount, fee_amount, net_amount, settlement_days)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+        [
+          randomUUID(),
+          session.tenantId,
+          orderId,
+          payment.method.id,
+          payment.method.method_type,
+          payment.method.name,
+          payment.amount,
+          payment.feeAmount,
+          payment.netAmount,
+          payment.method.settlement_days,
+        ],
+      );
+    }
 
     for (const item of resolvedItems) {
       await client.query(
@@ -158,45 +296,56 @@ export async function POST(request: Request) {
       );
     }
 
-    const isImmediateSettlement = !selectedMethod || selectedMethod.settlement_days === 0;
-    if (isImmediateSettlement) {
-      const openCashSession = await client.query<{ id: string }>(
-        `SELECT id
-         FROM cash_register_sessions
-         WHERE tenant_id = $1 AND status = 'open'
-         ORDER BY opened_at DESC
-         LIMIT 1`,
-        [session.tenantId],
-      );
-      if (openCashSession.rowCount) {
-        const movementUser = await client.query<{ id: string }>(
-          `SELECT id FROM tenant_users WHERE id = $1 AND tenant_id = $2 LIMIT 1`,
-          [session.userId, session.tenantId],
-        );
+    const openCashSession = await client.query<{ id: string }>(
+      `SELECT id
+       FROM cash_register_sessions
+       WHERE tenant_id = $1 AND status = 'open'
+       ORDER BY opened_at DESC
+       LIMIT 1`,
+      [session.tenantId],
+    );
+    const movementUser = await client.query<{ id: string }>(
+      `SELECT id FROM tenant_users WHERE id = $1 AND tenant_id = $2 LIMIT 1`,
+      [session.userId, session.tenantId],
+    );
+    const hasOpenCash = Boolean(openCashSession.rowCount);
+    const movementUserId = movementUser.rowCount ? session.userId : null;
+
+    for (const payment of resolvedPayments) {
+      if (payment.method.settlement_days === 0) {
+        if (hasOpenCash) {
+          await client.query(
+            `INSERT INTO cash_movements
+             (id, tenant_id, session_id, movement_type, amount, description, reference_order_id, created_by_user_id)
+             VALUES ($1, $2, $3, 'sale', $4, $5, $6, $7)`,
+            [
+              randomUUID(),
+              session.tenantId,
+              openCashSession.rows[0].id,
+              payment.netAmount,
+              `Venda PDV ${orderId.slice(0, 8)} (${payment.method.name})`,
+              orderId,
+              movementUserId,
+            ],
+          );
+        }
+      } else {
         await client.query(
-          `INSERT INTO cash_movements
-           (id, tenant_id, session_id, movement_type, amount, description, reference_order_id, created_by_user_id)
-           VALUES ($1, $2, $3, 'sale', $4, $5, $6, $7)`,
+          `INSERT INTO receivables
+           (id, tenant_id, order_id, payment_method_id, gross_amount, fee_amount, net_amount, due_date, status)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, (NOW()::date + $8::int), 'pending')`,
           [
             randomUUID(),
             session.tenantId,
-            openCashSession.rows[0].id,
-            netAmount,
-            `Venda PDV ${orderId.slice(0, 8)} (${selectedMethod?.name || paymentMethod})`,
             orderId,
-            movementUser.rowCount ? session.userId : null,
+            payment.method.id,
+            payment.amount,
+            payment.feeAmount,
+            payment.netAmount,
+            payment.method.settlement_days,
           ],
         );
       }
-    }
-
-    if (selectedMethod && selectedMethod.settlement_days > 0) {
-      await client.query(
-        `INSERT INTO receivables
-         (id, tenant_id, order_id, payment_method_id, gross_amount, fee_amount, net_amount, due_date, status)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, (NOW()::date + $8::int), 'pending')`,
-        [randomUUID(), session.tenantId, orderId, selectedMethod.id, total, feeAmount, netAmount, selectedMethod.settlement_days],
-      );
     }
 
     await client.query('COMMIT');
@@ -211,8 +360,15 @@ export async function POST(request: Request) {
       ok: true,
       orderId,
       total,
-      paymentMethod,
       itemsCount: resolvedItems.length,
+      payments: resolvedPayments.map((payment) => ({
+        paymentMethodId: payment.method.id,
+        methodType: payment.method.method_type,
+        methodName: payment.method.name,
+        amount: payment.amount,
+        feeAmount: payment.feeAmount,
+        netAmount: payment.netAmount,
+      })),
     });
   } catch {
     await client.query('ROLLBACK');

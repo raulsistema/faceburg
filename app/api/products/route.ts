@@ -1,6 +1,7 @@
 ﻿import { randomUUID } from 'node:crypto';
 import { NextResponse } from 'next/server';
-import { query } from '@/lib/db';
+import pool, { query } from '@/lib/db';
+import { normalizeProductOptionGroups, syncProductOptionGroups } from '@/lib/product-options';
 import { getValidatedTenantSession } from '@/lib/tenant-auth';
 
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
@@ -86,6 +87,7 @@ export async function POST(request: Request) {
     body.productMeta && typeof body.productMeta === 'object' && !Array.isArray(body.productMeta)
       ? body.productMeta
       : {};
+  const optionGroups = normalizeProductOptionGroups(body.optionGroups);
   const status = String(body.status || 'draft').trim() === 'published' ? 'published' : 'draft';
   const available = Boolean(body.available ?? true);
   const safeProductType = ['prepared', 'packaged', 'size_based', 'ingredient', 'special'].includes(productType)
@@ -101,38 +103,70 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: imageValidationError }, { status: 400 });
   }
 
-  const categoryCheck = await query<{ id: string }>(
-    'SELECT id FROM categories WHERE id = $1 AND tenant_id = $2 LIMIT 1',
+  const categoryCheck = await query<{ id: string; product_type: string }>(
+    'SELECT id, product_type FROM categories WHERE id = $1 AND tenant_id = $2 LIMIT 1',
     [categoryId, session.tenantId],
   );
   if (!categoryCheck.rowCount) {
     return NextResponse.json({ error: 'Categoria invalida para esta empresa.' }, { status: 400 });
   }
+  if (categoryCheck.rows[0].product_type !== safeProductType) {
+    return NextResponse.json(
+      { error: 'A categoria selecionada nao pertence a este tipo de cadastro.' },
+      { status: 400 },
+    );
+  }
 
   try {
-    const result = await query<ProductRow>(
-      `INSERT INTO products
-       (id, tenant_id, category_id, name, description, price, image_url, available, sku, product_type, product_meta, status, display_order)
-       VALUES
-       ($1, $2, $3, $4, NULLIF($5, ''), $6, NULLIF($7, ''), $8, NULLIF($9, ''), $10, $11::jsonb, $12, 0)
-       RETURNING id, category_id, ''::text AS category_name, name, description, price::text, image_url, available, sku, product_type, product_meta, status, display_order`,
-      [
-        randomUUID(),
-        session.tenantId,
-        categoryId,
-        name,
-        description,
-        price,
-        imageUrl,
-        available,
-        sku,
-        safeProductType,
-        JSON.stringify(productMeta),
-        status,
-      ],
-    );
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
 
-    return NextResponse.json({ product: result.rows[0] }, { status: 201 });
+      const productId = randomUUID();
+      const result = await client.query<ProductRow>(
+        `INSERT INTO products
+         (id, tenant_id, category_id, name, description, price, image_url, available, sku, product_type, product_meta, status, display_order)
+         VALUES
+         ($1, $2, $3, $4, NULLIF($5, ''), $6, NULLIF($7, ''), $8, NULLIF($9, ''), $10, $11::jsonb, $12, 0)
+         RETURNING id, category_id, ''::text AS category_name, name, description, price::text, image_url, available, sku, product_type, product_meta, status, display_order`,
+        [
+          productId,
+          session.tenantId,
+          categoryId,
+          name,
+          description,
+          price,
+          imageUrl,
+          available,
+          sku,
+          safeProductType,
+          JSON.stringify(productMeta),
+          status,
+        ],
+      );
+
+      const savedOptionGroups =
+        safeProductType === 'ingredient'
+          ? []
+          : await syncProductOptionGroups(session.tenantId, productId, optionGroups, client);
+
+      await client.query('COMMIT');
+
+      return NextResponse.json(
+        {
+          product: {
+            ...result.rows[0],
+            optionGroups: savedOptionGroups,
+          },
+        },
+        { status: 201 },
+      );
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
   } catch (error: unknown) {
     if (typeof error === 'object' && error && 'code' in error && error.code === '23505') {
       return NextResponse.json({ error: 'SKU ja existe para esta empresa.' }, { status: 409 });

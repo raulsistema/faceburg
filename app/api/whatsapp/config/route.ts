@@ -16,8 +16,22 @@ type ConfigRow = {
   last_seen_at: string | null;
 };
 
+const HUB_HEARTBEAT_GRACE_MS = 2 * 60 * 1000;
+
 function buildAgentKey() {
   return `wa_${randomBytes(24).toString('hex')}`;
+}
+
+function isHubConfigured(row: ConfigRow | undefined) {
+  if (!row) return false;
+  if (!row.agent_key) return false;
+  if (row.session_status !== 'ready') return false;
+  if (!row.last_seen_at) return false;
+
+  const lastSeenAt = Date.parse(row.last_seen_at);
+  if (Number.isNaN(lastSeenAt)) return false;
+  if (Date.now() - lastSeenAt > HUB_HEARTBEAT_GRACE_MS) return false;
+  return true;
 }
 
 export async function GET() {
@@ -35,8 +49,20 @@ export async function GET() {
   );
 
   const row = result.rows[0] || null;
+  let effectiveEnabled = Boolean(row?.enabled);
+  if (row && effectiveEnabled && !isHubConfigured(row)) {
+    await query(
+      `UPDATE whatsapp_agents
+       SET enabled = FALSE,
+           updated_at = NOW()
+       WHERE tenant_id = $1`,
+      [session.tenantId],
+    );
+    effectiveEnabled = false;
+  }
+
   return NextResponse.json({
-    enabled: row?.enabled || false,
+    enabled: effectiveEnabled,
     hasAgentKey: Boolean(row?.agent_key),
     agentKey: row?.agent_key || '',
     sessionStatus: row?.session_status || 'disconnected',
@@ -61,7 +87,7 @@ export async function PATCH(request: Request) {
   } catch {
     body = {};
   }
-  const enabled = Boolean(body.enabled);
+  const desiredEnabled = Boolean(body.enabled);
   const rotateKey = Boolean(body.rotateKey);
 
   const currentResult = await query<ConfigRow>(
@@ -73,6 +99,14 @@ export async function PATCH(request: Request) {
   );
   const current = currentResult.rows[0];
   const nextKey = rotateKey || !current?.agent_key ? buildAgentKey() : current.agent_key;
+  const currentWithNextKey: ConfigRow | undefined = current
+    ? {
+        ...current,
+        agent_key: nextKey,
+      }
+    : undefined;
+  const canEnable = !rotateKey && isHubConfigured(currentWithNextKey);
+  const enabled = desiredEnabled && canEnable;
 
   await query(
     `INSERT INTO whatsapp_agents
@@ -87,9 +121,18 @@ export async function PATCH(request: Request) {
     [session.tenantId, enabled, nextKey, current?.session_status || 'disconnected', current?.qr_code || null, current?.phone_number || null],
   );
 
+  const requiresHubSetup = desiredEnabled && !enabled;
+  const message = requiresHubSetup
+    ? 'WhatsApp permaneceu OFF porque o Hub nao esta configurado/conectado. Configure o Hub no PC e conecte a sessao antes de ativar.'
+    : enabled
+      ? 'WhatsApp automatico ativado.'
+      : 'WhatsApp automatico desativado.';
+
   return NextResponse.json({
     ok: true,
     enabled,
     agentKey: nextKey,
+    requiresHubSetup,
+    message,
   });
 }

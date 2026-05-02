@@ -11,6 +11,7 @@ type TenantRow = {
   slug: string;
   plan: string;
   status: string;
+  logo_url: string | null;
   prep_time_minutes: number;
   delivery_fee_base: string;
   store_open: boolean;
@@ -58,6 +59,7 @@ export default async function SettingsPage() {
             slug,
             plan,
             status,
+            logo_url,
             prep_time_minutes,
             delivery_fee_base::text,
             store_open,
@@ -124,6 +126,7 @@ export default async function SettingsPage() {
         prepTimeMinutes: Number(tenant.prep_time_minutes || 40),
         deliveryFeeBase: Number(tenant.delivery_fee_base || 0),
         storeOpen: Boolean(tenant.store_open),
+        logoUrl: tenant.logo_url || '',
         whatsappPhone: tenant.whatsapp_phone || '',
         issuerName: tenant.issuer_name || '',
         issuerTradeName: tenant.issuer_trade_name || '',

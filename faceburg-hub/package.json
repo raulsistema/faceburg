@@ -11,8 +11,9 @@
     "dist:portable": "electron-builder --win portable"
   },
   "dependencies": {
-    "whatsapp-web.js": "^1.34.1",
+    "iconv-lite": "^0.7.2",
     "qrcode": "^1.5.4",
+    "whatsapp-web.js": "^1.34.1",
     "ws": "^8.18.0"
   },
   "devDependencies": {
@@ -27,6 +28,7 @@
       "main.js",
       "preload.js",
       "agents/**/*",
+      "assets/**/*",
       "renderer/**/*",
       "package.json"
     ],
@@ -34,10 +36,13 @@
       "output": "dist"
     },
     "win": {
+      "icon": "assets/logorbs.ico",
       "target": [
         {
           "target": "nsis",
-          "arch": ["x64"]
+          "arch": [
+            "x64"
+          ]
         }
       ]
     },
@@ -46,6 +51,9 @@
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
+      "installerIcon": "assets/logorbs.ico",
+      "uninstallerIcon": "assets/logorbs.ico",
+      "installerHeaderIcon": "assets/logorbs.ico",
       "artifactName": "Faceburg-Hub-Setup-${version}.exe"
     }
   }
