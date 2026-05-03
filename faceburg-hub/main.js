@@ -32,6 +32,7 @@ const SESSION_COOKIE_NAME = 'faceburg_session';
 /* ─── state ──────────────────────────────────────────────────── */
 
 let mainWindow = null;
+let systemWindow = null;
 let tray = null;
 let trayIcon = null;
 let forceQuit = false;
@@ -70,6 +71,10 @@ function settingsFilePath() {
 
 function assetPath(fileName) {
   return path.join(__dirname, 'assets', fileName);
+}
+
+function rendererIndexPath() {
+  return path.join(__dirname, 'renderer', 'index.html');
 }
 
 function loadImageFromAssets(fileName, resizeOptions = null) {
@@ -188,35 +193,35 @@ function isAllowedSystemUrl(url, allowedOrigin) {
   }
 }
 
-function bindMainWindowNavigation(targetUrl) {
-  if (!mainWindow || mainWindow.isDestroyed()) return;
+function bindSystemWindowNavigation(browserWindow, targetUrl) {
+  if (!browserWindow || browserWindow.isDestroyed()) return;
   const allowedOrigin = new URL(targetUrl).origin;
 
-  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+  browserWindow.webContents.setWindowOpenHandler(({ url }) => {
     if (isAllowedSystemUrl(url, allowedOrigin)) {
-      void mainWindow.loadURL(url);
+      void browserWindow.loadURL(url);
       return { action: 'deny' };
     }
     void shell.openExternal(url);
     return { action: 'deny' };
   });
 
-  mainWindow.webContents.on('will-navigate', (event, url) => {
+  browserWindow.webContents.on('will-navigate', (event, url) => {
     if (isAllowedSystemUrl(url, allowedOrigin)) return;
     event.preventDefault();
     void shell.openExternal(url);
   });
 
-  mainWindow.webContents.on('did-navigate', (_event, url) => {
+  browserWindow.webContents.on('did-navigate', (_event, url) => {
     persistLastSystemUrl(url);
   });
 
-  mainWindow.webContents.on('did-navigate-in-page', (_event, url) => {
+  browserWindow.webContents.on('did-navigate-in-page', (_event, url) => {
     persistLastSystemUrl(url);
   });
 
-  mainWindow.webContents.on('did-finish-load', () => {
-    const currentUrl = mainWindow?.webContents.getURL();
+  browserWindow.webContents.on('did-finish-load', () => {
+    const currentUrl = browserWindow?.webContents.getURL();
     if (!currentUrl || currentUrl === 'about:blank') return;
     persistLastSystemUrl(currentUrl);
   });
@@ -225,16 +230,35 @@ function bindMainWindowNavigation(targetUrl) {
 async function openSystemWindow(preferredUrl = '') {
   const targetUrl = getPreferredSystemUrl(preferredUrl);
 
-  if (!mainWindow || mainWindow.isDestroyed()) {
-    createMainWindow(targetUrl);
-    return;
+  if (!systemWindow || systemWindow.isDestroyed()) {
+    systemWindow = new BrowserWindow({
+      width: 1440,
+      height: 920,
+      minWidth: 1024,
+      minHeight: 720,
+      autoHideMenuBar: true,
+      title: 'Faceburg Sistema',
+      icon: assetPath(WINDOW_ICON_FILE),
+      webPreferences: {
+        preload: path.join(__dirname, 'preload.js'),
+        contextIsolation: true,
+        nodeIntegration: false,
+        partition: SYSTEM_PARTITION,
+      },
+    });
+
+    bindSystemWindowNavigation(systemWindow, targetUrl);
+    systemWindow.on('closed', () => {
+      systemWindow = null;
+    });
   }
 
-  const currentUrl = mainWindow.webContents.getURL();
+  const currentUrl = systemWindow.webContents.getURL();
   if (currentUrl !== targetUrl) {
-    await mainWindow.loadURL(targetUrl);
+    await systemWindow.loadURL(targetUrl);
   }
-  showMainWindow();
+  systemWindow.show();
+  systemWindow.focus();
 }
 
 function pushLog(source, message) {
@@ -883,8 +907,7 @@ function createTray() {
 
 /* ─── main window ────────────────────────────────────────────── */
 
-function createMainWindow(preferredUrl = '') {
-  const targetUrl = getPreferredSystemUrl(preferredUrl);
+function createMainWindow() {
   mainWindow = new BrowserWindow({
     width: 1440,
     height: 920,
@@ -898,12 +921,17 @@ function createMainWindow(preferredUrl = '') {
       contextIsolation: true,
       nodeIntegration: false,
       partition: SYSTEM_PARTITION,
+      webviewTag: true,
     },
   });
 
-  bindMainWindowNavigation(targetUrl);
-  void mainWindow.loadURL(targetUrl).catch((error) => {
-    pushLog('system', `Falha ao carregar o sistema: ${error?.message || error}`);
+  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+    void shell.openExternal(url);
+    return { action: 'deny' };
+  });
+
+  void mainWindow.loadFile(rendererIndexPath()).catch((error) => {
+    pushLog('system', `Falha ao carregar o painel local: ${error?.message || error}`);
   });
 
   mainWindow.on('close', (event) => {
