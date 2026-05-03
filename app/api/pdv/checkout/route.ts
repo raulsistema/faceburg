@@ -4,6 +4,8 @@ import pool, { query } from '@/lib/db';
 import { ensureFinanceSchema } from '@/lib/finance-schema';
 import { getValidatedTenantSession } from '@/lib/tenant-auth';
 import { enqueueOrderPrintJob } from '@/lib/printing';
+import { getOpenCashSession } from '@/lib/cash-register';
+import { parseMoneyInput } from '@/lib/finance-utils';
 
 type ProductPriceRow = {
   id: string;
@@ -53,7 +55,7 @@ function amountsMatch(a: number, b: number) {
 }
 
 function normalizeExtraAmount(value: unknown) {
-  const parsed = Number(value || 0);
+  const parsed = parseMoneyInput(value);
   if (!Number.isFinite(parsed)) return Number.NaN;
   return roundMoney(Math.max(0, parsed));
 }
@@ -69,8 +71,7 @@ export async function POST(request: Request) {
   const customerName = String(body.customerName || '').trim();
   const paymentMethod = normalizePaymentMethod(String(body.paymentMethod || 'pix'));
   const paymentMethodId = String(body.paymentMethodId || '').trim();
-  const discountAmountRaw = Number(body.discountAmount || 0);
-  const discountAmount = Number.isFinite(discountAmountRaw) ? Math.max(0, discountAmountRaw) : 0;
+  const discountAmount = normalizeExtraAmount(body.discountAmount);
   const surchargeAmount = normalizeExtraAmount(body.surchargeAmount);
   const deliveryFeeAmount = normalizeExtraAmount(body.deliveryFeeAmount);
   const type = String(body.type || 'pickup').trim();
@@ -130,6 +131,9 @@ export async function POST(request: Request) {
   if (!(subtotal > 0)) {
     return NextResponse.json({ error: 'Subtotal invalido.' }, { status: 400 });
   }
+  if (Number.isNaN(discountAmount)) {
+    return NextResponse.json({ error: 'Desconto invalido.' }, { status: 400 });
+  }
   if (discountAmount > subtotal) {
     return NextResponse.json({ error: 'Desconto maior que o subtotal.' }, { status: 400 });
   }
@@ -145,12 +149,17 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: 'Total invalido.' }, { status: 400 });
   }
 
-  const normalizedPaymentInputs: PaymentSplitInput[] = paymentSplits
+  const parsedPaymentInputs: PaymentSplitInput[] = paymentSplits
     .map((entry) => ({
       paymentMethodId: String(entry?.paymentMethodId || '').trim(),
       methodType: normalizePaymentMethod(String(entry?.methodType || '')),
-      amount: roundMoney(Number(entry?.amount || 0)),
-    }))
+      amount: normalizeExtraAmount(entry?.amount),
+    }));
+  if (parsedPaymentInputs.some((entry) => Number.isNaN(entry.amount))) {
+    return NextResponse.json({ error: 'Valor de pagamento invalido.' }, { status: 400 });
+  }
+
+  const normalizedPaymentInputs = parsedPaymentInputs
     .filter((entry) => entry.amount > 0 && (entry.paymentMethodId || entry.methodType));
 
   const paymentInputs =
@@ -229,6 +238,16 @@ export async function POST(request: Request) {
     const totalNetAmount = roundMoney(total - totalFeeAmount);
     const orderId = randomUUID();
     const singlePayment = resolvedPayments.length === 1 ? resolvedPayments[0] : null;
+    const requiresCashSession = resolvedPayments.some((payment) => payment.method.settlement_days === 0);
+    if (requiresCashSession) {
+      await client.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [`cash-register:${session.tenantId}`]);
+    }
+    const openCashSession = requiresCashSession ? await getOpenCashSession(session.tenantId, client) : null;
+
+    if (requiresCashSession && !openCashSession) {
+      await client.query('ROLLBACK');
+      return NextResponse.json({ error: 'Nenhum caixa aberto. Abra o caixa no financeiro para concluir a venda.' }, { status: 409 });
+    }
 
     await client.query(
       `INSERT INTO orders
@@ -248,9 +267,10 @@ export async function POST(request: Request) {
          status,
          type,
          payment_status,
+         cash_session_id,
          updated_at
        )
-       VALUES ($1, $2, NULLIF($3, ''), $4, $5, $6, $7, $8, $9, $10, $11, $12, 'completed', $13, 'paid', NOW())`,
+       VALUES ($1, $2, NULLIF($3, ''), $4, $5, $6, $7, $8, $9, $10, $11, $12, 'completed', $13, 'paid', $14, NOW())`,
       [
         orderId,
         session.tenantId,
@@ -265,6 +285,7 @@ export async function POST(request: Request) {
         deliveryFeeAmount,
         total,
         type === 'delivery' ? 'delivery' : type === 'table' ? 'table' : 'pickup',
+        openCashSession?.id || null,
       ],
     );
 
@@ -296,39 +317,28 @@ export async function POST(request: Request) {
       );
     }
 
-    const openCashSession = await client.query<{ id: string }>(
-      `SELECT id
-       FROM cash_register_sessions
-       WHERE tenant_id = $1 AND status = 'open'
-       ORDER BY opened_at DESC
-       LIMIT 1`,
-      [session.tenantId],
-    );
     const movementUser = await client.query<{ id: string }>(
       `SELECT id FROM tenant_users WHERE id = $1 AND tenant_id = $2 LIMIT 1`,
       [session.userId, session.tenantId],
     );
-    const hasOpenCash = Boolean(openCashSession.rowCount);
     const movementUserId = movementUser.rowCount ? session.userId : null;
 
     for (const payment of resolvedPayments) {
       if (payment.method.settlement_days === 0) {
-        if (hasOpenCash) {
-          await client.query(
-            `INSERT INTO cash_movements
-             (id, tenant_id, session_id, movement_type, amount, description, reference_order_id, created_by_user_id)
-             VALUES ($1, $2, $3, 'sale', $4, $5, $6, $7)`,
-            [
-              randomUUID(),
-              session.tenantId,
-              openCashSession.rows[0].id,
-              payment.netAmount,
-              `Venda PDV ${orderId.slice(0, 8)} (${payment.method.name})`,
-              orderId,
-              movementUserId,
-            ],
-          );
-        }
+        await client.query(
+          `INSERT INTO cash_movements
+           (id, tenant_id, session_id, movement_type, amount, description, reference_order_id, created_by_user_id)
+           VALUES ($1, $2, $3, 'sale', $4, $5, $6, $7)`,
+          [
+            randomUUID(),
+            session.tenantId,
+            openCashSession!.id,
+            payment.netAmount,
+            `Venda PDV ${orderId.slice(0, 8)} (${payment.method.name})`,
+            orderId,
+            movementUserId,
+          ],
+        );
       } else {
         await client.query(
           `INSERT INTO receivables

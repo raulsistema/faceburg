@@ -25,6 +25,7 @@ import {
 import { cn } from '@/lib/utils';
 import { useZipCodeAutofill } from '@/hooks/use-zip-code-autofill';
 import AppImage from '@/components/ui/AppImage';
+import { parseMoneyInput } from '@/lib/finance-utils';
 
 type Tenant = {
   name: string;
@@ -38,6 +39,8 @@ type Tenant = {
   whatsappPhone: string | null;
   prepTimeMinutes: number;
   deliveryFeeBase: number;
+  deliveryFeeMode: 'fixed' | 'per_km';
+  deliveryFeePerKm: number;
   storeOpen: boolean;
   primaryColor: string;
 };
@@ -74,6 +77,7 @@ type Product = {
   product_type: 'prepared' | 'packaged' | 'size_based' | 'ingredient' | 'special';
   product_meta: Record<string, unknown>;
   optionGroups: ProductOptionGroup[];
+  optionGroupCount?: number;
 };
 
 type SizeBasedOption = {
@@ -129,7 +133,7 @@ type CartItem = {
 
 type CheckoutStep = 'cart' | 'customer' | 'address' | 'payment' | 'review' | 'success';
 type OrderType = 'delivery' | 'pickup' | 'table';
-type PaymentMethodType = 'pix' | 'card' | 'cash';
+type PaymentMethodType = 'pix' | 'card' | 'cash' | 'bank_slip' | 'wallet' | 'other';
 type TopTab = 'products' | 'portal' | 'contact' | 'about';
 
 type PaymentMethodOption = {
@@ -191,6 +195,15 @@ type AddressStreetSuggestion = {
   complement: string;
 };
 
+type DeliveryFeeQuoteResponse = {
+  deliveryFeeAmount?: number;
+  distanceKm?: number | null;
+  deliveryFeeMode?: 'fixed' | 'per_km';
+  deliveryFeePerKm?: number;
+  usedFallback?: boolean;
+  error?: string;
+};
+
 type PortalCustomer = {
   id: string;
   name: string;
@@ -207,6 +220,29 @@ type PortalOrder = {
   paymentMethod: string;
   createdAt: string;
   itemsSummary: string;
+};
+
+type CustomerLookupResponse = {
+  found?: boolean;
+  customer?: {
+    id?: string;
+    name?: string;
+    phone?: string;
+    email?: string | null;
+    isCompany?: boolean;
+    companyName?: string | null;
+    documentNumber?: string | null;
+  } | null;
+  addresses?: SavedAddress[];
+  orders?: PortalOrder[];
+  error?: string;
+};
+
+type CustomerLookupCacheEntry = {
+  tenantSlug: string;
+  phone: string;
+  loadedAt: number;
+  data: CustomerLookupResponse | null;
 };
 
 type MenuStory = {
@@ -232,6 +268,18 @@ const EMPTY_ADDRESS_FORM: AddressFormState = {
   reference: '',
 };
 
+const CUSTOMER_LOOKUP_CACHE_MS = 5_000;
+const NETWORK_TIMEOUT_MS = 8_000;
+const CHECKOUT_TIMEOUT_MS = 20_000;
+const NETWORK_RETRY_DELAY_MS = 450;
+const INITIAL_PRODUCT_RENDER_LIMIT = 72;
+const PRODUCT_RENDER_INCREMENT = 72;
+
+type RequestJsonOptions = RequestInit & {
+  timeoutMs?: number;
+  retries?: number;
+};
+
 function hasManualAddressDraft(form: AddressFormState) {
   return Object.values(form).some((value) => String(value || '').trim().length > 0);
 }
@@ -247,13 +295,16 @@ function formatPaymentMethodLabel(value: string) {
   if (normalized === 'pix') return 'Pix';
   if (normalized === 'card') return 'Cartao';
   if (normalized === 'cash') return 'Dinheiro';
+  if (normalized === 'bank_slip') return 'Boleto';
+  if (normalized === 'wallet') return 'Carteira digital';
+  if (normalized === 'other') return 'Outro';
   return method;
 }
 
 function normalizePaymentMethodType(value: string): PaymentMethodType {
   const normalized = String(value || '').trim().toLowerCase();
-  if (normalized === 'cash' || normalized === 'card' || normalized === 'pix') {
-    return normalized;
+  if (['pix', 'card', 'cash', 'bank_slip', 'wallet', 'other'].includes(normalized)) {
+    return normalized as PaymentMethodType;
   }
   return 'pix';
 }
@@ -268,6 +319,13 @@ function maskPhone(raw: string) {
 
 function normalizePhone(raw: string) {
   return raw.replace(/\D/g, '');
+}
+
+function createCheckoutKey() {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID();
+  }
+  return `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 }
 
 function formatSavedAddress(address: SavedAddress) {
@@ -436,6 +494,55 @@ function createEmptyPortalCustomerState() {
   };
 }
 
+async function readJsonSafely<T>(response: Response): Promise<T | null> {
+  try {
+    return (await response.json()) as T;
+  } catch {
+    return null;
+  }
+}
+
+function sleep(ms: number) {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
+async function fetchWithTimeout(input: RequestInfo | URL, init: RequestInit = {}, timeoutMs = NETWORK_TIMEOUT_MS) {
+  const controller = new AbortController();
+  const timeoutId = window.setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(input, {
+      ...init,
+      signal: init.signal || controller.signal,
+    });
+  } finally {
+    window.clearTimeout(timeoutId);
+  }
+}
+
+async function requestJson<T>(input: RequestInfo | URL, options: RequestJsonOptions = {}) {
+  const { timeoutMs = NETWORK_TIMEOUT_MS, retries = 0, ...init } = options;
+  let lastError: unknown = null;
+
+  for (let attempt = 0; attempt <= retries; attempt += 1) {
+    try {
+      const response = await fetchWithTimeout(input, init, timeoutMs);
+      const data = await readJsonSafely<T>(response);
+      if (response.ok || response.status < 500 || attempt >= retries) {
+        return { response, data };
+      }
+    } catch (error) {
+      lastError = error;
+      if (attempt >= retries) {
+        throw error;
+      }
+    }
+
+    await sleep(NETWORK_RETRY_DELAY_MS * (attempt + 1));
+  }
+
+  throw lastError instanceof Error ? lastError : new Error('Falha de conexao.');
+}
+
 export default function PublicMenuPage() {
   const params = useParams<{ tenantSlug: string }>();
   const tenantSlug = Array.isArray(params?.tenantSlug) ? params.tenantSlug[0] : params?.tenantSlug;
@@ -446,6 +553,7 @@ export default function PublicMenuPage() {
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
   const [activeCategory, setActiveCategory] = useState<string>('all');
+  const [visibleProductLimit, setVisibleProductLimit] = useState(INITIAL_PRODUCT_RENDER_LIMIT);
   const [activeTopTab, setActiveTopTab] = useState<TopTab>('products');
   const [portalOpen, setPortalOpen] = useState(false);
   const [portalSaving, setPortalSaving] = useState(false);
@@ -486,6 +594,8 @@ export default function PublicMenuPage() {
   const [addressStreetScopeState, setAddressStreetScopeState] = useState('');
   const [orderType, setOrderType] = useState<OrderType>('delivery');
   const [deliveryAddress, setDeliveryAddress] = useState('');
+  const [deliveryFeeQuote, setDeliveryFeeQuote] = useState<DeliveryFeeQuoteResponse | null>(null);
+  const [deliveryFeeLoading, setDeliveryFeeLoading] = useState(false);
   const [selectedPaymentMethodId, setSelectedPaymentMethodId] = useState('');
   const [changeFor, setChangeFor] = useState('');
   const addressStreetBoxRef = useRef<HTMLDivElement | null>(null);
@@ -493,8 +603,17 @@ export default function PublicMenuPage() {
   const addressEntryModeRef = useRef<AddressEntryMode>('new');
   const addressFormRef = useRef<AddressFormState>({ ...EMPTY_ADDRESS_FORM });
   const savedAddressesRef = useRef<SavedAddress[]>([]);
+  const customerLookupCacheRef = useRef<CustomerLookupCacheEntry | null>(null);
+  const customerLookupPromiseRef = useRef<{
+    tenantSlug: string;
+    phone: string;
+    promise: Promise<CustomerLookupResponse | null>;
+  } | null>(null);
+  const checkoutKeyRef = useRef('');
 
   const [customizeProduct, setCustomizeProduct] = useState<Product | null>(null);
+  const [customizeLoadingProductId, setCustomizeLoadingProductId] = useState<string | null>(null);
+  const [menuActionError, setMenuActionError] = useState<string | null>(null);
   const [selectedByGroup, setSelectedByGroup] = useState<Record<string, string[]>>({});
   const [customNotes, setCustomNotes] = useState('');
   const [selectedPizzaSize, setSelectedPizzaSize] = useState('');
@@ -621,25 +740,67 @@ export default function PublicMenuPage() {
     const requestTenantSlug = tenantSlug;
     const digits = normalizePhone(rawPhone);
     if (digits.length < 10) return null;
+    const cached = customerLookupCacheRef.current;
+    if (
+      cached
+      && cached.tenantSlug === requestTenantSlug
+      && cached.phone === digits
+      && Date.now() - cached.loadedAt < CUSTOMER_LOOKUP_CACHE_MS
+    ) {
+      const data = cached.data;
+      if (!data?.found) {
+        return null;
+      }
+      if (preserveAddressState) {
+        mergeKnownCustomer(data);
+      } else {
+        applyKnownCustomer(data);
+      }
+      return data;
+    }
 
-    const response = await fetch(`/api/public/customer/${requestTenantSlug}?phone=${encodeURIComponent(digits)}`);
-    const data = (await response.json()) as {
-      found?: boolean;
-      customer?: {
-        id?: string;
-        name?: string;
-        phone?: string;
-        email?: string | null;
-        isCompany?: boolean;
-        companyName?: string | null;
-        documentNumber?: string | null;
-      } | null;
-      addresses?: SavedAddress[];
-      orders?: PortalOrder[];
-      error?: string;
-    };
+    const inflight = customerLookupPromiseRef.current;
+    const lookupPromise =
+      inflight && inflight.tenantSlug === requestTenantSlug && inflight.phone === digits
+        ? inflight.promise
+        : (() => {
+            const promise = (async () => {
+              try {
+                const { response, data } = await requestJson<CustomerLookupResponse>(
+                  `/api/public/customer/${requestTenantSlug}?phone=${encodeURIComponent(digits)}`,
+                  { cache: 'no-store', retries: 1 },
+                );
+                if (!response.ok) {
+                  return null;
+                }
+                const result = data?.found ? data : null;
+                customerLookupCacheRef.current = {
+                  tenantSlug: requestTenantSlug,
+                  phone: digits,
+                  loadedAt: Date.now(),
+                  data: result,
+                };
+                return result;
+              } finally {
+                if (
+                  customerLookupPromiseRef.current
+                  && customerLookupPromiseRef.current.tenantSlug === requestTenantSlug
+                  && customerLookupPromiseRef.current.phone === digits
+                ) {
+                  customerLookupPromiseRef.current = null;
+                }
+              }
+            })();
+            customerLookupPromiseRef.current = {
+              tenantSlug: requestTenantSlug,
+              phone: digits,
+              promise,
+            };
+            return promise;
+          })();
 
-    if (!response.ok || !data?.found) {
+    const data = await lookupPromise;
+    if (!data?.found) {
       return null;
     }
 
@@ -668,16 +829,7 @@ export default function PublicMenuPage() {
 
     setPortalSaving(true);
     try {
-      const response = await fetch(`/api/public/customer/${tenantSlug}`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({
-          name,
-          phone: phoneDigits,
-          email,
-        }),
-      });
-      const data = (await response.json()) as {
+      const { response, data } = await requestJson<{
         customer?: {
           id?: string;
           name?: string;
@@ -690,12 +842,31 @@ export default function PublicMenuPage() {
         addresses?: SavedAddress[];
         orders?: PortalOrder[];
         error?: string;
-      };
+      }>(`/api/public/customer/${tenantSlug}`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        timeoutMs: NETWORK_TIMEOUT_MS,
+        retries: 1,
+        body: JSON.stringify({
+          name,
+          phone: phoneDigits,
+          email,
+        }),
+      });
 
-      if (!response.ok) {
-        throw new Error(data.error || 'Falha ao entrar.');
+      if (!response.ok || !data) {
+        throw new Error(data?.error || 'Falha ao entrar.');
       }
 
+      customerLookupCacheRef.current = {
+        tenantSlug,
+        phone: phoneDigits,
+        loadedAt: Date.now(),
+        data: {
+          ...data,
+          found: true,
+        },
+      };
       applyKnownCustomer(data);
       setCustomerLookupDone(true);
       return data;
@@ -738,11 +909,74 @@ export default function PublicMenuPage() {
     async function loadData() {
       if (!tenantSlug) return;
       setLoading(true);
-      const [menuResponse, paymentMethodsResponse] = await Promise.all([
-        fetch(`/api/public/menu/${tenantSlug}`),
-        fetch(`/api/public/payment-methods/${tenantSlug}`),
-      ]);
-      if (!menuResponse.ok) {
+      try {
+        const [menuResult, paymentMethodsResult] = await Promise.all([
+          requestJson<{
+            tenant?: Tenant | null;
+            stories?: MenuStory[];
+            categories?: Category[];
+            products?: Product[];
+          }>(`/api/public/menu/${tenantSlug}`, { cache: 'default', retries: 1 }),
+          requestJson<{ paymentMethods?: Array<Record<string, unknown>> }>(
+            `/api/public/payment-methods/${tenantSlug}`,
+            { cache: 'no-store', retries: 1 },
+          ).catch(() => null),
+        ]);
+        const { response: menuResponse, data } = menuResult;
+        if (!menuResponse.ok) {
+          if (mounted) {
+            setTenant(null);
+            setMenuStories([]);
+            setCategories([]);
+            setProducts([]);
+            setPaymentMethods([]);
+            setSelectedPaymentMethodId('');
+          }
+          setLoading(false);
+          return;
+        }
+        const paymentMethodsData = paymentMethodsResult?.response.ok ? paymentMethodsResult.data : null;
+        if (!data?.tenant) {
+          if (mounted) {
+            setTenant(null);
+            setMenuStories([]);
+            setCategories([]);
+            setProducts([]);
+            setPaymentMethods([]);
+            setSelectedPaymentMethodId('');
+          }
+          setLoading(false);
+          return;
+        }
+        const rawPaymentMethods = Array.isArray(paymentMethodsData?.paymentMethods)
+          ? paymentMethodsData.paymentMethods
+          : [];
+        const nextPaymentMethods: PaymentMethodOption[] = rawPaymentMethods
+              .map((method: Record<string, unknown>) => {
+                const methodType = normalizePaymentMethodType(String(method?.methodType || 'pix'));
+                return {
+                  id: String(method?.id || '').trim(),
+                  name: String(method?.name || '').trim() || formatPaymentMethodLabel(methodType),
+                  methodType,
+                  isSystem: true,
+                };
+              })
+              .filter((method: PaymentMethodOption) => method.id);
+        if (mounted) {
+          setTenant(data.tenant);
+          setMenuStories(Array.isArray(data.stories) ? data.stories : []);
+          setCategories(data.categories || []);
+          setProducts(data.products || []);
+          setPaymentMethods(nextPaymentMethods);
+          setSelectedPaymentMethodId((current) => {
+            return nextPaymentMethods.some((method) => method.id === current)
+              ? current
+              : nextPaymentMethods[0]?.id || '';
+          });
+          setActiveCategory('all');
+        }
+        setLoading(false);
+      } catch {
         if (mounted) {
           setTenant(null);
           setMenuStories([]);
@@ -752,38 +986,7 @@ export default function PublicMenuPage() {
           setSelectedPaymentMethodId('');
         }
         setLoading(false);
-        return;
       }
-      const data = await menuResponse.json();
-      const paymentMethodsData = paymentMethodsResponse.ok ? await paymentMethodsResponse.json() : { paymentMethods: [] };
-      const rawPaymentMethods = Array.isArray(paymentMethodsData.paymentMethods)
-        ? (paymentMethodsData.paymentMethods as Array<Record<string, unknown>>)
-        : [];
-      const nextPaymentMethods: PaymentMethodOption[] = rawPaymentMethods
-            .map((method: Record<string, unknown>) => {
-              const methodType = normalizePaymentMethodType(String(method?.methodType || 'pix'));
-              return {
-                id: String(method?.id || '').trim(),
-                name: String(method?.name || '').trim() || formatPaymentMethodLabel(methodType),
-                methodType,
-                isSystem: true,
-              };
-            })
-            .filter((method: PaymentMethodOption) => method.id);
-      if (mounted) {
-        setTenant(data.tenant);
-        setMenuStories(Array.isArray(data.stories) ? data.stories : []);
-        setCategories(data.categories || []);
-        setProducts(data.products || []);
-        setPaymentMethods(nextPaymentMethods);
-        setSelectedPaymentMethodId((current) => {
-          return nextPaymentMethods.some((method) => method.id === current)
-            ? current
-            : nextPaymentMethods[0]?.id || '';
-        });
-        setActiveCategory('all');
-      }
-      setLoading(false);
     }
     void loadData();
     return () => {
@@ -858,6 +1061,7 @@ export default function PublicMenuPage() {
     let active = true;
     async function refreshPortal() {
       if (!active) return;
+      if (typeof document !== 'undefined' && document.hidden) return;
       setPortalSyncing(true);
       try {
         await syncPortalByPhone(portalPhone, true);
@@ -869,12 +1073,19 @@ export default function PublicMenuPage() {
     }
 
     void refreshPortal();
+    const onVisibilityChange = () => {
+      if (!document.hidden) {
+        void refreshPortal();
+      }
+    };
+    document.addEventListener('visibilitychange', onVisibilityChange);
     const interval = setInterval(() => {
       void refreshPortal();
-    }, 30000);
+    }, 60000);
 
     return () => {
       active = false;
+      document.removeEventListener('visibilitychange', onVisibilityChange);
       clearInterval(interval);
     };
   }, [portalCustomer?.phone, tenantSlug, syncPortalByPhone]);
@@ -905,12 +1116,11 @@ export default function PublicMenuPage() {
       if (!active) return;
       setCustomerLookupLoading(true);
       try {
-        const response = await fetch(`/api/public/customer/${requestTenantSlug}?phone=${encodeURIComponent(requestDigits)}`);
-        const data = await response.json();
+        const data = await syncPortalByPhone(requestDigits);
         if (!active || tenantSlugRef.current !== requestTenantSlug || normalizePhone(customerPhone) !== requestDigits) {
           return;
         }
-        if (!response.ok || !data?.found) {
+        if (!data?.found) {
           const keepManualAddressDraft = addressEntryModeRef.current === 'new' && hasManualAddressDraft(addressFormRef.current);
           setCustomerLookupDone(true);
           setSavedAddresses([]);
@@ -925,7 +1135,6 @@ export default function PublicMenuPage() {
           return;
         }
 
-        applyKnownCustomer(data);
         setCustomerLookupDone(true);
       } catch {
         setCustomerLookupDone(false);
@@ -938,7 +1147,7 @@ export default function PublicMenuPage() {
       active = false;
       clearTimeout(timeout);
     };
-  }, [tenantSlug, customerPhone, applyKnownCustomer]);
+  }, [tenantSlug, customerPhone, syncPortalByPhone]);
 
   const usingNewAddress = orderType === 'delivery' && (savedAddresses.length === 0 || addressEntryMode === 'new');
 
@@ -1015,13 +1224,12 @@ export default function PublicMenuPage() {
         const params = new URLSearchParams({ street: streetQuery, slug: tenantSlug });
         if (cityQuery) params.set('city', cityQuery);
         if (stateQuery) params.set('state', stateQuery);
-        const response = await fetch(`/api/lookup/address?${params.toString()}`, { cache: 'no-store' });
-        const data = (await response.json()) as {
+        const { response, data } = await requestJson<{
           suggestions?: AddressStreetSuggestion[];
           effectiveCity?: string;
           effectiveState?: string;
-        };
-        if (!response.ok || !active) return;
+        }>(`/api/lookup/address?${params.toString()}`, { cache: 'no-store', timeoutMs: 5_000 });
+        if (!response.ok || !active || !data) return;
         setAddressStreetScopeState(String(data.effectiveState || '').toUpperCase());
         setAddressStreetOptions(Array.isArray(data.suggestions) ? data.suggestions.slice(0, 8) : []);
       } catch {
@@ -1055,6 +1263,33 @@ export default function PublicMenuPage() {
       .map((category) => ({ category, items: filteredProducts.filter((product) => product.category_id === category.id) }))
       .filter((entry) => entry.items.length > 0);
   }, [categories, filteredProducts]);
+  const renderedProductsByCategory = useMemo(() => {
+    let remaining = visibleProductLimit;
+    return productsByCategory
+      .map((entry) => {
+        const visibleItems = remaining > 0 ? entry.items.slice(0, remaining) : [];
+        remaining -= visibleItems.length;
+        return {
+          ...entry,
+          items: visibleItems,
+          totalItems: entry.items.length,
+        };
+      })
+      .filter((entry) => entry.items.length > 0);
+  }, [productsByCategory, visibleProductLimit]);
+  const totalFilteredProducts = useMemo(
+    () => productsByCategory.reduce((sum, entry) => sum + entry.items.length, 0),
+    [productsByCategory],
+  );
+  const renderedProductsCount = useMemo(
+    () => renderedProductsByCategory.reduce((sum, entry) => sum + entry.items.length, 0),
+    [renderedProductsByCategory],
+  );
+  const hasMoreProducts = renderedProductsCount < totalFilteredProducts;
+
+  useEffect(() => {
+    setVisibleProductLimit(INITIAL_PRODUCT_RENDER_LIMIT);
+  }, [activeCategory, search]);
 
   const cartItemsCount = useMemo(() => cart.reduce((sum, item) => sum + item.quantity, 0), [cart]);
   const subtotal = useMemo(
@@ -1076,9 +1311,6 @@ export default function PublicMenuPage() {
     () => availablePaymentMethods.find((method) => method.id === selectedPaymentMethodId) || null,
     [availablePaymentMethods, selectedPaymentMethodId],
   );
-  const deliveryFee = orderType === 'delivery' ? Number(tenant?.deliveryFeeBase || 0) : 0;
-  const baseTotal = subtotal + deliveryFee;
-  const total = baseTotal;
   const selectedSavedAddress = useMemo(
     () => savedAddresses.find((address) => address.id === selectedSavedAddressId) || null,
     [savedAddresses, selectedSavedAddressId],
@@ -1095,6 +1327,131 @@ export default function PublicMenuPage() {
         ? formatSavedAddress(selectedSavedAddress)
         : manualDeliveryAddress || deliveryAddress
       : '';
+
+  useEffect(() => {
+    let active = true;
+
+    if (!tenantSlug || !tenant || orderType !== 'delivery') {
+      setDeliveryFeeQuote(null);
+      setDeliveryFeeLoading(false);
+      return () => {
+        active = false;
+      };
+    }
+
+    if (tenant.deliveryFeeMode !== 'per_km') {
+      setDeliveryFeeQuote({
+        deliveryFeeAmount: Number(tenant.deliveryFeeBase || 0),
+        distanceKm: null,
+        deliveryFeeMode: 'fixed',
+        deliveryFeePerKm: Number(tenant.deliveryFeePerKm || 0),
+        usedFallback: false,
+      });
+      setDeliveryFeeLoading(false);
+      return () => {
+        active = false;
+      };
+    }
+
+    const addressPayload =
+      !usingNewAddress && selectedSavedAddress
+        ? {
+            street: selectedSavedAddress.street,
+            number: selectedSavedAddress.number || '',
+            neighborhood: selectedSavedAddress.neighborhood || '',
+            city: selectedSavedAddress.city || '',
+            state: selectedSavedAddress.state || '',
+            zipCode: selectedSavedAddress.zipCode || '',
+            reference: selectedSavedAddress.reference || '',
+          }
+        : usingNewAddress
+          ? {
+              street: addressForm.street,
+              number: addressForm.number,
+              neighborhood: addressForm.neighborhood,
+              city: addressForm.city,
+              state: addressForm.state,
+              zipCode: addressForm.zipCode,
+              reference: addressForm.reference,
+            }
+          : null;
+
+    const timer = setTimeout(async () => {
+      setDeliveryFeeLoading(true);
+      try {
+        const { response, data } = await requestJson<DeliveryFeeQuoteResponse>(`/api/public/delivery-fee/${tenantSlug}`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          cache: 'no-store',
+          timeoutMs: 9_000,
+          retries: 1,
+          body: JSON.stringify({
+            orderType,
+            deliveryAddress: effectiveDeliveryAddress,
+            address: addressPayload,
+          }),
+        });
+        if (!active) return;
+        if (!response.ok || !data) {
+          setDeliveryFeeQuote({
+            deliveryFeeAmount: Number(tenant.deliveryFeeBase || 0),
+            distanceKm: null,
+            deliveryFeeMode: 'per_km',
+            deliveryFeePerKm: Number(tenant.deliveryFeePerKm || 0),
+            usedFallback: true,
+          });
+          return;
+        }
+        setDeliveryFeeQuote({
+          deliveryFeeAmount: Number(data.deliveryFeeAmount ?? tenant.deliveryFeeBase ?? 0),
+          distanceKm: data.distanceKm ?? null,
+          deliveryFeeMode: data.deliveryFeeMode === 'per_km' ? 'per_km' : 'fixed',
+          deliveryFeePerKm: Number(data.deliveryFeePerKm ?? tenant.deliveryFeePerKm ?? 0),
+          usedFallback: Boolean(data.usedFallback),
+        });
+      } catch {
+        if (!active) return;
+        setDeliveryFeeQuote({
+          deliveryFeeAmount: Number(tenant.deliveryFeeBase || 0),
+          distanceKm: null,
+          deliveryFeeMode: 'per_km',
+          deliveryFeePerKm: Number(tenant.deliveryFeePerKm || 0),
+          usedFallback: true,
+        });
+      } finally {
+        if (active) {
+          setDeliveryFeeLoading(false);
+        }
+      }
+    }, 350);
+
+    return () => {
+      active = false;
+      clearTimeout(timer);
+    };
+  }, [
+    addressForm.city,
+    addressForm.neighborhood,
+    addressForm.number,
+    addressForm.reference,
+    addressForm.state,
+    addressForm.street,
+    addressForm.zipCode,
+    effectiveDeliveryAddress,
+    orderType,
+    selectedSavedAddress,
+    tenant,
+    tenantSlug,
+    usingNewAddress,
+  ]);
+
+  const deliveryFee =
+    orderType === 'delivery'
+      ? Number(deliveryFeeQuote?.deliveryFeeAmount ?? tenant?.deliveryFeeBase ?? 0)
+      : 0;
+  const baseTotal = subtotal + deliveryFee;
+  const total = baseTotal;
+  const parsedChangeForAmount = useMemo(() => parseMoneyInput(changeFor), [changeFor]);
 
   const heroImage =
     tenant?.coverImageUrl ||
@@ -1138,19 +1495,69 @@ export default function PublicMenuPage() {
 
   const latestPortalOrder = useMemo(() => portalOrders[0] || null, [portalOrders]);
 
-  function openCustomize(product: Product) {
-    setCustomizeProduct(product);
+  function productRequiresCustomization(product: Product) {
+    return (
+      product.product_type === 'size_based' ||
+      product.optionGroups.length > 0 ||
+      Number(product.optionGroupCount || 0) > 0
+    );
+  }
+
+  async function loadProductOptionGroups(product: Product) {
+    const cachedProduct = products.find((candidate) => candidate.id === product.id);
+    if (cachedProduct?.optionGroups.length) return cachedProduct;
+    if (!tenantSlug || Number(product.optionGroupCount || 0) === 0) return cachedProduct || product;
+
+    setCustomizeLoadingProductId(product.id);
+    try {
+      const { response, data } = await requestJson<{
+        optionGroups?: ProductOptionGroup[];
+        error?: string;
+      }>(`/api/public/product-options/${tenantSlug}/${product.id}`, {
+        cache: 'default',
+        timeoutMs: NETWORK_TIMEOUT_MS,
+        retries: 1,
+      });
+
+      if (!response.ok || !data) {
+        throw new Error(data?.error || 'Falha ao carregar complementos.');
+      }
+
+      const optionGroups = Array.isArray(data.optionGroups) ? data.optionGroups : [];
+      const nextProduct = {
+        ...(cachedProduct || product),
+        optionGroups,
+        optionGroupCount: optionGroups.length,
+      };
+      setProducts((current) => current.map((candidate) => (candidate.id === product.id ? nextProduct : candidate)));
+      return nextProduct;
+    } finally {
+      setCustomizeLoadingProductId((current) => (current === product.id ? null : current));
+    }
+  }
+
+  async function openCustomize(product: Product) {
+    setMenuActionError(null);
+    let readyProduct = product;
+    try {
+      readyProduct = await loadProductOptionGroups(product);
+    } catch (error) {
+      setMenuActionError(error instanceof Error ? error.message : 'Falha ao carregar complementos.');
+      return;
+    }
+
+    setCustomizeProduct(readyProduct);
     setPizzaFlavorPickerOpen(false);
     setPizzaFlavorSearch('');
     setSelectedByGroup({});
     setCustomNotes('');
-    if (product.product_type === 'size_based') {
-      const sizes = getSizeOptions(product);
+    if (readyProduct.product_type === 'size_based') {
+      const sizes = getSizeOptions(readyProduct);
       const firstSize = sizes[0]?.label || '';
       setSelectedPizzaSize(firstSize);
-      setSelectedPizzaFlavorIds([product.id]);
+      setSelectedPizzaFlavorIds([readyProduct.id]);
       setSelectedPizzaBorderLabel('');
-      setSelectedPizzaDoughLabel(getPizzaDoughs(product)[0]?.label || '');
+      setSelectedPizzaDoughLabel(getPizzaDoughs(readyProduct)[0]?.label || '');
       setExtraDrinkQtyById({});
     } else {
       setSelectedPizzaSize('');
@@ -1159,6 +1566,16 @@ export default function PublicMenuPage() {
       setSelectedPizzaDoughLabel('');
       setExtraDrinkQtyById({});
     }
+  }
+
+  async function addProductButtonAction(product: Product) {
+    setMenuActionError(null);
+    if (productRequiresCustomization(product)) {
+      await openCustomize(product);
+      return;
+    }
+
+    addProductToCart(product, [], '');
   }
 
   function getPizzaFlavorCandidates(product: Product) {
@@ -1432,6 +1849,7 @@ export default function PublicMenuPage() {
   function openCheckout() {
     if (!cart.length) return;
     if (!tenant?.storeOpen) return;
+    checkoutKeyRef.current = createCheckoutKey();
     setCheckoutOpen(true);
     setCheckoutStep('cart');
     setFormError(null);
@@ -1439,12 +1857,14 @@ export default function PublicMenuPage() {
 
   function openCheckoutAt(step: CheckoutStep) {
     if (!tenant?.storeOpen) return;
+    checkoutKeyRef.current = createCheckoutKey();
     setCheckoutOpen(true);
     setCheckoutStep(step);
     setFormError(null);
   }
 
   function closeCheckout() {
+    checkoutKeyRef.current = '';
     setCheckoutOpen(false);
     setCheckoutStep('cart');
     setFormError(null);
@@ -1506,7 +1926,14 @@ export default function PublicMenuPage() {
       if (!selectedPaymentMethod) {
         return setFormError('A loja ainda nao configurou formas de pagamento para este cardapio.');
       }
-      if (selectedPaymentMethod?.methodType === 'cash' && changeFor && Number(changeFor) < total) {
+      if (
+        selectedPaymentMethod.methodType === 'cash' &&
+        changeFor.trim() &&
+        (!Number.isFinite(parsedChangeForAmount) || parsedChangeForAmount < 0)
+      ) {
+        return setFormError('Informe um valor valido para troco.');
+      }
+      if (selectedPaymentMethod.methodType === 'cash' && parsedChangeForAmount > 0 && parsedChangeForAmount < total) {
         return setFormError('Troco deve ser maior ou igual ao total.');
       }
       setCheckoutStep('review');
@@ -1538,10 +1965,32 @@ export default function PublicMenuPage() {
         setFormError('O endereco salvo selecionado precisa ter numero. Cadastre um novo endereco ou escolha outro.');
         return;
       }
-      const response = await fetch(`/api/public/checkout/${tenantSlug}`, {
+      if (
+        selectedPaymentMethod.methodType === 'cash' &&
+        changeFor.trim() &&
+        (!Number.isFinite(parsedChangeForAmount) || parsedChangeForAmount < 0)
+      ) {
+        setFormError('Informe um valor valido para troco.');
+        return;
+      }
+      if (selectedPaymentMethod.methodType === 'cash' && parsedChangeForAmount > 0 && parsedChangeForAmount < total) {
+        setFormError('Troco deve ser maior ou igual ao total.');
+        return;
+      }
+      const checkoutKey = checkoutKeyRef.current || createCheckoutKey();
+      checkoutKeyRef.current = checkoutKey;
+      const { response, data } = await requestJson<{
+        error?: string;
+        orderId?: string;
+        total?: number;
+        deliveryFeeAmount?: number;
+      }>(`/api/public/checkout/${tenantSlug}`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
+        timeoutMs: CHECKOUT_TIMEOUT_MS,
+        retries: 1,
         body: JSON.stringify({
+          checkoutKey,
           customerName,
           customerPhone,
           customerEmail,
@@ -1572,7 +2021,7 @@ export default function PublicMenuPage() {
               : null,
           paymentMethod: selectedPaymentMethod.methodType,
           paymentMethodId: selectedPaymentMethod.id,
-          changeFor: selectedPaymentMethod?.methodType === 'cash' ? Number(changeFor || 0) : 0,
+          changeFor: selectedPaymentMethod.methodType === 'cash' ? parsedChangeForAmount : 0,
           items: cart.map((item) => ({
             productId: item.productId,
             quantity: item.quantity,
@@ -1590,13 +2039,17 @@ export default function PublicMenuPage() {
           })),
         }),
       });
-      const data = await response.json();
-      if (!response.ok) return setFormError(data.error || 'Nao foi possivel finalizar o pedido.');
+      if (!response.ok || !data) {
+        return setFormError(data?.error || 'Nao foi possivel finalizar o pedido.');
+      }
 
-      const currentDeliveryFee = orderType === 'delivery' ? Number(tenant?.deliveryFeeBase || 0) : 0;
+      const currentDeliveryFee =
+        orderType === 'delivery'
+          ? Number(data.deliveryFeeAmount ?? deliveryFeeQuote?.deliveryFeeAmount ?? tenant?.deliveryFeeBase ?? 0)
+          : 0;
       const currentSubtotal = subtotal;
-      const currentTotal = currentSubtotal + currentDeliveryFee;
-      const currentChangeFor = selectedPaymentMethod?.methodType === 'cash' ? Number(changeFor || 0) : 0;
+      const currentTotal = Number(data.total ?? currentSubtotal + currentDeliveryFee);
+      const currentChangeFor = selectedPaymentMethod.methodType === 'cash' ? parsedChangeForAmount : 0;
       setSubmittedSnapshot({
         orderId: String(data.orderId || ''),
         createdAtIso: new Date().toISOString(),
@@ -1647,8 +2100,9 @@ export default function PublicMenuPage() {
       setOrderId(String(data.orderId || ''));
       setCheckoutStep('success');
       setCart([]);
+      checkoutKeyRef.current = '';
     } catch {
-      setFormError('Falha ao enviar pedido. Tente novamente.');
+      setFormError('Falha de conexao ao enviar. Tente novamente; se o pedido ja entrou, o sistema nao duplica.');
     } finally {
       setSubmitting(false);
     }
@@ -1784,7 +2238,11 @@ export default function PublicMenuPage() {
                 </div>
                 <div>
                   <p className="text-slate-500 flex items-center gap-2"><Bike className="w-4 h-4" /> Taxa de entrega</p>
-                  <p className="font-bold text-slate-900">A partir de {brl(Number(tenant.deliveryFeeBase || 0))}</p>
+                  <p className="font-bold text-slate-900">
+                    {tenant.deliveryFeeMode === 'per_km'
+                      ? `${brl(Number(tenant.deliveryFeeBase || 0))} minimo • ${brl(Number(tenant.deliveryFeePerKm || 0))}/km`
+                      : `A partir de ${brl(Number(tenant.deliveryFeeBase || 0))}`}
+                  </p>
                 </div>
                 <div>
                   <p className="text-slate-500 flex items-center gap-2"><Store className="w-4 h-4" /> Status</p>
@@ -1863,10 +2321,22 @@ export default function PublicMenuPage() {
                 <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Pesquisar Produtos" className="w-full border border-slate-200 bg-white rounded-lg pl-10 pr-4 py-3 text-sm" />
               </div>
             </div>
+            {menuActionError ? (
+              <div className="mt-3 rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm font-semibold text-rose-700">
+                {menuActionError}
+              </div>
+            ) : null}
             <div className="space-y-6 mt-5">
-              {productsByCategory.map(({ category, items }) => (
+              {renderedProductsByCategory.map(({ category, items, totalItems }) => (
                 <section key={category.id}>
-                  <h2 className="text-3xl font-extrabold text-slate-900 mb-3">{category.name}</h2>
+                  <div className="mb-3 flex flex-wrap items-end justify-between gap-2">
+                    <h2 className="text-3xl font-extrabold text-slate-900">{category.name}</h2>
+                    {totalItems > items.length ? (
+                      <span className="text-xs font-semibold text-slate-500">
+                        {items.length} de {totalItems}
+                      </span>
+                    ) : null}
+                  </div>
                   <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
                     {items.map((product) => (
                       <article key={product.id} className="bg-white border border-slate-200 rounded-xl overflow-hidden flex">
@@ -1884,14 +2354,17 @@ export default function PublicMenuPage() {
                           <div className="mt-auto flex items-center justify-between">
                             <strong className="text-slate-900 text-xl">{getProductCardPrice(product)}</strong>
                             <button
-                              onClick={() =>
-                                product.optionGroups?.length || product.product_type === 'size_based'
-                                  ? openCustomize(product)
-                                  : addProductToCart(product, [], '')
-                              }
-                              className="w-8 h-8 rounded-lg bg-rose-500 text-white grid place-items-center"
+                              type="button"
+                              onClick={() => void addProductButtonAction(product)}
+                              disabled={customizeLoadingProductId === product.id}
+                              className="w-8 h-8 rounded-lg bg-rose-500 text-white grid place-items-center disabled:cursor-wait disabled:opacity-70"
+                              aria-label={`Adicionar ${product.name}`}
                             >
-                              <Plus className="w-4 h-4" />
+                              {customizeLoadingProductId === product.id ? (
+                                <span className="h-4 w-4 animate-spin rounded-full border-2 border-white/40 border-t-white" />
+                              ) : (
+                                <Plus className="w-4 h-4" />
+                              )}
                             </button>
                           </div>
                         </div>
@@ -1900,7 +2373,18 @@ export default function PublicMenuPage() {
                   </div>
                 </section>
               ))}
-              {productsByCategory.length === 0 ? <p className="text-sm text-slate-500">Nenhum produto encontrado.</p> : null}
+              {totalFilteredProducts === 0 ? <p className="text-sm text-slate-500">Nenhum produto encontrado.</p> : null}
+              {hasMoreProducts ? (
+                <div className="flex justify-center pt-2">
+                  <button
+                    type="button"
+                    onClick={() => setVisibleProductLimit((current) => current + PRODUCT_RENDER_INCREMENT)}
+                    className="rounded-xl border border-slate-200 bg-white px-5 py-3 text-sm font-bold text-slate-700 shadow-sm transition hover:border-rose-200 hover:bg-rose-50 hover:text-rose-700"
+                  >
+                    Mostrar mais produtos ({totalFilteredProducts - renderedProductsCount})
+                  </button>
+                </div>
+              ) : null}
             </div>
           </>
         ) : null}
@@ -2783,11 +3267,6 @@ export default function PublicMenuPage() {
                                   </div>
                                 </div>
                               ) : null}
-                              <p className="mt-1 text-[11px] text-slate-500">
-                                {addressForm.street.trim().length < 2
-                                  ? 'Digite pelo menos 2 letras da rua para abrir as sugestoes.'
-                                  : 'As ruas aparecem enquanto voce digita.'}
-                              </p>
                             </div>
                             <input
                               value={addressForm.number}
@@ -2867,11 +3346,11 @@ export default function PublicMenuPage() {
                         A loja ainda nao configurou formas de pagamento para este cardapio.
                       </div>
                     )}
-                  {selectedPaymentMethod?.methodType === 'cash' ? <div><label className="text-sm font-semibold text-slate-700">Troco para quanto? (opcional)</label><input type="number" min="0" step="0.01" value={changeFor} onChange={(e) => setChangeFor(e.target.value)} className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm" placeholder="0,00" /></div> : null}
+                  {selectedPaymentMethod?.methodType === 'cash' ? <div><label className="text-sm font-semibold text-slate-700">Troco para quanto? (opcional)</label><input type="text" inputMode="decimal" value={changeFor} onChange={(e) => setChangeFor(e.target.value)} className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm" placeholder="0,00" /></div> : null}
                 </section>
               ) : null}
 
-              {checkoutStep === 'review' ? <section className="space-y-3"><div className="bg-slate-50 border border-slate-200 rounded-xl p-3 text-sm"><p><strong>Cliente:</strong> {customerName}</p><p><strong>Celular:</strong> {customerPhone}</p><p><strong>Tipo:</strong> {orderType === 'delivery' ? 'Entrega' : orderType === 'pickup' ? 'Retirar na loja' : 'Consumir no local'}</p>{orderType === 'delivery' ? <p><strong>Endereco:</strong> {effectiveDeliveryAddress}</p> : null}<p><strong>Pagamento:</strong> {selectedPaymentMethod?.name || 'Nao configurado'}</p>{selectedPaymentMethod?.methodType === 'cash' && changeFor ? <p><strong>Troco para:</strong> {brl(Number(changeFor))}</p> : null}</div></section> : null}
+              {checkoutStep === 'review' ? <section className="space-y-3"><div className="bg-slate-50 border border-slate-200 rounded-xl p-3 text-sm"><p><strong>Cliente:</strong> {customerName}</p><p><strong>Celular:</strong> {customerPhone}</p><p><strong>Tipo:</strong> {orderType === 'delivery' ? 'Entrega' : orderType === 'pickup' ? 'Retirar na loja' : 'Consumir no local'}</p>{orderType === 'delivery' ? <p><strong>Endereco:</strong> {effectiveDeliveryAddress}</p> : null}<p><strong>Pagamento:</strong> {selectedPaymentMethod?.name || 'Nao configurado'}</p>{selectedPaymentMethod?.methodType === 'cash' && changeFor.trim() && Number.isFinite(parsedChangeForAmount) ? <p><strong>Troco para:</strong> {brl(parsedChangeForAmount)}</p> : null}</div></section> : null}
 
               {checkoutStep === 'success' ? (
                 <section className="py-8 text-center">
@@ -2888,9 +3367,20 @@ export default function PublicMenuPage() {
               <div className="border-t border-slate-200 p-4 space-y-2">
                 <div className="text-sm space-y-1">
                   <div className="flex justify-between"><span className="text-slate-500">Subtotal</span><span>{brl(subtotal)}</span></div>
-                  <div className="flex justify-between"><span className="text-slate-500">Taxa de entrega</span><span>{brl(deliveryFee)}</span></div>
+                  <div className="flex justify-between">
+                    <span className="text-slate-500">
+                      Taxa de entrega
+                      {deliveryFeeQuote?.distanceKm ? ` (${deliveryFeeQuote.distanceKm.toFixed(2)} km de trajeto)` : ''}
+                    </span>
+                    <span>{deliveryFeeLoading ? 'Calculando...' : brl(deliveryFee)}</span>
+                  </div>
                   <div className="flex justify-between font-bold text-slate-900"><span>Total</span><span>{brl(total)}</span></div>
                 </div>
+                {tenant?.deliveryFeeMode === 'per_km' && deliveryFeeQuote?.usedFallback ? (
+                  <p className="text-xs text-amber-700">
+                    Nao foi possivel calcular o trajeto agora. O sistema usou a taxa minima da loja.
+                  </p>
+                ) : null}
                 {formError ? <p className="text-sm text-rose-600">{formError}</p> : null}
                 {checkoutStep === 'review' ? <button onClick={submitOrder} disabled={submitting} className="w-full py-3 rounded-xl bg-emerald-500 text-white font-bold disabled:opacity-60">{submitting ? 'Enviando pedido...' : 'Finalizar pedido'}</button> : <button onClick={goNextStep} className="w-full py-3 rounded-xl bg-rose-500 text-white font-bold">Proximo</button>}
               </div>

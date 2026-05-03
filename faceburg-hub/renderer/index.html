@@ -1,214 +1,44 @@
-﻿<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="pt-BR">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Faceburg Hub</title>
+  <title>Faceburg App</title>
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
-  <div id="login-screen" class="screen active">
-    <div class="login-card">
-      <div class="login-logo">
-        <div class="logo-icon">F</div>
-        <h1>Faceburg Hub</h1>
-        <p class="login-subtitle">Agentes de WhatsApp e impressao em um unico app</p>
+  <div class="app-shell">
+    <header class="topbar">
+      <div class="brand-block">
+        <div class="brand-mark">F</div>
+        <div class="brand-copy">
+          <strong>Faceburg App</strong>
+          <span id="server-label">http://localhost:3000</span>
+        </div>
       </div>
-      <form id="login-form">
-        <div class="field">
-          <label for="login-server">URL do Servidor</label>
-          <input id="login-server" type="text" placeholder="http://localhost:3000" required />
-        </div>
-        <div class="field">
-          <label for="login-slug">Empresa (slug)</label>
-          <input id="login-slug" type="text" placeholder="minha-empresa" required />
-        </div>
-        <div class="field">
-          <label for="login-email">E-mail</label>
-          <input id="login-email" type="email" placeholder="admin@empresa.com" required />
-        </div>
-        <div class="field">
-          <label for="login-password">Senha</label>
-          <input id="login-password" type="password" placeholder="********" required />
-        </div>
-        <div class="field">
-          <label for="login-printer">Impressora padrao (opcional)</label>
-          <select id="login-printer"><option value="">Padrao do sistema</option></select>
-        </div>
-        <button id="login-btn" type="submit" class="btn btn-primary btn-block">Entrar</button>
-        <p id="login-error" class="error-text"></p>
-      </form>
-    </div>
-  </div>
+      <div class="topbar-actions">
+        <button id="btn-system-back" class="btn btn-ghost" type="button">Voltar</button>
+        <button id="btn-system-forward" class="btn btn-ghost" type="button">Avancar</button>
+        <button id="btn-config-server" class="btn btn-ghost" type="button">Servidor</button>
+        <button id="btn-system-home" class="btn btn-ghost" type="button">Sistema</button>
+        <button id="btn-system-reload" class="btn btn-ghost" type="button">Atualizar</button>
+        <button id="btn-open-window" class="btn btn-ghost" type="button">Abrir em janela</button>
+        <button id="btn-whats-toggle" class="btn btn-whatsapp" type="button">Abrir WhatsApp</button>
+      </div>
+    </header>
 
-  <div id="main-screen" class="screen">
-    <nav class="sidebar">
-      <div class="sidebar-logo">
-        <div class="logo-icon-sm">F</div>
-        <span class="sidebar-title">Hub</span>
-      </div>
-      <div class="nav-items">
-        <button class="nav-btn active" data-tab="whatsapp">
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 11.5a8.38 8.38 0 01-.9 3.8 8.5 8.5 0 01-7.6 4.7 8.38 8.38 0 01-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 01-.9-3.8 8.5 8.5 0 014.7-7.6 8.38 8.38 0 013.8-.9h.5a8.48 8.48 0 018 8v.5z"/></svg>
-          <span>WhatsApp</span>
-          <span id="whats-badge" class="badge hidden"></span>
-        </button>
-        <button class="nav-btn" data-tab="impressao">
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 6 2 18 2 18 9"/><path d="M6 18H4a2 2 0 01-2-2v-5a2 2 0 012-2h16a2 2 0 012 2v5a2 2 0 01-2 2h-2"/><rect x="6" y="14" width="12" height="8"/></svg>
-          <span>Impressao</span>
-          <span id="print-badge" class="badge hidden"></span>
-        </button>
-        <button class="nav-btn" data-tab="logs">
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
-          <span>Logs</span>
-        </button>
-        <button class="nav-btn" data-tab="config">
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-2 2 2 2 0 01-2-2v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83 0 2 2 0 010-2.83l.06-.06a1.65 1.65 0 00.33-1.82 1.65 1.65 0 00-1.51-1H3a2 2 0 01-2-2 2 2 0 012-2h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 010-2.83 2 2 0 012.83 0l.06.06a1.65 1.65 0 001.82.33H9a1.65 1.65 0 001-1.51V3a2 2 0 012-2 2 2 0 012 2v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 0 2 2 0 010 2.83l-.06.06a1.65 1.65 0 00-.33 1.82V9a1.65 1.65 0 001.51 1H21a2 2 0 012 2 2 2 0 01-2 2h-.09a1.65 1.65 0 00-1.51 1z"/></svg>
-          <span>Configuracoes</span>
-        </button>
-      </div>
-      <div class="sidebar-footer">
-        <div id="user-info" class="user-info">
-          <span id="user-name" class="user-name-text"></span>
-          <span id="tenant-name" class="tenant-name-text"></span>
-        </div>
-        <button id="logout-btn" class="nav-btn nav-btn-danger">
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 21H5a2 2 0 01-2-2V5a2 2 0 012-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
-          <span>Sair</span>
-        </button>
-      </div>
-    </nav>
+    <section class="status-bar">
+      <span id="whats-status-chip" class="status-chip status-chip-off">WhatsApp desligado</span>
+      <span id="runtime-status" class="runtime-status">Entre no sistema normalmente nesta janela. Quando quiser, clique em Abrir WhatsApp.</span>
+    </section>
 
-    <main class="content">
-      <div id="tab-whatsapp" class="tab-panel active">
-        <div class="panel-header">
-          <h2>WhatsApp Agent</h2>
-          <div class="panel-actions">
-            <button id="btn-whats-toggle" class="btn btn-sm btn-success">Iniciar</button>
-            <button id="btn-restart-whats" class="btn btn-sm btn-outline hidden">Reiniciar</button>
-          </div>
-        </div>
-        <div class="info-strip">
-          <span id="whats-channel-chip" class="channel-chip channel-chip-fallback">Fallback polling</span>
-          <span id="whats-channel-description" class="info-strip-text">Aguardando conexao em tempo real.</span>
-        </div>
-        <div class="whatsapp-grid">
-          <div class="card card-status">
-            <h3>Status</h3>
-            <div id="whats-status-display" class="status-display">
-              <span class="status-icon status-stopped">●</span>
-              <span id="whats-status-text">Parado</span>
-            </div>
-            <p class="agent-hint">O agente envia mensagens automaticamente quando o sistema cria jobs. Se o canal realtime cair, ele continua funcionando por fallback.</p>
-            <div id="whats-phone" class="detail-row hidden">
-              <span class="detail-label">Telefone:</span>
-              <span id="whats-phone-number" class="detail-value"></span>
-            </div>
-            <div id="whats-channel-row" class="detail-row">
-              <span class="detail-label">Canal de entrega:</span>
-              <span id="whats-channel-text" class="detail-value">Fallback polling</span>
-            </div>
-            <div id="whats-error" class="detail-row error-row hidden">
-              <span id="whats-error-text" class="error-text"></span>
-            </div>
-          </div>
-          <div class="card card-qr">
-            <h3>QR Code</h3>
-            <div id="qr-container" class="qr-container">
-              <div class="qr-placeholder">
-                <p>Inicie o agente para gerar o QR code.</p>
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <div id="tab-impressao" class="tab-panel">
-        <div class="panel-header">
-          <h2>Agente de Impressao</h2>
-          <div class="panel-actions">
-            <button id="btn-print-toggle" class="btn btn-sm btn-success">Iniciar</button>
-          </div>
-        </div>
-        <div class="info-strip">
-          <span id="print-channel-chip" class="channel-chip channel-chip-fallback">Fallback polling</span>
-          <span id="print-channel-description" class="info-strip-text">Aguardando conexao em tempo real.</span>
-        </div>
-        <div class="print-grid">
-          <div class="card">
-            <h3>Status</h3>
-            <div id="print-status-display" class="status-display">
-              <span class="status-icon status-stopped">●</span>
-              <span id="print-status-text">Parado</span>
-            </div>
-            <div id="print-channel-row" class="detail-row">
-              <span class="detail-label">Canal de entrega:</span>
-              <span id="print-channel-text" class="detail-value">Fallback polling</span>
-            </div>
-            <div id="print-last-job" class="detail-row hidden">
-              <span class="detail-label">Ultima impressao:</span>
-              <span id="print-last-job-time" class="detail-value"></span>
-            </div>
-            <div id="print-error" class="detail-row error-row hidden">
-              <span id="print-error-text" class="error-text"></span>
-            </div>
-          </div>
-          <div class="card">
-            <h3>Impressora</h3>
-            <div class="field compact-field">
-              <select id="printer-select"><option value="">Padrao do sistema</option></select>
-            </div>
-            <button id="btn-update-printer" class="btn btn-sm btn-primary" style="margin-top:8px;">Salvar impressora</button>
-          </div>
-        </div>
-      </div>
-
-      <div id="tab-logs" class="tab-panel">
-        <div class="panel-header">
-          <h2>Logs</h2>
-          <button id="btn-clear-logs" class="btn btn-sm btn-outline">Limpar</button>
-        </div>
-        <div id="log-container" class="log-container">
-          <div class="log-empty">Nenhum log ainda.</div>
-        </div>
-      </div>
-
-      <div id="tab-config" class="tab-panel">
-        <div class="panel-header">
-          <h2>Configuracoes</h2>
-        </div>
-        <div class="config-grid">
-          <div class="card">
-            <h3>Conexao</h3>
-            <div class="detail-stack">
-              <div class="detail-row"><span class="detail-label">Servidor:</span><span id="config-server-url" class="detail-value">-</span></div>
-              <div class="detail-row"><span class="detail-label">Empresa:</span><span id="config-tenant-name" class="detail-value">-</span></div>
-              <div class="detail-row"><span class="detail-label">Usuario:</span><span id="config-user-name" class="detail-value">-</span></div>
-              <div class="detail-row"><span class="detail-label">Chave WhatsApp:</span><span id="config-whats-key" class="detail-value">-</span></div>
-              <div class="detail-row"><span class="detail-label">Chave Impressao:</span><span id="config-print-key" class="detail-value">-</span></div>
-            </div>
-          </div>
-          <div class="card">
-            <h3>Inicializacao automatica</h3>
-            <p class="agent-hint">Defina quais componentes devem iniciar automaticamente junto com o Faceburg Hub.</p>
-            <div class="toggle-list">
-              <label class="toggle-row">
-                <input type="checkbox" id="toggle-win-startup">
-                <span>Iniciar Faceburg Hub ao ligar o Windows</span>
-              </label>
-              <label class="toggle-row">
-                <input type="checkbox" id="toggle-auto-whats">
-                <span>Auto-iniciar agente WhatsApp</span>
-              </label>
-              <label class="toggle-row">
-                <input type="checkbox" id="toggle-auto-print">
-                <span>Auto-iniciar agente de impressao</span>
-              </label>
-            </div>
-            <button id="btn-save-config" class="btn btn-sm btn-primary" style="margin-top: 20px;">Salvar configuracoes</button>
-          </div>
-        </div>
-      </div>
+    <main class="browser-area">
+      <webview
+        id="system-webview"
+        class="system-webview"
+        partition="persist:faceburg-system"
+        allowpopups
+      ></webview>
     </main>
   </div>
 

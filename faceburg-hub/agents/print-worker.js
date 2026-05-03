@@ -12,7 +12,7 @@ const POLL_FALLBACK_MS = Number(process.env.HUB_PRINT_POLL_FALLBACK_MS || proces
 const WS_RECONNECT_BASE_MS = Number(process.env.HUB_PRINT_WS_RECONNECT_MS || process.env.PRINT_WS_RECONNECT_MS || 3000);
 const WS_RECONNECT_MAX_MS = Number(process.env.HUB_PRINT_WS_RECONNECT_MAX_MS || process.env.PRINT_WS_RECONNECT_MAX_MS || 60000);
 const WS_LOG_COOLDOWN_MS = Number(process.env.HUB_PRINT_WS_LOG_COOLDOWN_MS || process.env.PRINT_WS_LOG_COOLDOWN_MS || 60000);
-const HEARTBEAT_MS = Number(process.env.HUB_PRINT_HEARTBEAT_MS || process.env.PRINT_HEARTBEAT_MS || 180000);
+const HEARTBEAT_MS = Number(process.env.HUB_PRINT_HEARTBEAT_MS || process.env.PRINT_HEARTBEAT_MS || 60000);
 const AUTH_BACKOFF_MS = Number(process.env.HUB_PRINT_AUTH_BACKOFF_MS || process.env.PRINT_AUTH_BACKOFF_MS || 600000);
 
 let draining = false;

@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { NextResponse } from 'next/server';
 import { query } from '@/lib/db';
 import { ensureFinanceSchema } from '@/lib/finance-schema';
+import { normalizePaymentMethodType, parseIntegerInput, parseMoneyInput } from '@/lib/finance-utils';
 import { getValidatedTenantSession } from '@/lib/tenant-auth';
 
 type PaymentMethodRow = {
@@ -30,6 +31,41 @@ function mapRow(row: PaymentMethodRow) {
   };
 }
 
+async function hasDuplicatePaymentMethodName(tenantId: string, name: string, id?: string) {
+  const result = await query<{ id: string }>(
+    `SELECT id
+     FROM payment_methods
+     WHERE tenant_id = $1
+       AND lower(trim(name)) = lower(trim($2))
+       AND ($3::text IS NULL OR id <> $3)
+     LIMIT 1`,
+    [tenantId, name, id || null],
+  );
+  return Boolean(result.rowCount);
+}
+
+function readPaymentMethodInput(body: Record<string, unknown>) {
+  return {
+    id: String(body.id || '').trim(),
+    name: String(body.name || '').trim(),
+    methodType: normalizePaymentMethodType(body.methodType),
+    feePercent: parseMoneyInput(body.feePercent),
+    feeFixed: parseMoneyInput(body.feeFixed),
+    settlementDays: parseIntegerInput(body.settlementDays),
+    active: body.active !== false,
+  };
+}
+
+function validatePaymentMethodInput(input: ReturnType<typeof readPaymentMethodInput>, requireId = false) {
+  if (requireId && !input.id) return 'ID obrigatorio.';
+  if (!input.name) return 'Nome da forma de pagamento e obrigatorio.';
+  if (!input.methodType) return 'Tipo de pagamento invalido.';
+  if (!Number.isFinite(input.feePercent) || input.feePercent < 0 || input.feePercent > 100) return 'Taxa percentual invalida.';
+  if (!Number.isFinite(input.feeFixed) || input.feeFixed < 0) return 'Taxa fixa invalida.';
+  if (!Number.isFinite(input.settlementDays) || input.settlementDays < 0 || input.settlementDays > 365) return 'Dias de recebimento invalidos.';
+  return '';
+}
+
 export async function GET() {
   await ensureFinanceSchema();
   const session = await getValidatedTenantSession();
@@ -55,32 +91,15 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   }
 
-  const body = await request.json();
-  const name = String(body.name || '').trim();
-  const methodType = String(body.methodType || '').trim().toLowerCase();
-  const feePercent = Number(body.feePercent || 0);
-  const feeFixed = Number(body.feeFixed || 0);
-  const settlementDays = Number(body.settlementDays || 0);
-  const active = body.active !== false;
-
-  if (!name) {
-    return NextResponse.json({ error: 'Nome da forma de pagamento e obrigatorio.' }, { status: 400 });
+  const body = (await request.json()) as Record<string, unknown>;
+  const input = readPaymentMethodInput(body);
+  const validationError = validatePaymentMethodInput(input);
+  if (validationError) {
+    return NextResponse.json({ error: validationError }, { status: 400 });
   }
 
-  if (!['pix', 'cash', 'card', 'bank_slip', 'wallet', 'other'].includes(methodType)) {
-    return NextResponse.json({ error: 'Tipo de pagamento invalido.' }, { status: 400 });
-  }
-
-  if (!Number.isFinite(feePercent) || feePercent < 0 || feePercent > 100) {
-    return NextResponse.json({ error: 'Taxa percentual invalida.' }, { status: 400 });
-  }
-
-  if (!Number.isFinite(feeFixed) || feeFixed < 0) {
-    return NextResponse.json({ error: 'Taxa fixa invalida.' }, { status: 400 });
-  }
-
-  if (!Number.isFinite(settlementDays) || settlementDays < 0 || settlementDays > 365) {
-    return NextResponse.json({ error: 'Dias de recebimento invalidos.' }, { status: 400 });
+  if (await hasDuplicatePaymentMethodName(session.tenantId, input.name)) {
+    return NextResponse.json({ error: 'Ja existe uma forma de pagamento com esse nome.' }, { status: 409 });
   }
 
   const id = randomUUID();
@@ -88,7 +107,7 @@ export async function POST(request: Request) {
     `INSERT INTO payment_methods (id, tenant_id, name, method_type, fee_percent, fee_fixed, settlement_days, active, updated_at)
      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
      RETURNING id, name, method_type, fee_percent::text, fee_fixed::text, settlement_days, active, created_at, updated_at`,
-    [id, session.tenantId, name, methodType, feePercent, feeFixed, settlementDays, active],
+    [id, session.tenantId, input.name, input.methodType, input.feePercent, input.feeFixed, input.settlementDays, input.active],
   );
 
   return NextResponse.json({ paymentMethod: mapRow(result.rows[0]) }, { status: 201 });
@@ -101,37 +120,15 @@ export async function PATCH(request: Request) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   }
 
-  const body = await request.json();
-  const id = String(body.id || '').trim();
-  const name = String(body.name || '').trim();
-  const methodType = String(body.methodType || '').trim().toLowerCase();
-  const feePercent = Number(body.feePercent || 0);
-  const feeFixed = Number(body.feeFixed || 0);
-  const settlementDays = Number(body.settlementDays || 0);
-  const active = body.active !== false;
-
-  if (!id) {
-    return NextResponse.json({ error: 'ID obrigatorio.' }, { status: 400 });
+  const body = (await request.json()) as Record<string, unknown>;
+  const input = readPaymentMethodInput(body);
+  const validationError = validatePaymentMethodInput(input, true);
+  if (validationError) {
+    return NextResponse.json({ error: validationError }, { status: 400 });
   }
 
-  if (!name) {
-    return NextResponse.json({ error: 'Nome da forma de pagamento e obrigatorio.' }, { status: 400 });
-  }
-
-  if (!['pix', 'cash', 'card', 'bank_slip', 'wallet', 'other'].includes(methodType)) {
-    return NextResponse.json({ error: 'Tipo de pagamento invalido.' }, { status: 400 });
-  }
-
-  if (!Number.isFinite(feePercent) || feePercent < 0 || feePercent > 100) {
-    return NextResponse.json({ error: 'Taxa percentual invalida.' }, { status: 400 });
-  }
-
-  if (!Number.isFinite(feeFixed) || feeFixed < 0) {
-    return NextResponse.json({ error: 'Taxa fixa invalida.' }, { status: 400 });
-  }
-
-  if (!Number.isFinite(settlementDays) || settlementDays < 0 || settlementDays > 365) {
-    return NextResponse.json({ error: 'Dias de recebimento invalidos.' }, { status: 400 });
+  if (await hasDuplicatePaymentMethodName(session.tenantId, input.name, input.id)) {
+    return NextResponse.json({ error: 'Ja existe uma forma de pagamento com esse nome.' }, { status: 409 });
   }
 
   const result = await query<PaymentMethodRow>(
@@ -145,7 +142,7 @@ export async function PATCH(request: Request) {
          updated_at = NOW()
      WHERE id = $1 AND tenant_id = $2
      RETURNING id, name, method_type, fee_percent::text, fee_fixed::text, settlement_days, active, created_at, updated_at`,
-    [id, session.tenantId, name, methodType, feePercent, feeFixed, settlementDays, active],
+    [input.id, session.tenantId, input.name, input.methodType, input.feePercent, input.feeFixed, input.settlementDays, input.active],
   );
 
   if (!result.rowCount) {

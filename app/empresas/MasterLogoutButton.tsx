@@ -8,7 +8,6 @@ export default function MasterLogoutButton() {
   async function onLogout() {
     await fetch('/api/master/auth/logout', { method: 'POST' });
     router.push('/master/login');
-    router.refresh();
   }
 
   return (

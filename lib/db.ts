@@ -59,11 +59,21 @@ async function initializeDb() {
           issuer_neighborhood TEXT,
           issuer_city TEXT,
           issuer_state TEXT,
+          delivery_origin_use_issuer BOOLEAN NOT NULL DEFAULT TRUE,
+          delivery_origin_zip_code TEXT,
+          delivery_origin_street TEXT,
+          delivery_origin_number TEXT,
+          delivery_origin_complement TEXT,
+          delivery_origin_neighborhood TEXT,
+          delivery_origin_city TEXT,
+          delivery_origin_state TEXT,
           logo_url TEXT,
           menu_cover_image_url TEXT,
           whatsapp_phone TEXT,
           prep_time_minutes INTEGER NOT NULL DEFAULT 40,
           delivery_fee_base NUMERIC(10,2) NOT NULL DEFAULT 5,
+          delivery_fee_mode TEXT NOT NULL DEFAULT 'fixed',
+          delivery_fee_per_km NUMERIC(10,2) NOT NULL DEFAULT 0,
           store_open BOOLEAN NOT NULL DEFAULT TRUE,
           primary_color TEXT DEFAULT '#3b82f6',
           plan TEXT NOT NULL DEFAULT 'starter',
@@ -137,6 +147,8 @@ async function initializeDb() {
           type TEXT CHECK(type IN ('delivery', 'pickup', 'table')) DEFAULT 'delivery',
           table_number TEXT,
           payment_status TEXT DEFAULT 'pending',
+          cash_session_id TEXT,
+          public_checkout_key TEXT,
           created_at TIMESTAMPTZ DEFAULT NOW(),
           updated_at TIMESTAMPTZ DEFAULT NOW()
         );
@@ -252,6 +264,12 @@ async function initializeDb() {
           agent_key TEXT UNIQUE,
           connection_status TEXT NOT NULL DEFAULT 'disconnected',
           printer_name TEXT,
+          receipt_width INTEGER NOT NULL DEFAULT 32,
+          print_copies INTEGER NOT NULL DEFAULT 1,
+          print_events JSONB NOT NULL DEFAULT '{"new_order": true, "status_processing": true, "status_delivering": false, "status_completed": false, "status_cancelled": true, "manual_receipt": true}'::jsonb,
+          receipt_options JSONB NOT NULL DEFAULT '{"showStoreInfo": true, "showCustomerPhone": true, "showDeliveryAddress": true, "showPayment": true, "showItemNotes": true, "showTotals": true}'::jsonb,
+          receipt_header TEXT,
+          receipt_footer TEXT,
           device_name TEXT,
           app_version TEXT,
           last_error TEXT,
@@ -518,6 +536,76 @@ async function initializeDb() {
 
           IF NOT EXISTS (
             SELECT 1 FROM information_schema.columns
+            WHERE table_name = 'tenants' AND column_name = 'delivery_fee_mode'
+          ) THEN
+            ALTER TABLE tenants ADD COLUMN delivery_fee_mode TEXT NOT NULL DEFAULT 'fixed';
+          END IF;
+
+          IF NOT EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_name = 'tenants' AND column_name = 'delivery_fee_per_km'
+          ) THEN
+            ALTER TABLE tenants ADD COLUMN delivery_fee_per_km NUMERIC(10,2) NOT NULL DEFAULT 0;
+          END IF;
+
+          IF NOT EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_name = 'tenants' AND column_name = 'delivery_origin_use_issuer'
+          ) THEN
+            ALTER TABLE tenants ADD COLUMN delivery_origin_use_issuer BOOLEAN NOT NULL DEFAULT TRUE;
+          END IF;
+
+          IF NOT EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_name = 'tenants' AND column_name = 'delivery_origin_zip_code'
+          ) THEN
+            ALTER TABLE tenants ADD COLUMN delivery_origin_zip_code TEXT;
+          END IF;
+
+          IF NOT EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_name = 'tenants' AND column_name = 'delivery_origin_street'
+          ) THEN
+            ALTER TABLE tenants ADD COLUMN delivery_origin_street TEXT;
+          END IF;
+
+          IF NOT EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_name = 'tenants' AND column_name = 'delivery_origin_number'
+          ) THEN
+            ALTER TABLE tenants ADD COLUMN delivery_origin_number TEXT;
+          END IF;
+
+          IF NOT EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_name = 'tenants' AND column_name = 'delivery_origin_complement'
+          ) THEN
+            ALTER TABLE tenants ADD COLUMN delivery_origin_complement TEXT;
+          END IF;
+
+          IF NOT EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_name = 'tenants' AND column_name = 'delivery_origin_neighborhood'
+          ) THEN
+            ALTER TABLE tenants ADD COLUMN delivery_origin_neighborhood TEXT;
+          END IF;
+
+          IF NOT EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_name = 'tenants' AND column_name = 'delivery_origin_city'
+          ) THEN
+            ALTER TABLE tenants ADD COLUMN delivery_origin_city TEXT;
+          END IF;
+
+          IF NOT EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_name = 'tenants' AND column_name = 'delivery_origin_state'
+          ) THEN
+            ALTER TABLE tenants ADD COLUMN delivery_origin_state TEXT;
+          END IF;
+
+          IF NOT EXISTS (
+            SELECT 1 FROM information_schema.columns
             WHERE table_name = 'tenants' AND column_name = 'store_open'
           ) THEN
             ALTER TABLE tenants ADD COLUMN store_open BOOLEAN NOT NULL DEFAULT TRUE;
@@ -669,6 +757,13 @@ async function initializeDb() {
 
           IF NOT EXISTS (
             SELECT 1 FROM information_schema.columns
+            WHERE table_name = 'orders' AND column_name = 'cash_session_id'
+          ) THEN
+            ALTER TABLE orders ADD COLUMN cash_session_id TEXT;
+          END IF;
+
+          IF NOT EXISTS (
+            SELECT 1 FROM information_schema.columns
             WHERE table_name = 'orders' AND column_name = 'payment_fee_amount'
           ) THEN
             ALTER TABLE orders ADD COLUMN payment_fee_amount NUMERIC(10,2) NOT NULL DEFAULT 0;
@@ -681,6 +776,13 @@ async function initializeDb() {
             ALTER TABLE orders ADD COLUMN payment_net_amount NUMERIC(10,2);
             UPDATE orders SET payment_net_amount = total WHERE payment_net_amount IS NULL;
             ALTER TABLE orders ALTER COLUMN payment_net_amount SET NOT NULL;
+          END IF;
+
+          IF NOT EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_name = 'orders' AND column_name = 'public_checkout_key'
+          ) THEN
+            ALTER TABLE orders ADD COLUMN public_checkout_key TEXT;
           END IF;
 
           IF NOT EXISTS (
@@ -787,6 +889,48 @@ async function initializeDb() {
           ) THEN
             ALTER TABLE printer_agents ADD COLUMN last_error TEXT;
           END IF;
+
+          IF NOT EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_name = 'printer_agents' AND column_name = 'receipt_width'
+          ) THEN
+            ALTER TABLE printer_agents ADD COLUMN receipt_width INTEGER NOT NULL DEFAULT 32;
+          END IF;
+
+          IF NOT EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_name = 'printer_agents' AND column_name = 'print_copies'
+          ) THEN
+            ALTER TABLE printer_agents ADD COLUMN print_copies INTEGER NOT NULL DEFAULT 1;
+          END IF;
+
+          IF NOT EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_name = 'printer_agents' AND column_name = 'print_events'
+          ) THEN
+            ALTER TABLE printer_agents ADD COLUMN print_events JSONB NOT NULL DEFAULT '{"new_order": true, "status_processing": true, "status_delivering": false, "status_completed": false, "status_cancelled": true, "manual_receipt": true}'::jsonb;
+          END IF;
+
+          IF NOT EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_name = 'printer_agents' AND column_name = 'receipt_options'
+          ) THEN
+            ALTER TABLE printer_agents ADD COLUMN receipt_options JSONB NOT NULL DEFAULT '{"showStoreInfo": true, "showCustomerPhone": true, "showDeliveryAddress": true, "showPayment": true, "showItemNotes": true, "showTotals": true}'::jsonb;
+          END IF;
+
+          IF NOT EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_name = 'printer_agents' AND column_name = 'receipt_header'
+          ) THEN
+            ALTER TABLE printer_agents ADD COLUMN receipt_header TEXT;
+          END IF;
+
+          IF NOT EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_name = 'printer_agents' AND column_name = 'receipt_footer'
+          ) THEN
+            ALTER TABLE printer_agents ADD COLUMN receipt_footer TEXT;
+          END IF;
         END
         $$;
       `);
@@ -858,6 +1002,17 @@ async function initializeDb() {
       `);
 
       await client.query(`
+        CREATE INDEX IF NOT EXISTS idx_orders_tenant_cash_session_status_created_at
+          ON orders(tenant_id, cash_session_id, status, created_at DESC);
+      `);
+
+      await client.query(`
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_orders_tenant_public_checkout_key
+          ON orders(tenant_id, public_checkout_key)
+          WHERE public_checkout_key IS NOT NULL;
+      `);
+
+      await client.query(`
         CREATE INDEX IF NOT EXISTS idx_order_items_order_id
           ON order_items(order_id);
       `);
@@ -880,6 +1035,29 @@ async function initializeDb() {
       await client.query(`
         CREATE INDEX IF NOT EXISTS idx_cash_sessions_tenant_status
           ON cash_register_sessions(tenant_id, status, opened_at DESC);
+      `);
+
+      await client.query(`
+        DO $$
+        BEGIN
+          IF NOT EXISTS (
+            SELECT 1
+            FROM pg_indexes
+            WHERE schemaname = current_schema()
+              AND indexname = 'uq_cash_sessions_open_per_tenant'
+          ) AND NOT EXISTS (
+            SELECT tenant_id
+            FROM cash_register_sessions
+            WHERE status = 'open'
+            GROUP BY tenant_id
+            HAVING COUNT(*) > 1
+          ) THEN
+            EXECUTE 'CREATE UNIQUE INDEX uq_cash_sessions_open_per_tenant
+              ON cash_register_sessions(tenant_id)
+              WHERE status = ''open''';
+          END IF;
+        END
+        $$;
       `);
 
       await client.query(`
@@ -983,6 +1161,10 @@ async function initializeDb() {
   globalThis.__faceburgDbInitPromise = initPromise;
 
   return initPromise;
+}
+
+export async function ensureDbInitialized() {
+  await initializeDb();
 }
 
 export async function query<T extends QueryResultRow = QueryResultRow>(text: string, values?: unknown[]) {

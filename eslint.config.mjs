@@ -7,7 +7,7 @@ import tsParser from '@typescript-eslint/parser';
 
 export default [
   {
-    ignores: ['.next/**', 'node_modules/**', 'faceburg-hub/**', 'tmp-swbot/**', 'next-env.d.ts', 'realtime-gateway.js', 'tmp_listen.js'],
+    ignores: ['.next/**', '.next-dev/**', '.next-build-check/**', 'node_modules/**', 'faceburg-hub/**', 'tmp-swbot/**', 'next-env.d.ts', 'realtime-gateway.js', 'tmp_listen.js'],
   },
   {
     files: ['**/*.{js,jsx,ts,tsx,mjs,cjs}'],

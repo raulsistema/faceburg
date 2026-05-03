@@ -1,6 +1,6 @@
 ﻿'use client';
 
-import { FormEvent, KeyboardEvent, ReactNode, useCallback, useDeferredValue, useEffect, useMemo, useState } from 'react';
+import { FormEvent, KeyboardEvent, ReactNode, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from 'react';
 import {
   BadgeCheck,
   Beer,
@@ -22,6 +22,7 @@ import {
 } from 'lucide-react';
 import DashboardShell from '@/components/layout/DashboardShell';
 import AppImage from '@/components/ui/AppImage';
+import { parseMoneyInput } from '@/lib/finance-utils';
 import { cn } from '@/lib/utils';
 
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
@@ -83,6 +84,16 @@ type LinkData = {
 type CardapioSettings = {
   prepTimeMinutes: number;
   deliveryFeeBase: number;
+  deliveryFeeMode: 'fixed' | 'per_km';
+  deliveryFeePerKm: number;
+  deliveryOriginUseIssuer: boolean;
+  deliveryOriginZipCode: string;
+  deliveryOriginStreet: string;
+  deliveryOriginNumber: string;
+  deliveryOriginComplement: string;
+  deliveryOriginNeighborhood: string;
+  deliveryOriginCity: string;
+  deliveryOriginState: string;
   storeOpen: boolean;
   coverImageUrl: string;
   whatsappPhone: string;
@@ -229,7 +240,7 @@ const emptyProductDraft: ProductDraft = {
   packagedBrand: '',
   packagedVolume: '',
   packagedAlcoholic: false,
-  sizeOptionsText: 'Broto|29.9\nMedia|39.9\nGrande|49.9',
+  sizeOptionsText: 'Broto|29,90\nMedia|39,90\nGrande|49,90',
   pizzaAllowHalfAndHalf: true,
   pizzaFlavorLimit: '2',
   pizzaBordersText: 'Catupiry|8\nCheddar|8\nChocolate|10',
@@ -298,6 +309,23 @@ function getTypeDescription(type: ProductType) {
   return 'Item diferenciado';
 }
 
+function parseDraftMoney(value: unknown) {
+  const parsed = parseMoneyInput(value);
+  return Number.isFinite(parsed) ? parsed : Number.NaN;
+}
+
+function findInvalidMoneyLine(text: string, allowZero: boolean) {
+  return text
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .find((line) => {
+      const [label, priceText] = line.split('|').map((part) => part.trim());
+      const price = parseDraftMoney(priceText || 0);
+      return !label || !Number.isFinite(price) || price < 0 || (!allowZero && price <= 0);
+    });
+}
+
 function buildProductMeta(draft: ProductDraft) {
   if (draft.productType === 'packaged') {
     return {
@@ -316,7 +344,7 @@ function buildProductMeta(draft: ProductDraft) {
       .filter(Boolean)
       .map((line) => {
         const [label, priceText] = line.split('|').map((part) => part.trim());
-        return { label, price: Number(priceText || 0) };
+        return { label, price: parseDraftMoney(priceText || 0) };
       })
       .filter((item) => item.label && item.price > 0);
 
@@ -326,7 +354,7 @@ function buildProductMeta(draft: ProductDraft) {
       .filter(Boolean)
       .map((line) => {
         const [label, priceText] = line.split('|').map((part) => part.trim());
-        return { label, price: Number(priceText || 0) };
+        return { label, price: parseDraftMoney(priceText || 0) };
       })
       .filter((item) => item.label && item.price >= 0);
 
@@ -336,7 +364,7 @@ function buildProductMeta(draft: ProductDraft) {
       .filter(Boolean)
       .map((line) => {
         const [label, priceText] = line.split('|').map((part) => part.trim());
-        return { label, price: Number(priceText || 0) };
+        return { label, price: parseDraftMoney(priceText || 0) };
       })
       .filter((item) => item.label && item.price >= 0);
 
@@ -371,7 +399,7 @@ function buildProductMeta(draft: ProductDraft) {
     return {
       ingredient: {
         unit: draft.ingredientUnit,
-        cost: Number(draft.ingredientCost || 0),
+        cost: parseDraftMoney(draft.ingredientCost || 0),
       },
     };
   }
@@ -400,7 +428,7 @@ function buildProductOptionGroupsPayload(draft: ProductDraft) {
       id: option.id,
       name: option.name,
       imageUrl: option.imageUrl,
-      priceAddition: Number(option.priceAddition || 0),
+      priceAddition: parseDraftMoney(option.priceAddition || 0),
       active: option.active,
     })),
   }));
@@ -534,6 +562,66 @@ function fileToDataUrl(file: File) {
   });
 }
 
+function sortCategories(categories: Category[]) {
+  return [...categories].sort((a, b) => {
+    if (a.display_order !== b.display_order) {
+      return Number(a.display_order || 0) - Number(b.display_order || 0);
+    }
+    return a.name.localeCompare(b.name, 'pt-BR');
+  });
+}
+
+function sortProducts(products: Product[]) {
+  return [...products].sort((a, b) => {
+    if (a.display_order !== b.display_order) {
+      return Number(a.display_order || 0) - Number(b.display_order || 0);
+    }
+    return a.name.localeCompare(b.name, 'pt-BR');
+  });
+}
+
+function sortMenuStoryDrafts(stories: MenuStoryDraft[]) {
+  return [...stories].sort((a, b) => Number(a.displayOrder || 0) - Number(b.displayOrder || 0));
+}
+
+function countPublishedProducts(products: Product[]) {
+  return products.filter((product) => product.status === 'published' && product.available).length;
+}
+
+function syncCategoryProductCounts(categories: Category[], products: Product[]) {
+  const countsByCategory = new Map<string, number>();
+  for (const product of products) {
+    countsByCategory.set(product.category_id, (countsByCategory.get(product.category_id) || 0) + 1);
+  }
+
+  return sortCategories(
+    categories.map((category) => ({
+      ...category,
+      product_count: String(countsByCategory.get(category.id) || 0),
+    })),
+  );
+}
+
+function normalizeSettings(settings?: CardapioSettings | null): CardapioSettings {
+  return {
+    prepTimeMinutes: Number(settings?.prepTimeMinutes ?? 40),
+    deliveryFeeBase: Number(settings?.deliveryFeeBase ?? 0),
+    deliveryFeeMode: settings?.deliveryFeeMode === 'per_km' ? 'per_km' : 'fixed',
+    deliveryFeePerKm: Number(settings?.deliveryFeePerKm ?? 0),
+    deliveryOriginUseIssuer: settings?.deliveryOriginUseIssuer !== false,
+    deliveryOriginZipCode: settings?.deliveryOriginZipCode || '',
+    deliveryOriginStreet: settings?.deliveryOriginStreet || '',
+    deliveryOriginNumber: settings?.deliveryOriginNumber || '',
+    deliveryOriginComplement: settings?.deliveryOriginComplement || '',
+    deliveryOriginNeighborhood: settings?.deliveryOriginNeighborhood || '',
+    deliveryOriginCity: settings?.deliveryOriginCity || '',
+    deliveryOriginState: settings?.deliveryOriginState || '',
+    storeOpen: Boolean(settings?.storeOpen),
+    coverImageUrl: settings?.coverImageUrl || '',
+    whatsappPhone: settings?.whatsappPhone || '',
+  };
+}
+
 function SectionCard({
   title,
   description,
@@ -567,6 +655,16 @@ export default function CardapioAdminPage() {
   const [settings, setSettings] = useState<CardapioSettings>({
     prepTimeMinutes: 40,
     deliveryFeeBase: 5,
+    deliveryFeeMode: 'fixed',
+    deliveryFeePerKm: 0,
+    deliveryOriginUseIssuer: true,
+    deliveryOriginZipCode: '',
+    deliveryOriginStreet: '',
+    deliveryOriginNumber: '',
+    deliveryOriginComplement: '',
+    deliveryOriginNeighborhood: '',
+    deliveryOriginCity: '',
+    deliveryOriginState: '',
     storeOpen: true,
     coverImageUrl: '',
     whatsappPhone: '',
@@ -602,6 +700,16 @@ export default function CardapioAdminPage() {
   const [publicationSearch, setPublicationSearch] = useState('');
   const deferredProductSearch = useDeferredValue(productSearch);
   const deferredPublicationSearch = useDeferredValue(publicationSearch);
+  const categoriesRef = useRef<Category[]>([]);
+  const productsRef = useRef<Product[]>([]);
+
+  useEffect(() => {
+    categoriesRef.current = categories;
+  }, [categories]);
+
+  useEffect(() => {
+    productsRef.current = products;
+  }, [products]);
 
   const selectedTypeCard = useMemo(
     () => productTypeCards.find((card) => card.type === productDraft.productType) || null,
@@ -690,6 +798,71 @@ export default function CardapioAdminPage() {
     };
   }, [menuStories]);
 
+  const applyProductsState = useCallback((updater: Product[] | ((current: Product[]) => Product[])) => {
+    const currentProducts = productsRef.current;
+    const rawNextProducts = typeof updater === 'function' ? updater(currentProducts) : updater;
+    const nextProducts = sortProducts(rawNextProducts);
+    const nextCategories = syncCategoryProductCounts(categoriesRef.current, nextProducts);
+
+    productsRef.current = nextProducts;
+    categoriesRef.current = nextCategories;
+    setProducts(nextProducts);
+    setCategories(nextCategories);
+    setLinkData((currentLinkData) =>
+      currentLinkData
+        ? {
+            ...currentLinkData,
+            publishedProducts: countPublishedProducts(nextProducts),
+          }
+        : currentLinkData,
+    );
+  }, []);
+
+  const applyCategoriesState = useCallback((updater: Category[] | ((current: Category[]) => Category[])) => {
+    const currentCategories = categoriesRef.current;
+    const rawNextCategories = typeof updater === 'function' ? updater(currentCategories) : updater;
+    const nextCategories = syncCategoryProductCounts(rawNextCategories, productsRef.current);
+
+    categoriesRef.current = nextCategories;
+    setCategories(nextCategories);
+  }, []);
+
+  const resolveProductCategory = useCallback((product: Product) => {
+    const matchedCategory = categoriesRef.current.find((category) => category.id === product.category_id);
+    return {
+      ...product,
+      category_name: matchedCategory?.name || product.category_name || '',
+    };
+  }, []);
+
+  const applyAdminData = useCallback((data: AdminDataResponse) => {
+    const nextProducts = sortProducts(Array.isArray(data.products) ? data.products : []);
+    const nextCategories = syncCategoryProductCounts(Array.isArray(data.categories) ? data.categories : [], nextProducts);
+    const nextStories = sortMenuStoryDrafts(
+      Array.isArray(data.stories) ? data.stories.map((story) => fromMenuStory(story)) : [],
+    );
+
+    productsRef.current = nextProducts;
+    categoriesRef.current = nextCategories;
+    setProducts(nextProducts);
+    setCategories(nextCategories);
+    setMenuStories(nextStories);
+    setLinkData(
+      data.linkData
+        ? {
+            ...data.linkData,
+            publishedProducts: countPublishedProducts(nextProducts),
+          }
+        : null,
+    );
+    setSettings(normalizeSettings(data.settings));
+
+    setProductDraft((current) => {
+      if (current.categoryId || !nextCategories.length) return current;
+      return { ...current, categoryId: nextCategories[0].id };
+    });
+  }, []);
+
   const loadData = useCallback(async () => {
     setLoading(true);
     setError(null);
@@ -701,39 +874,13 @@ export default function CardapioAdminPage() {
       if (!response.ok) {
         throw new Error(data.error || 'Falha ao carregar o cardapio admin.');
       }
-
-      const nextCategories = Array.isArray(data.categories) ? data.categories : [];
-      const nextProducts = Array.isArray(data.products) ? data.products : [];
-      const nextSettings = data.settings;
-
-      setCategories(nextCategories);
-      setProducts(nextProducts);
-      setMenuStories(
-        Array.isArray(data.stories)
-          ? data.stories
-              .map((story) => fromMenuStory(story))
-              .sort((a, b) => Number(a.displayOrder || 0) - Number(b.displayOrder || 0))
-          : [],
-      );
-      setLinkData(data.linkData || null);
-      setSettings({
-        prepTimeMinutes: Number(nextSettings?.prepTimeMinutes ?? 40),
-        deliveryFeeBase: Number(nextSettings?.deliveryFeeBase ?? 0),
-        storeOpen: Boolean(nextSettings?.storeOpen),
-        coverImageUrl: nextSettings?.coverImageUrl || '',
-        whatsappPhone: nextSettings?.whatsappPhone || '',
-      });
-
-      setProductDraft((current) => {
-        if (current.categoryId || !nextCategories.length) return current;
-        return { ...current, categoryId: nextCategories[0].id };
-      });
+      applyAdminData(data);
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : 'Erro ao carregar o cardapio admin.');
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [applyAdminData]);
 
   useEffect(() => {
     void loadData();
@@ -953,11 +1100,7 @@ export default function CardapioAdminPage() {
       }
 
       setMenuStories(
-        Array.isArray(data.stories)
-          ? data.stories
-              .map((story) => fromMenuStory(story))
-              .sort((a, b) => Number(a.displayOrder || 0) - Number(b.displayOrder || 0))
-          : [],
+        sortMenuStoryDrafts(Array.isArray(data.stories) ? data.stories.map((story) => fromMenuStory(story)) : []),
       );
       setSuccessMessage('Stories da loja salvos com sucesso.');
     } catch {
@@ -975,18 +1118,103 @@ export default function CardapioAdminPage() {
       setError('Selecione o tipo de produto antes de salvar.');
       return;
     }
+    if (!productDraft.categoryId) {
+      setError('Selecione uma categoria antes de salvar o produto.');
+      return;
+    }
+    if (!productDraft.name.trim()) {
+      setError('Informe o nome do produto.');
+      return;
+    }
+
+    const productPrice = parseDraftMoney(productDraft.price);
+    if (!Number.isFinite(productPrice) || productPrice <= 0) {
+      setError('Informe um preco base valido. Pode usar virgula, exemplo: 39,90.');
+      return;
+    }
+
+    const productMeta = buildProductMeta(productDraft);
+    if (productDraft.productType === 'size_based') {
+      const invalidSizeLine = findInvalidMoneyLine(productDraft.sizeOptionsText, false);
+      if (invalidSizeLine) {
+        setError(`Revise o tamanho "${invalidSizeLine}". Use o formato Nome|Preco, exemplo: Grande|49,90.`);
+        return;
+      }
+      const invalidBorderLine = findInvalidMoneyLine(productDraft.pizzaBordersText, true);
+      if (invalidBorderLine) {
+        setError(`Revise a borda "${invalidBorderLine}". Use o formato Nome|Preco.`);
+        return;
+      }
+      const invalidDoughLine = findInvalidMoneyLine(productDraft.pizzaDoughsText, true);
+      if (invalidDoughLine) {
+        setError(`Revise a massa "${invalidDoughLine}". Use o formato Nome|Preco.`);
+        return;
+      }
+
+      const sizes = Array.isArray((productMeta as { sizes?: unknown }).sizes)
+        ? ((productMeta as { sizes: unknown[] }).sizes)
+        : [];
+      if (sizes.length === 0) {
+        setError('Cadastre pelo menos um tamanho no formato Nome|Preco. Exemplo: Grande|49,90.');
+        return;
+      }
+    }
+    if (productDraft.productType === 'ingredient' && productDraft.ingredientCost.trim()) {
+      const ingredientCost = parseDraftMoney(productDraft.ingredientCost);
+      if (!Number.isFinite(ingredientCost) || ingredientCost < 0) {
+        setError('Informe um custo valido para a materia-prima.');
+        return;
+      }
+    }
+
+    for (let groupIndex = 0; groupIndex < productDraft.optionGroups.length; groupIndex += 1) {
+      const group = productDraft.optionGroups[groupIndex];
+      const groupHasContent =
+        group.name.trim() ||
+        group.options.some((option) => option.name.trim() || option.imageUrl || option.priceAddition.trim() !== '0');
+      if (!groupHasContent) continue;
+      if (!group.name.trim()) {
+        setError(`Informe o nome do grupo de complemento ${groupIndex + 1} ou remova o grupo.`);
+        return;
+      }
+
+      const minSelect = Number(group.minSelect || 0);
+      const maxSelect = Number(group.maxSelect || 0);
+      if (!Number.isFinite(minSelect) || minSelect < 0 || !Number.isFinite(maxSelect) || maxSelect < 1) {
+        setError(`Revise minimo e maximo do grupo "${group.name}".`);
+        return;
+      }
+      if (maxSelect > 0 && minSelect > maxSelect) {
+        setError(`O minimo do grupo "${group.name}" nao pode ser maior que o maximo.`);
+        return;
+      }
+
+      const filledOptions = group.options.filter((option) => option.name.trim());
+      if (filledOptions.length === 0) {
+        setError(`Adicione pelo menos um item no grupo "${group.name}".`);
+        return;
+      }
+
+      for (const option of filledOptions) {
+        const optionPrice = parseDraftMoney(option.priceAddition || 0);
+        if (!Number.isFinite(optionPrice) || optionPrice < 0) {
+          setError(`Informe um valor extra valido para o complemento "${option.name}".`);
+          return;
+        }
+      }
+    }
 
     const payload = {
       categoryId: productDraft.categoryId,
-      name: productDraft.name,
+      name: productDraft.name.trim(),
       description: productDraft.description,
-      price: Number(productDraft.price),
+      price: productPrice,
       imageUrl: productDraft.imageUrl,
       sku: productDraft.sku,
       status: productDraft.status,
       available: productDraft.available,
       productType: productDraft.productType,
-      productMeta: buildProductMeta(productDraft),
+      productMeta,
       optionGroups: buildProductOptionGroupsPayload(productDraft),
     };
 
@@ -1002,9 +1230,19 @@ export default function CardapioAdminPage() {
       return;
     }
 
+    const savedProduct = data.product ? resolveProductCategory(data.product as Product) : null;
+    if (savedProduct) {
+      applyProductsState((current) =>
+        current.some((product) => product.id === savedProduct.id)
+          ? current.map((product) => (product.id === savedProduct.id ? savedProduct : product))
+          : [...current, savedProduct],
+      );
+    } else {
+      await loadData();
+    }
+
     setSuccessMessage(editingProductId ? 'Produto atualizado com sucesso.' : 'Produto criado com sucesso.');
     closeProductModal();
-    await loadData();
   }
 
   async function onSelectProductImage(file: File | null) {
@@ -1094,12 +1332,20 @@ export default function CardapioAdminPage() {
       return;
     }
 
+    const savedProduct = data.product ? resolveProductCategory(data.product as Product) : null;
+    if (savedProduct) {
+      applyProductsState((current) =>
+        current.map((currentProduct) => (currentProduct.id === savedProduct.id ? savedProduct : currentProduct)),
+      );
+    } else {
+      await loadData();
+    }
+
     setSuccessMessage(
       product.status === 'published'
         ? 'Produto removido do cardapio publico.'
         : 'Produto publicado no cardapio publico.',
     );
-    await loadData();
   }
 
   async function onToggleAvailability(product: Product) {
@@ -1119,8 +1365,16 @@ export default function CardapioAdminPage() {
       return;
     }
 
+    const savedProduct = data.product ? resolveProductCategory(data.product as Product) : null;
+    if (savedProduct) {
+      applyProductsState((current) =>
+        current.map((currentProduct) => (currentProduct.id === savedProduct.id ? savedProduct : currentProduct)),
+      );
+    } else {
+      await loadData();
+    }
+
     setSuccessMessage(product.available ? 'Produto marcado como indisponivel.' : 'Produto marcado como disponivel.');
-    await loadData();
   }
 
   async function onCreateCategory(event: FormEvent) {
@@ -1139,9 +1393,15 @@ export default function CardapioAdminPage() {
       return;
     }
 
+    const savedCategory = data.category as Category | undefined;
+    if (savedCategory) {
+      applyCategoriesState((current) => [...current, savedCategory]);
+    } else {
+      await loadData();
+    }
+
     setCategoryDraft(createEmptyCategoryDraft(categoryDraft.productType));
     setSuccessMessage('Categoria criada com sucesso.');
-    await loadData();
   }
 
   async function onQuickCreateCategory(event?: FormEvent) {
@@ -1168,10 +1428,15 @@ export default function CardapioAdminPage() {
       return;
     }
 
-    await loadData();
+    const savedCategory = data.category as Category | undefined;
+    if (savedCategory) {
+      applyCategoriesState((current) => [...current, savedCategory]);
+    } else {
+      await loadData();
+    }
     setProductDraft((current) => ({
       ...current,
-      categoryId: data.category?.id || current.categoryId,
+      categoryId: savedCategory?.id || current.categoryId,
     }));
     setQuickCategoryDraft(createEmptyCategoryDraft(productDraft.productType));
     setShowQuickCategoryForm(false);
@@ -1201,9 +1466,27 @@ export default function CardapioAdminPage() {
       return;
     }
 
+    const savedCategory = data.category as Category | undefined;
+    if (savedCategory) {
+      applyCategoriesState((current) =>
+        current.map((category) => (category.id === savedCategory.id ? savedCategory : category)),
+      );
+      applyProductsState((current) =>
+        current.map((product) =>
+          product.category_id === savedCategory.id
+            ? {
+                ...product,
+                category_name: savedCategory.name,
+              }
+            : product,
+        ),
+      );
+    } else {
+      await loadData();
+    }
+
     setEditingCategoryId(null);
     setSuccessMessage('Categoria atualizada com sucesso.');
-    await loadData();
   }
 
   async function onDeleteCategory(category: Category) {
@@ -1218,8 +1501,12 @@ export default function CardapioAdminPage() {
       return;
     }
 
+    applyCategoriesState((current) => current.filter((currentCategory) => currentCategory.id !== category.id));
+    setProductCategoryFilter((current) => (current === category.id ? 'all' : current));
+    setProductDraft((current) => (current.categoryId === category.id ? { ...current, categoryId: '' } : current));
+    setEditingCategoryId((current) => (current === category.id ? null : current));
+
     setSuccessMessage('Categoria excluida com sucesso.');
-    await loadData();
   }
 
   async function onSaveSettings(event: FormEvent) {
@@ -1238,8 +1525,9 @@ export default function CardapioAdminPage() {
       return;
     }
 
+    setSettings(normalizeSettings(data as CardapioSettings));
+
     setSuccessMessage('Configuracoes do cardapio salvas com sucesso.');
-    await loadData();
   }
 
   async function copyPublicMenuLink() {
@@ -2457,7 +2745,27 @@ export default function CardapioAdminPage() {
                   </div>
                   <div>
                     <label className="text-xs font-medium uppercase tracking-[0.16em] text-slate-500">
-                      Taxa base de entrega
+                      Modo da taxa
+                    </label>
+                    <select
+                      value={settings.deliveryFeeMode}
+                      onChange={(event) =>
+                        setSettings((current) => ({
+                          ...current,
+                          deliveryFeeMode: event.target.value === 'per_km' ? 'per_km' : 'fixed',
+                        }))
+                      }
+                      className="mt-2 w-full rounded-2xl border border-slate-200 px-4 py-3 text-sm outline-none transition focus:border-orange-300 focus:ring-4 focus:ring-orange-100"
+                    >
+                      <option value="fixed">Taxa fixa</option>
+                      <option value="per_km">Por km</option>
+                    </select>
+                  </div>
+                </div>
+                <div className="grid gap-4 md:grid-cols-2">
+                  <div>
+                    <label className="text-xs font-medium uppercase tracking-[0.16em] text-slate-500">
+                      {settings.deliveryFeeMode === 'per_km' ? 'Taxa minima de entrega' : 'Taxa fixa de entrega'}
                     </label>
                     <input
                       type="number"
@@ -2474,6 +2782,172 @@ export default function CardapioAdminPage() {
                       required
                     />
                   </div>
+                  <div>
+                    <label className="text-xs font-medium uppercase tracking-[0.16em] text-slate-500">
+                      Valor por km
+                    </label>
+                    <input
+                      type="number"
+                      min="0"
+                      step="0.01"
+                      value={settings.deliveryFeePerKm}
+                      onChange={(event) =>
+                        setSettings((current) => ({
+                          ...current,
+                          deliveryFeePerKm: Number(event.target.value),
+                        }))
+                      }
+                      className="mt-2 w-full rounded-2xl border border-slate-200 px-4 py-3 text-sm outline-none transition focus:border-orange-300 focus:ring-4 focus:ring-orange-100"
+                      disabled={settings.deliveryFeeMode !== 'per_km'}
+                    />
+                    <p className="mt-2 text-xs text-slate-500">
+                      {settings.deliveryFeeMode === 'per_km'
+                        ? 'O cardapio usa a taxa minima como piso e aplica este valor multiplicado pelo trajeto viario calculado.'
+                        : 'Ative o modo por km para calcular automaticamente a taxa no cardapio publico.'}
+                    </p>
+                  </div>
+                </div>
+                <div className="rounded-[24px] border border-slate-200 bg-slate-50/80 p-4">
+                  <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                    <div>
+                      <label className="text-xs font-medium uppercase tracking-[0.16em] text-slate-500">
+                        Origem do calculo
+                      </label>
+                      <p className="mt-2 text-sm text-slate-600">
+                        Por padrao, a distancia sai do endereco do emitente. Se a entrega parte de outro local, defina uma base propria aqui.
+                      </p>
+                    </div>
+                    <label className="inline-flex items-center gap-2 rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm font-medium text-slate-700">
+                      <input
+                        type="checkbox"
+                        checked={settings.deliveryOriginUseIssuer}
+                        onChange={(event) =>
+                          setSettings((current) => ({
+                            ...current,
+                            deliveryOriginUseIssuer: event.target.checked,
+                          }))
+                        }
+                      />
+                      Usar endereco do emitente
+                    </label>
+                  </div>
+                  {!settings.deliveryOriginUseIssuer ? (
+                    <div className="mt-4 grid gap-4 md:grid-cols-2">
+                      <div>
+                        <label className="text-xs font-medium uppercase tracking-[0.16em] text-slate-500">
+                          CEP base
+                        </label>
+                        <input
+                          value={settings.deliveryOriginZipCode}
+                          onChange={(event) =>
+                            setSettings((current) => ({
+                              ...current,
+                              deliveryOriginZipCode: event.target.value,
+                            }))
+                          }
+                          placeholder="00000-000"
+                          className="mt-2 w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm outline-none transition focus:border-orange-300 focus:ring-4 focus:ring-orange-100"
+                        />
+                      </div>
+                      <div>
+                        <label className="text-xs font-medium uppercase tracking-[0.16em] text-slate-500">
+                          UF base
+                        </label>
+                        <input
+                          value={settings.deliveryOriginState}
+                          onChange={(event) =>
+                            setSettings((current) => ({
+                              ...current,
+                              deliveryOriginState: event.target.value.toUpperCase(),
+                            }))
+                          }
+                          placeholder="SP"
+                          maxLength={2}
+                          className="mt-2 w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm outline-none transition focus:border-orange-300 focus:ring-4 focus:ring-orange-100"
+                        />
+                      </div>
+                      <div className="md:col-span-2">
+                        <label className="text-xs font-medium uppercase tracking-[0.16em] text-slate-500">
+                          Rua base
+                        </label>
+                        <input
+                          value={settings.deliveryOriginStreet}
+                          onChange={(event) =>
+                            setSettings((current) => ({
+                              ...current,
+                              deliveryOriginStreet: event.target.value,
+                            }))
+                          }
+                          placeholder="Rua da saida das entregas"
+                          className="mt-2 w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm outline-none transition focus:border-orange-300 focus:ring-4 focus:ring-orange-100"
+                        />
+                      </div>
+                      <div>
+                        <label className="text-xs font-medium uppercase tracking-[0.16em] text-slate-500">
+                          Numero base
+                        </label>
+                        <input
+                          value={settings.deliveryOriginNumber}
+                          onChange={(event) =>
+                            setSettings((current) => ({
+                              ...current,
+                              deliveryOriginNumber: event.target.value,
+                            }))
+                          }
+                          placeholder="123"
+                          className="mt-2 w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm outline-none transition focus:border-orange-300 focus:ring-4 focus:ring-orange-100"
+                        />
+                      </div>
+                      <div>
+                        <label className="text-xs font-medium uppercase tracking-[0.16em] text-slate-500">
+                          Bairro base
+                        </label>
+                        <input
+                          value={settings.deliveryOriginNeighborhood}
+                          onChange={(event) =>
+                            setSettings((current) => ({
+                              ...current,
+                              deliveryOriginNeighborhood: event.target.value,
+                            }))
+                          }
+                          placeholder="Centro"
+                          className="mt-2 w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm outline-none transition focus:border-orange-300 focus:ring-4 focus:ring-orange-100"
+                        />
+                      </div>
+                      <div>
+                        <label className="text-xs font-medium uppercase tracking-[0.16em] text-slate-500">
+                          Cidade base
+                        </label>
+                        <input
+                          value={settings.deliveryOriginCity}
+                          onChange={(event) =>
+                            setSettings((current) => ({
+                              ...current,
+                              deliveryOriginCity: event.target.value,
+                            }))
+                          }
+                          placeholder="Sao Paulo"
+                          className="mt-2 w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm outline-none transition focus:border-orange-300 focus:ring-4 focus:ring-orange-100"
+                        />
+                      </div>
+                      <div>
+                        <label className="text-xs font-medium uppercase tracking-[0.16em] text-slate-500">
+                          Complemento base
+                        </label>
+                        <input
+                          value={settings.deliveryOriginComplement}
+                          onChange={(event) =>
+                            setSettings((current) => ({
+                              ...current,
+                              deliveryOriginComplement: event.target.value,
+                            }))
+                          }
+                          placeholder="Fundos, galpao, loja 2..."
+                          className="mt-2 w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm outline-none transition focus:border-orange-300 focus:ring-4 focus:ring-orange-100"
+                        />
+                      </div>
+                    </div>
+                  ) : null}
                 </div>
                 <div>
                   <label className="text-xs font-medium uppercase tracking-[0.16em] text-slate-500">
@@ -2720,7 +3194,8 @@ export default function CardapioAdminPage() {
                         Preco base
                       </label>
                       <input
-                        type="number"
+                        type="text"
+                        inputMode="decimal"
                         min="0"
                         step="0.01"
                         value={productDraft.price}
@@ -2955,7 +3430,8 @@ export default function CardapioAdminPage() {
                         <option value="un">un</option>
                       </select>
                       <input
-                        type="number"
+                        type="text"
+                        inputMode="decimal"
                         min="0"
                         step="0.01"
                         value={productDraft.ingredientCost}
@@ -3131,7 +3607,8 @@ export default function CardapioAdminPage() {
                                             Valor extra
                                           </label>
                                           <input
-                                            type="number"
+                                            type="text"
+                                            inputMode="decimal"
                                             min="0"
                                             step="0.01"
                                             value={option.priceAddition}

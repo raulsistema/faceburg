@@ -1,7 +1,20 @@
 import type { NextConfig } from 'next';
 
+function normalizeIgnoredEntries(ignored: unknown): string[] {
+  if (Array.isArray(ignored)) {
+    return ignored.filter((entry): entry is string => typeof entry === 'string' && entry.trim().length > 0);
+  }
+
+  if (typeof ignored === 'string' && ignored.trim().length > 0) {
+    return [ignored];
+  }
+
+  return [];
+}
+
 const nextConfig: NextConfig = {
   reactStrictMode: true,
+  distDir: process.env.NEXT_DIST_DIR || '.next',
   eslint: {
     ignoreDuringBuilds: true,
   },
@@ -28,22 +41,28 @@ const nextConfig: NextConfig = {
       };
     }
 
+    if (dev && process.env.DISABLE_HMR !== 'true') {
+      const ignored = normalizeIgnoredEntries(config.watchOptions?.ignored);
+      const buildArtifactsIgnored = ['**/.next/**', '**/.next-dev/**'];
+      const mergedIgnored = [...ignored, ...buildArtifactsIgnored];
+
+      config.watchOptions = {
+        ...config.watchOptions,
+        ignored: mergedIgnored,
+      };
+    }
+
     if (dev && process.platform === 'win32' && process.env.DISABLE_HMR !== 'true') {
-      const ignored = config.watchOptions?.ignored;
+      const ignored = normalizeIgnoredEntries(config.watchOptions?.ignored);
       const winSystemIgnored = [
         '**/pagefile.sys',
         '**/DumpStack.log.tmp',
         '**/hiberfil.sys',
         '**/swapfile.sys',
       ];
-      const normalizedIgnored = Array.isArray(ignored)
-        ? ignored.filter((entry): entry is string => typeof entry === 'string' && entry.trim().length > 0)
-        : typeof ignored === 'string' && ignored.trim().length > 0
-          ? [ignored]
-          : [];
       config.watchOptions = {
         ...config.watchOptions,
-        ignored: [...normalizedIgnored, ...winSystemIgnored],
+        ignored: [...ignored, ...winSystemIgnored],
       };
     }
     return config;

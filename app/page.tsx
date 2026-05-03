@@ -85,7 +85,7 @@ export default function DashboardPage() {
     return succeeded;
   }, []);
 
-  const { refreshNow } = useRealtimeRefresh({ load: loadDashboard });
+  const { refreshNow } = useRealtimeRefresh({ load: loadDashboard, fallbackRefreshMs: 0 });
 
   const stats = useMemo(
     () => [

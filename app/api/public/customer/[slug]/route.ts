@@ -158,70 +158,87 @@ async function loadCustomerAndAddresses(tenantId: string, phone: string) {
 }
 
 export async function GET(request: Request, { params }: { params: Promise<{ slug: string }> }) {
-  const { slug } = await params;
-  const { searchParams } = new URL(request.url);
-  const phone = normalizePhone(String(searchParams.get('phone') || '').trim());
+  try {
+    const { slug } = await params;
+    const { searchParams } = new URL(request.url);
+    const phone = normalizePhone(String(searchParams.get('phone') || '').trim());
 
-  const tenant = await getTenantBySlug(slug);
-  if (!tenant) {
-    return NextResponse.json({ error: 'Empresa nao encontrada.' }, { status: 404 });
-  }
-  if (tenant.status !== 'active') {
-    return NextResponse.json({ error: 'Empresa inativa.' }, { status: 403 });
-  }
+    const tenant = await getTenantBySlug(slug);
+    if (!tenant) {
+      return NextResponse.json({ error: 'Empresa nao encontrada.' }, { status: 404 });
+    }
+    if (tenant.status !== 'active') {
+      return NextResponse.json({ error: 'Empresa inativa.' }, { status: 403 });
+    }
 
-  const result = await loadCustomerAndAddresses(tenant.id, phone);
-  return NextResponse.json(result);
+    const result = await loadCustomerAndAddresses(tenant.id, phone);
+    return NextResponse.json(result);
+  } catch (error) {
+    console.error('[public-customer] failed to load customer', error);
+    return NextResponse.json({ error: 'Falha ao carregar cadastro.' }, { status: 500 });
+  }
 }
 
 export async function POST(request: Request, { params }: { params: Promise<{ slug: string }> }) {
-  const { slug } = await params;
-  const body = await request.json();
-  const name = String(body.name || '').trim();
-  const phone = normalizePhone(String(body.phone || '').trim());
-  const email = String(body.email || '').trim();
+  try {
+    const { slug } = await params;
+    let body: Record<string, unknown> = {};
 
-  if (!name || phone.length < 10) {
-    return NextResponse.json({ error: 'Nome e celular validos sao obrigatorios.' }, { status: 400 });
-  }
+    try {
+      body = (await request.json()) as Record<string, unknown>;
+    } catch {
+      return NextResponse.json({ error: 'Corpo da requisicao invalido.' }, { status: 400 });
+    }
 
-  const tenant = await getTenantBySlug(slug);
-  if (!tenant) {
-    return NextResponse.json({ error: 'Empresa nao encontrada.' }, { status: 404 });
-  }
-  if (tenant.status !== 'active') {
-    return NextResponse.json({ error: 'Empresa inativa.' }, { status: 403 });
-  }
+    const name = String(body.name || '').trim();
+    const phone = normalizePhone(String(body.phone || '').trim());
+    const email = String(body.email || '').trim();
 
-  const existingCustomerResult = await query<{ id: string }>(
-    `SELECT id
-     FROM customers
-     WHERE tenant_id = $1
-       AND regexp_replace(phone, '\D', '', 'g') = $2
-     ORDER BY created_at ASC
-     LIMIT 1`,
-    [tenant.id, phone],
-  );
+    if (!name || phone.length < 10) {
+      return NextResponse.json({ error: 'Nome e celular validos sao obrigatorios.' }, { status: 400 });
+    }
 
-  if (existingCustomerResult.rowCount) {
-    await query(
-      `UPDATE customers
-       SET name = $3,
-           phone = $4,
-           email = COALESCE(NULLIF($5, ''), email),
-           status = 'active'
-       WHERE id = $1
-         AND tenant_id = $2`,
-      [existingCustomerResult.rows[0].id, tenant.id, name, phone, email],
+    const tenant = await getTenantBySlug(slug);
+    if (!tenant) {
+      return NextResponse.json({ error: 'Empresa nao encontrada.' }, { status: 404 });
+    }
+    if (tenant.status !== 'active') {
+      return NextResponse.json({ error: 'Empresa inativa.' }, { status: 403 });
+    }
+
+    const existingCustomerResult = await query<{ id: string }>(
+      `SELECT id
+       FROM customers
+       WHERE tenant_id = $1
+         AND regexp_replace(phone, '\D', '', 'g') = $2
+       ORDER BY created_at ASC
+       LIMIT 1`,
+      [tenant.id, phone],
     );
-  } else {
-    await query(
-      `INSERT INTO customers (id, tenant_id, name, phone, email, status)
-       VALUES ($1, $2, $3, $4, NULLIF($5, ''), 'active')`,
-      [randomUUID(), tenant.id, name, phone, email],
-    );
-  }
 
-  const result = await loadCustomerAndAddresses(tenant.id, phone);
-  return NextResponse.json(result, { status: 201 });
+    if (existingCustomerResult.rowCount) {
+      await query(
+        `UPDATE customers
+         SET name = $3,
+             phone = $4,
+             email = COALESCE(NULLIF($5, ''), email),
+             status = 'active'
+         WHERE id = $1
+           AND tenant_id = $2`,
+        [existingCustomerResult.rows[0].id, tenant.id, name, phone, email],
+      );
+    } else {
+      await query(
+        `INSERT INTO customers (id, tenant_id, name, phone, email, status)
+         VALUES ($1, $2, $3, $4, NULLIF($5, ''), 'active')`,
+        [randomUUID(), tenant.id, name, phone, email],
+      );
+    }
+
+    const result = await loadCustomerAndAddresses(tenant.id, phone);
+    return NextResponse.json(result, { status: 201 });
+  } catch (error) {
+    console.error('[public-customer] failed to save customer', error);
+    return NextResponse.json({ error: 'Falha ao salvar cadastro.' }, { status: 500 });
+  }
 }

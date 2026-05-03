@@ -16,13 +16,14 @@ const POLL_FALLBACK_MS = Number(process.env.HUB_WHATS_POLL_FALLBACK_MS || proces
 const WS_RECONNECT_BASE_MS = Number(process.env.HUB_WHATS_WS_RECONNECT_MS || process.env.WHATS_WS_RECONNECT_MS || 3000);
 const WS_RECONNECT_MAX_MS = Number(process.env.HUB_WHATS_WS_RECONNECT_MAX_MS || process.env.WHATS_WS_RECONNECT_MAX_MS || 60000);
 const WS_LOG_COOLDOWN_MS = Number(process.env.HUB_WHATS_WS_LOG_COOLDOWN_MS || process.env.WHATS_WS_LOG_COOLDOWN_MS || 60000);
-const HEARTBEAT_MS = Number(process.env.HUB_WHATS_HEARTBEAT_MS || process.env.WHATS_HEARTBEAT_MS || 180000);
+const HEARTBEAT_MS = Number(process.env.HUB_WHATS_HEARTBEAT_MS || process.env.WHATS_HEARTBEAT_MS || 60000);
 const INIT_TIMEOUT_MS = 120000;
 const RESTART_DELAY_MS = 5000;
 const WATCHDOG_INTERVAL_MS = 30000;
 const TAKEOVER_TIMEOUT_MS = Number(process.env.HUB_WHATS_TAKEOVER_TIMEOUT_MS || process.env.WHATS_TAKEOVER_TIMEOUT_MS || 0);
 const AUTH_BACKOFF_MS = Number(process.env.HUB_WHATS_AUTH_BACKOFF_MS || process.env.WHATS_AUTH_BACKOFF_MS || 600000);
 const LOCK_PORT = Number(process.env.WHATS_AGENT_LOCK_PORT || 49331);
+const WHATS_WEB_URL = 'https://web.whatsapp.com';
 
 let ready = false;
 let client = null;
@@ -84,6 +85,14 @@ async function acquireSingleInstanceLock() {
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
+function parseBooleanEnv(primary, fallback) {
+  const value = String(primary ?? '').trim().toLowerCase();
+  if (!value) return fallback;
+  if (['1', 'true', 'yes', 'y', 'on'].includes(value)) return true;
+  if (['0', 'false', 'no', 'n', 'off'].includes(value)) return false;
+  return fallback;
+}
+
 function normalizeTarget(target) {
   if (!target) return '';
   if (target.endsWith('@c.us')) return target;
@@ -105,6 +114,14 @@ const AUTH_PATH = ensureDir(path.join(getRuntimeDir(), 'auth'));
 function getClientId() { return SLUG || `tenant-${AGENT_KEY.slice(3, 11)}`; }
 
 function getBrowserPath() {
+  const configuredPath = String(
+    process.env.HUB_WHATS_CHROME_PATH
+    || process.env.WHATS_CHROME_PATH
+    || process.env.PUPPETEER_EXECUTABLE_PATH
+    || '',
+  ).trim();
+  if (configuredPath && fs.existsSync(configuredPath)) return configuredPath;
+
   const candidates = [
     'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
     'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
@@ -165,6 +182,54 @@ function markWsConnected() {
 
 function getCurrentPhoneNumber() {
   return String(client?.info?.wid?.user || '');
+}
+
+function isVisibleWhatsAppMode() {
+  return !parseBooleanEnv(process.env.HUB_WHATS_HEADLESS || process.env.WHATS_HEADLESS, false);
+}
+
+function buildPuppeteerArgs() {
+  const args = [
+    '--disable-accelerated-2d-canvas',
+    '--disable-background-timer-throttling',
+    '--disable-backgrounding-occluded-windows',
+    '--disable-breakpad',
+    '--disable-cache',
+    '--disable-component-extensions-with-background-pages',
+    '--disable-crash-reporter',
+    '--disable-dev-shm-usage',
+    '--disable-extensions',
+    '--disable-hang-monitor',
+    '--disable-ipc-flooding-protection',
+    '--disable-notifications',
+    '--disable-popup-blocking',
+    '--disable-print-preview',
+    '--disable-prompt-on-repost',
+    '--disable-renderer-backgrounding',
+    '--disable-sync',
+    '--ignore-certificate-errors',
+    '--no-default-browser-check',
+    '--no-first-run',
+  ];
+
+  if (process.platform !== 'win32') {
+    args.push('--no-sandbox', '--no-zygote');
+  }
+
+  if (isVisibleWhatsAppMode()) {
+    args.push(`--app=${WHATS_WEB_URL}`, '--start-maximized');
+  }
+
+  return args;
+}
+
+async function focusClientPage(nextClient) {
+  if (!isVisibleWhatsAppMode()) return;
+  const page = nextClient?.pupPage;
+  if (!page) return;
+  try {
+    await page.bringToFront();
+  } catch {}
 }
 
 function bindBrowserDiagnostics(nextClient) {
@@ -356,6 +421,12 @@ async function startClient(opts = {}) {
   }
 
   const browserPath = getBrowserPath();
+  const visibleWindow = isVisibleWhatsAppMode();
+  sendLog(
+    visibleWindow
+      ? `Abrindo WhatsApp Web em janela dedicada${browserPath ? ` com ${path.basename(browserPath)}` : ''}.`
+      : 'Iniciando WhatsApp em modo oculto.',
+  );
   const nextClient = new Client({
     authStrategy: new LocalAuth({ clientId: getClientId(), dataPath: AUTH_PATH }),
     takeoverOnConflict: true,
@@ -364,14 +435,10 @@ async function startClient(opts = {}) {
     browserName: 'Chrome',
     puppeteer: {
       executablePath: browserPath || undefined,
-      headless: true,
+      headless: !visibleWindow,
+      defaultViewport: visibleWindow ? null : undefined,
       timeout: INIT_TIMEOUT_MS,
-      args: [
-        '--disable-dev-shm-usage', '--disable-background-timer-throttling',
-        '--disable-backgrounding-occluded-windows', '--disable-renderer-backgrounding',
-        '--disable-extensions', '--disable-sync', '--disable-cache',
-        '--no-first-run', '--no-default-browser-check',
-      ],
+      args: buildPuppeteerArgs(),
     },
     qrMaxRetries: 10,
   });
@@ -383,6 +450,7 @@ async function startClient(opts = {}) {
     ready = false;
     const qrDataUrl = await QRCode.toDataURL(qr, { width: 280 }).catch(() => '');
     updateState({ status: 'qr', qrCode: qrDataUrl, phoneNumber: '', lastError: '' });
+    void focusClientPage(nextClient);
     sendLog('QR Code gerado. Escaneie com o WhatsApp.');
     await postState({ sessionStatus: 'qr', qrCode: qr, phoneNumber: '', lastError: '' });
   });
@@ -393,6 +461,7 @@ async function startClient(opts = {}) {
     lastErrorMessage = '';
     bindBrowserDiagnostics(nextClient);
     updateState({ status: 'ready', qrCode: '', phoneNumber: phone, lastError: '' });
+    void focusClientPage(nextClient);
     sendLog(`Conectado ao WhatsApp (${phone || 'sem numero'}).`);
     await postState({ sessionStatus: 'ready', qrCode: '', phoneNumber: phone, lastError: '' });
     void drainJobs('whatsapp-ready');
@@ -469,6 +538,7 @@ async function startClient(opts = {}) {
       sleep(INIT_TIMEOUT_MS).then(() => { throw new Error('Timeout ao inicializar WhatsApp.'); }),
     ]);
     bindBrowserDiagnostics(nextClient);
+    void focusClientPage(nextClient);
   } finally { startingClient = false; }
 }
 

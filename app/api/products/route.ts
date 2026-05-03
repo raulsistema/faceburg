@@ -1,6 +1,7 @@
 ﻿import { randomUUID } from 'node:crypto';
 import { NextResponse } from 'next/server';
 import pool, { query } from '@/lib/db';
+import { parseMoneyInput } from '@/lib/finance-utils';
 import { normalizeProductOptionGroups, syncProductOptionGroups } from '@/lib/product-options';
 import { getValidatedTenantSession } from '@/lib/tenant-auth';
 
@@ -52,7 +53,7 @@ export async function GET() {
             p.name,
             p.description,
             p.price::text,
-            NULL::text AS image_url,
+            p.image_url,
             p.available,
             p.sku,
             p.product_type,
@@ -79,7 +80,7 @@ export async function POST(request: Request) {
   const categoryId = String(body.categoryId || '').trim();
   const name = String(body.name || '').trim();
   const description = String(body.description || '').trim();
-  const price = Number(body.price || 0);
+  const price = parseMoneyInput(body.price);
   const imageUrl = String(body.imageUrl || '').trim();
   const sku = String(body.sku || '').trim();
   const productType = String(body.productType || 'prepared').trim();

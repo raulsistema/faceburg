@@ -5,6 +5,8 @@ import { ensureFinanceSchema } from '@/lib/finance-schema';
 import { getValidatedTenantSession } from '@/lib/tenant-auth';
 import { enqueueOrderPrintJob } from '@/lib/printing';
 import { notifyOrderEvent } from '@/lib/realtime';
+import { getOpenCashSession } from '@/lib/cash-register';
+import { parseMoneyInput } from '@/lib/finance-utils';
 
 type TabRow = {
   id: string;
@@ -64,6 +66,12 @@ function clampDiscount(subtotal: number, discount: number) {
 
 function amountsMatch(a: number, b: number) {
   return Math.abs(a - b) <= 0.01;
+}
+
+function normalizePositiveAmount(value: unknown) {
+  const parsed = parseMoneyInput(value);
+  if (!Number.isFinite(parsed)) return Number.NaN;
+  return roundMoney(Math.max(0, parsed));
 }
 
 export async function POST(request: Request, { params }: { params: Promise<{ id: string }> }) {
@@ -139,12 +147,18 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
       return NextResponse.json({ error: 'Total invalido para fechamento.' }, { status: 400 });
     }
 
-    const normalizedPaymentInputs: PaymentSplitInput[] = paymentSplits
+    const parsedPaymentInputs: PaymentSplitInput[] = paymentSplits
       .map((entry) => ({
         paymentMethodId: String(entry?.paymentMethodId || '').trim(),
         methodType: normalizePaymentMethod(String(entry?.methodType || '')),
-        amount: roundMoney(Number(entry?.amount || 0)),
-      }))
+        amount: normalizePositiveAmount(entry?.amount),
+      }));
+    if (parsedPaymentInputs.some((entry) => Number.isNaN(entry.amount))) {
+      await client.query('ROLLBACK');
+      return NextResponse.json({ error: 'Valor de pagamento invalido.' }, { status: 400 });
+    }
+
+    const normalizedPaymentInputs = parsedPaymentInputs
       .filter((entry) => entry.amount > 0 && (entry.paymentMethodId || entry.methodType));
 
     const paymentInputs =
@@ -220,6 +234,16 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
     const totalNetAmount = roundMoney(total - totalFeeAmount);
     const orderId = randomUUID();
     const singlePayment = resolvedPayments.length === 1 ? resolvedPayments[0] : null;
+    const requiresCashSession = resolvedPayments.some((payment) => payment.method.settlement_days === 0);
+    if (requiresCashSession) {
+      await client.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [`cash-register:${session.tenantId}`]);
+    }
+    const openCashSession = requiresCashSession ? await getOpenCashSession(session.tenantId, client) : null;
+
+    if (requiresCashSession && !openCashSession) {
+      await client.query('ROLLBACK');
+      return NextResponse.json({ error: 'Nenhum caixa aberto. Abra o caixa no financeiro para concluir a venda.' }, { status: 409 });
+    }
 
     await client.query(
       `INSERT INTO orders
@@ -241,11 +265,12 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
          type,
          table_number,
          payment_status,
+         cash_session_id,
          updated_at
        )
        VALUES
        (
-         $1, $2, NULLIF($3, ''), NULLIF($4, ''), $5, $6, $7, $8, $9, $10, $11, $12, $13, 'completed', 'table', $14, 'paid', NOW()
+         $1, $2, NULLIF($3, ''), NULLIF($4, ''), $5, $6, $7, $8, $9, $10, $11, $12, $13, 'completed', 'table', $14, 'paid', $15, NOW()
        )`,
       [
         orderId,
@@ -262,6 +287,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
         deliveryFee,
         total,
         tab.table_number,
+        openCashSession?.id || null,
       ],
     );
 
@@ -300,39 +326,28 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
       );
     }
 
-    const openCashSession = await client.query<{ id: string }>(
-      `SELECT id
-       FROM cash_register_sessions
-       WHERE tenant_id = $1 AND status = 'open'
-       ORDER BY opened_at DESC
-       LIMIT 1`,
-      [session.tenantId],
-    );
     const movementUser = await client.query<{ id: string }>(
       `SELECT id FROM tenant_users WHERE id = $1 AND tenant_id = $2 LIMIT 1`,
       [session.userId, session.tenantId],
     );
-    const hasOpenCash = Boolean(openCashSession.rowCount);
     const movementUserId = movementUser.rowCount ? session.userId : null;
 
     for (const payment of resolvedPayments) {
       if (payment.method.settlement_days === 0) {
-        if (hasOpenCash) {
-          await client.query(
-            `INSERT INTO cash_movements
-             (id, tenant_id, session_id, movement_type, amount, description, reference_order_id, created_by_user_id)
-             VALUES ($1, $2, $3, 'sale', $4, $5, $6, $7)`,
-            [
-              randomUUID(),
-              session.tenantId,
-              openCashSession.rows[0].id,
-              payment.netAmount,
-              `Venda mesa ${tab.table_number} (${payment.method.name})`,
-              orderId,
-              movementUserId,
-            ],
-          );
-        }
+        await client.query(
+          `INSERT INTO cash_movements
+           (id, tenant_id, session_id, movement_type, amount, description, reference_order_id, created_by_user_id)
+           VALUES ($1, $2, $3, 'sale', $4, $5, $6, $7)`,
+          [
+            randomUUID(),
+            session.tenantId,
+            openCashSession!.id,
+            payment.netAmount,
+            `Venda mesa ${tab.table_number} (${payment.method.name})`,
+            orderId,
+            movementUserId,
+          ],
+        );
       } else {
         await client.query(
           `INSERT INTO receivables

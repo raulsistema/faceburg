@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type { QueryResult, QueryResultRow } from 'pg';
 import { query } from '@/lib/db';
+import { parseMoneyInput } from '@/lib/finance-utils';
 
 type QueryExecutor = {
   query: <T extends QueryResultRow = QueryResultRow>(text: string, values?: unknown[]) => Promise<QueryResult<T>>;
@@ -68,9 +69,9 @@ function normalizeInteger(value: unknown, fallback: number) {
 }
 
 function normalizeMoney(value: unknown) {
-  const parsed = Number(value);
+  const parsed = parseMoneyInput(value);
   if (!Number.isFinite(parsed) || parsed < 0) return 0;
-  return Number(parsed.toFixed(2));
+  return parsed;
 }
 
 function normalizeId(value: unknown) {

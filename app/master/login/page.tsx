@@ -29,7 +29,6 @@ export default function MasterLoginPage() {
     }
 
     router.push('/empresas');
-    router.refresh();
   }
 
   return (

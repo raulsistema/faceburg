@@ -1,6 +1,16 @@
 import { randomUUID } from 'node:crypto';
 import { query } from '@/lib/db';
 import type { DbExecutor } from '@/lib/db';
+import {
+  DEFAULT_PRINT_WIDTH,
+  normalizePrintCopies,
+  normalizePrintEvents,
+  normalizeReceiptOptions,
+  normalizeReceiptText,
+  normalizeReceiptWidth,
+  printEventKeyFor,
+  type PrintJobEventType,
+} from '@/lib/print-settings';
 import { notifyAgentJobAvailable } from '@/lib/realtime';
 
 type OrderHeaderRow = {
@@ -60,9 +70,19 @@ type AgentConfigRow = {
   tenant_id: string;
   enabled: boolean;
   agent_key: string | null;
+  receipt_width: number | null;
+  print_copies: number | null;
+  print_events: unknown | null;
+  receipt_options: unknown | null;
+  receipt_header: string | null;
+  receipt_footer: string | null;
 };
 
-const RECEIPT_WIDTH = 32;
+type OrderStatusRow = {
+  status: string;
+};
+
+const RECEIPT_WIDTH = DEFAULT_PRINT_WIDTH;
 
 function formatBrl(value: number) {
   return value
@@ -74,8 +94,8 @@ function text(value: unknown) {
   return String(value ?? '').trim();
 }
 
-function divider(char = '-') {
-  return char.repeat(RECEIPT_WIDTH);
+function divider(width = RECEIPT_WIDTH, char = '-') {
+  return char.repeat(width);
 }
 
 function wrapText(value: string, width = RECEIPT_WIDTH) {
@@ -183,7 +203,7 @@ function typeToHeader(type: string) {
   return 'PEDIDO';
 }
 
-function buildPrintStage(orderType: string, orderStatus: string, eventType: 'new_order' | 'status_update' | 'manual_receipt') {
+function buildPrintStage(orderType: string, orderStatus: string, eventType: PrintJobEventType) {
   if (eventType === 'status_update' && orderStatus === 'processing') {
     return {
       header: 'COZINHA',
@@ -267,18 +287,22 @@ function parseItemNotes(raw: string | null) {
   }
 }
 
-function buildItemLines(item: OrderItemRow) {
+function buildItemLines(item: OrderItemRow, width = RECEIPT_WIDTH, showDetails = true) {
   const lines: string[] = [];
   const itemTotal = Number(item.unit_price || 0) * Number(item.quantity || 0);
   const title = `${item.quantity}un ${text(item.product_name)}`;
   const priceLabel = formatBrl(itemTotal);
 
-  const wrappedTitle = wrapText(title, RECEIPT_WIDTH);
-  if (wrappedTitle.length === 1 && wrappedTitle[0].length + priceLabel.length + 1 <= RECEIPT_WIDTH) {
-    lines.push(alignLine(wrappedTitle[0], priceLabel));
+  const wrappedTitle = wrapText(title, width);
+  if (wrappedTitle.length === 1 && wrappedTitle[0].length + priceLabel.length + 1 <= width) {
+    lines.push(alignLine(wrappedTitle[0], priceLabel, width));
   } else {
     lines.push(...wrappedTitle);
     lines.push(`x ${priceLabel}`);
+  }
+
+  if (!showDetails) {
+    return lines;
   }
 
   const parsedNotes = parseItemNotes(item.notes);
@@ -287,29 +311,29 @@ function buildItemLines(item: OrderItemRow) {
   const observation = text(parsedNotes?.notes);
 
   if (pizza?.sizeLabel) {
-    lines.push(...wrapText(`Tamanho: ${pizza.sizeLabel}`, RECEIPT_WIDTH));
+    lines.push(...wrapText(`Tamanho: ${pizza.sizeLabel}`, width));
   }
 
   const flavors = Array.isArray(pizza?.flavors) ? pizza?.flavors.filter((flavor) => text(flavor?.name)) : [];
   if (flavors.length > 1) {
     for (const flavor of flavors) {
-      lines.push(...wrapText(`1/${flavors.length} ${text(flavor.name)}`, RECEIPT_WIDTH));
+      lines.push(...wrapText(`1/${flavors.length} ${text(flavor.name)}`, width));
     }
   } else if (flavors.length === 1) {
-    lines.push(...wrapText(`Sabor: ${text(flavors[0].name)}`, RECEIPT_WIDTH));
+    lines.push(...wrapText(`Sabor: ${text(flavors[0].name)}`, width));
   }
 
   if (pizza?.border?.label) {
-    lines.push(...wrapText(`Borda: ${text(pizza.border.label)}`, RECEIPT_WIDTH));
+    lines.push(...wrapText(`Borda: ${text(pizza.border.label)}`, width));
   }
 
   if (pizza?.dough?.label) {
-    lines.push(...wrapText(`Massa: ${text(pizza.dough.label)}`, RECEIPT_WIDTH));
+    lines.push(...wrapText(`Massa: ${text(pizza.dough.label)}`, width));
   }
 
   if (pizza?.gift?.name) {
     const giftQty = Math.max(1, Number(pizza.gift.quantity || 1));
-    lines.push(...wrapText(`Brinde: ${text(pizza.gift.name)} x${giftQty}`, RECEIPT_WIDTH));
+    lines.push(...wrapText(`Brinde: ${text(pizza.gift.name)} x${giftQty}`, width));
   }
 
   for (const option of options) {
@@ -317,17 +341,17 @@ function buildItemLines(item: OrderItemRow) {
     if (!optionName) continue;
     const optionPrice = Number(option?.priceAddition || 0);
     const label = optionPrice > 0 ? `+ ${optionName} (+ ${formatBrl(optionPrice)})` : `+ ${optionName}`;
-    lines.push(...wrapText(label, RECEIPT_WIDTH));
+    lines.push(...wrapText(label, width));
   }
 
   if (observation) {
-    lines.push(...wrapLabeled('Obs.: ', observation, RECEIPT_WIDTH));
+    lines.push(...wrapLabeled('Obs.: ', observation, width));
   }
 
   return lines;
 }
 
-function buildStoreFooter(order: OrderHeaderRow) {
+function buildStoreFooter(order: OrderHeaderRow, width = RECEIPT_WIDTH) {
   const lines: string[] = [];
   const storeName = text(order.issuer_trade_name) || text(order.issuer_name) || text(order.tenant_name);
   const storeStreet = [text(order.issuer_street), text(order.issuer_number)].filter(Boolean).join(', ');
@@ -337,19 +361,19 @@ function buildStoreFooter(order: OrderHeaderRow) {
   const storeLocation = [storeCity, storeZip].filter(Boolean).join(' ');
 
   if (storeName) {
-    lines.push(centerLine(storeName));
+    lines.push(centerLine(storeName, width));
   }
   if (storeStreet) {
-    lines.push(...wrapText(storeStreet, RECEIPT_WIDTH).map((line) => centerLine(line)));
+    lines.push(...wrapText(storeStreet, width).map((line) => centerLine(line, width)));
   }
   if (storeArea) {
-    lines.push(...wrapText(storeArea, RECEIPT_WIDTH).map((line) => centerLine(line)));
+    lines.push(...wrapText(storeArea, width).map((line) => centerLine(line, width)));
   }
   if (storeLocation) {
-    lines.push(...wrapText(storeLocation, RECEIPT_WIDTH).map((line) => centerLine(line)));
+    lines.push(...wrapText(storeLocation, width).map((line) => centerLine(line, width)));
   }
   if (text(order.issuer_document)) {
-    lines.push(centerLine(`CNPJ: ${text(order.issuer_document)}`));
+    lines.push(centerLine(`CNPJ: ${text(order.issuer_document)}`, width));
   }
   return lines.filter(Boolean);
 }
@@ -357,8 +381,9 @@ function buildStoreFooter(order: OrderHeaderRow) {
 export async function buildOrderPrintText(
   tenantId: string,
   orderId: string,
-  eventType: 'new_order' | 'status_update' | 'manual_receipt',
+  eventType: PrintJobEventType,
   executor: DbExecutor = { query },
+  config?: Partial<AgentConfigRow> | null,
 ) {
   const orderResult = await executor.query<OrderHeaderRow>(
     `SELECT o.id,
@@ -427,6 +452,10 @@ export async function buildOrderPrintText(
 
   if (!orderResult.rowCount) return '';
   const order = orderResult.rows[0];
+  const receiptWidth = normalizeReceiptWidth(config?.receipt_width);
+  const receiptOptions = normalizeReceiptOptions(config?.receipt_options);
+  const receiptHeader = normalizeReceiptText(config?.receipt_header);
+  const receiptFooter = normalizeReceiptText(config?.receipt_footer);
 
   const itemsResult = await executor.query<OrderItemRow>(
     `SELECT oi.quantity,
@@ -458,9 +487,16 @@ export async function buildOrderPrintText(
   const lines: string[] = [];
   const printStage = buildPrintStage(order.type, order.status, eventType);
 
-  lines.push(printStage.header);
+  if (receiptHeader) {
+    for (const line of wrapText(receiptHeader, receiptWidth)) {
+      lines.push(centerLine(line, receiptWidth));
+    }
+    lines.push(divider(receiptWidth));
+  }
+
+  lines.push(centerLine(printStage.header, receiptWidth));
   for (const tag of printStage.tags) {
-    lines.push(centerLine(tag));
+    lines.push(centerLine(tag, receiptWidth));
   }
   lines.push(`Venda: ${order.id.slice(0, 8).toUpperCase()}`);
   lines.push(
@@ -483,59 +519,71 @@ export async function buildOrderPrintText(
     lines.push(`Status: ${statusToLabel(order.status)}`);
   }
 
-  lines.push(...wrapLabeled('Cliente: ', text(order.customer_name) || 'Sem nome', RECEIPT_WIDTH));
+  lines.push(...wrapLabeled('Cliente: ', text(order.customer_name) || 'Sem nome', receiptWidth));
 
   const phone = maskPhone(order.customer_phone);
-  if (phone) {
-    lines.push(...wrapLabeled('Tel.: ', phone, RECEIPT_WIDTH));
+  if (phone && receiptOptions.showCustomerPhone) {
+    lines.push(...wrapLabeled('Tel.: ', phone, receiptWidth));
   }
 
   if (order.type === 'table' && text(order.table_number)) {
-    lines.push(...wrapLabeled('Mesa: ', text(order.table_number), RECEIPT_WIDTH));
+    lines.push(...wrapLabeled('Mesa: ', text(order.table_number), receiptWidth));
   }
 
   const deliveryAddress = formatAddressText(order.delivery_address);
-  if (deliveryAddress) {
-    lines.push(...wrapLabeled('End.: ', deliveryAddress, RECEIPT_WIDTH));
+  if (deliveryAddress && receiptOptions.showDeliveryAddress) {
+    lines.push(...wrapLabeled('End.: ', deliveryAddress, receiptWidth));
   }
 
-  lines.push(divider());
-  lines.push(centerLine('DOCUMENTO DE VENDA'));
-  lines.push(divider());
+  lines.push(divider(receiptWidth));
+  lines.push(centerLine('DOCUMENTO DE VENDA', receiptWidth));
+  lines.push(divider(receiptWidth));
 
   for (const item of itemsResult.rows) {
-    lines.push(...buildItemLines(item));
-    lines.push(divider());
+    lines.push(...buildItemLines(item, receiptWidth, receiptOptions.showItemNotes));
+    lines.push(divider(receiptWidth));
   }
 
-  lines.push(alignLine('Itens Comanda', `${itemCount} ${itemCount === 1 ? 'item' : 'itens'}`));
-  lines.push('');
-  lines.push(alignLine('Sub Total:', formatBrl(subtotalAmount)));
-  if (discountAmount > 0) {
-    lines.push(alignLine('Desconto:', `- ${formatBrl(discountAmount)}`));
+  if (receiptOptions.showTotals) {
+    lines.push(alignLine('Itens Comanda', `${itemCount} ${itemCount === 1 ? 'item' : 'itens'}`, receiptWidth));
+    lines.push('');
+    lines.push(alignLine('Sub Total:', formatBrl(subtotalAmount), receiptWidth));
+    if (discountAmount > 0) {
+      lines.push(alignLine('Desconto:', `- ${formatBrl(discountAmount)}`, receiptWidth));
+    }
+    if (surchargeAmount > 0) {
+      lines.push(alignLine('Acrescimo:', formatBrl(surchargeAmount), receiptWidth));
+    }
+    if (order.type === 'delivery' || deliveryFeeAmount > 0) {
+      lines.push(alignLine('Entrega:', formatBrl(deliveryFeeAmount), receiptWidth));
+    }
+    lines.push(alignLine('Total:', formatBrl(totalAmount), receiptWidth));
+    if (changeFor > 0) {
+      lines.push(alignLine('Troco para:', formatBrl(changeFor), receiptWidth));
+    }
   }
-  if (surchargeAmount > 0) {
-    lines.push(alignLine('Acrescimo:', formatBrl(surchargeAmount)));
+
+  if (receiptOptions.showPayment) {
+    lines.push('');
+    lines.push(...wrapText(typeToPaymentSentence(order.type, paymentLabel), receiptWidth));
   }
-  if (order.type === 'delivery' || deliveryFeeAmount > 0) {
-    lines.push(alignLine('Entrega:', formatBrl(deliveryFeeAmount)));
-  }
-  lines.push(alignLine('Total:', formatBrl(totalAmount)));
-  if (changeFor > 0) {
-    lines.push(alignLine('Troco para:', formatBrl(changeFor)));
-  }
-  lines.push('');
-  lines.push(...wrapText(typeToPaymentSentence(order.type, paymentLabel), RECEIPT_WIDTH));
 
   if (order.status === 'cancelled' && text(order.cancellation_reason)) {
     lines.push('');
-    lines.push(...wrapLabeled('Motivo: ', text(order.cancellation_reason), RECEIPT_WIDTH));
+    lines.push(...wrapLabeled('Motivo: ', text(order.cancellation_reason), receiptWidth));
   }
 
-  const storeFooter = buildStoreFooter(order);
+  const storeFooter = receiptOptions.showStoreInfo ? buildStoreFooter(order, receiptWidth) : [];
   if (storeFooter.length) {
     lines.push('');
     lines.push(...storeFooter);
+  }
+
+  if (receiptFooter) {
+    lines.push('');
+    for (const line of wrapText(receiptFooter, receiptWidth)) {
+      lines.push(centerLine(line, receiptWidth));
+    }
   }
 
   lines.push('');
@@ -546,11 +594,19 @@ export async function buildOrderPrintText(
 export async function enqueueOrderPrintJob(
   tenantId: string,
   orderId: string,
-  eventType: 'new_order' | 'status_update' | 'manual_receipt',
+  eventType: PrintJobEventType,
   executor: DbExecutor = { query },
 ) {
   const configResult = await executor.query<AgentConfigRow>(
-    `SELECT tenant_id, enabled, agent_key
+    `SELECT tenant_id,
+            enabled,
+            agent_key,
+            receipt_width,
+            print_copies,
+            print_events,
+            receipt_options,
+            receipt_header,
+            receipt_footer
      FROM printer_agents
      WHERE tenant_id = $1
      LIMIT 1`,
@@ -562,16 +618,36 @@ export async function enqueueOrderPrintJob(
     return false;
   }
 
-  const payloadText = await buildOrderPrintText(tenantId, orderId, eventType, executor);
+  const statusResult = await executor.query<OrderStatusRow>(
+    `SELECT status
+     FROM orders
+     WHERE tenant_id = $1
+       AND id = $2
+     LIMIT 1`,
+    [tenantId, orderId],
+  );
+  const orderStatus = statusResult.rows[0]?.status || '';
+  const eventKey = printEventKeyFor(eventType, orderStatus);
+  const printEvents = normalizePrintEvents(config.print_events);
+  if (!eventKey || !printEvents[eventKey]) {
+    return false;
+  }
+
+  const payloadText = await buildOrderPrintText(tenantId, orderId, eventType, executor, config);
   if (!payloadText) return false;
 
-  await executor.query(
-    `INSERT INTO print_jobs
-      (id, tenant_id, order_id, event_type, payload_text, status, attempt_count, created_at, updated_at)
-     VALUES
-      ($1, $2, $3, $4, $5, 'queued', 0, NOW(), NOW())`,
-    [randomUUID(), tenantId, orderId, eventType, payloadText],
-  );
+  const copies = normalizePrintCopies(config.print_copies);
+  const receiptWidth = normalizeReceiptWidth(config.receipt_width);
+  for (let copyIndex = 1; copyIndex <= copies; copyIndex += 1) {
+    const copyLabel = copies > 1 ? `\n${centerLine(`VIA ${copyIndex}/${copies}`, receiptWidth)}\n\n` : '';
+    await executor.query(
+      `INSERT INTO print_jobs
+        (id, tenant_id, order_id, event_type, payload_text, status, attempt_count, created_at, updated_at)
+       VALUES
+        ($1, $2, $3, $4, $5, 'queued', 0, NOW(), NOW())`,
+      [randomUUID(), tenantId, orderId, eventType, `${payloadText}${copyLabel}`],
+    );
+  }
   await notifyAgentJobAvailable(tenantId, 'print', executor);
 
   return true;

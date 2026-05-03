@@ -12,6 +12,7 @@ const MAX_RANGE_DAYS = 180;
 type TotalsRow = {
   gross_sales: string;
   fee_total: string;
+  delivery_fee_total: string;
   net_sales: string;
   completed_orders: string;
   cancelled_orders: string;
@@ -126,6 +127,7 @@ export async function GET(request: Request) {
            id,
            status,
            total,
+           delivery_fee_amount,
            payment_fee_amount,
            payment_net_amount
          FROM orders
@@ -133,12 +135,13 @@ export async function GET(request: Request) {
            AND timezone('${BUSINESS_TZ}', created_at)::date BETWEEN $2::date AND $3::date
        )
        SELECT
-         COALESCE(SUM(CASE WHEN status <> 'cancelled' THEN total ELSE 0 END), 0)::text AS gross_sales,
-         COALESCE(SUM(CASE WHEN status <> 'cancelled' THEN COALESCE(payment_fee_amount, 0) ELSE 0 END), 0)::text AS fee_total,
-         COALESCE(SUM(CASE WHEN status <> 'cancelled' THEN COALESCE(payment_net_amount, total) ELSE 0 END), 0)::text AS net_sales,
-         COUNT(CASE WHEN status <> 'cancelled' THEN 1 END)::text AS completed_orders,
+         COALESCE(SUM(CASE WHEN status = 'completed' THEN total ELSE 0 END), 0)::text AS gross_sales,
+         COALESCE(SUM(CASE WHEN status = 'completed' THEN COALESCE(payment_fee_amount, 0) ELSE 0 END), 0)::text AS fee_total,
+         COALESCE(SUM(CASE WHEN status = 'completed' THEN COALESCE(delivery_fee_amount, 0) ELSE 0 END), 0)::text AS delivery_fee_total,
+         COALESCE(SUM(CASE WHEN status = 'completed' THEN COALESCE(payment_net_amount, total) ELSE 0 END), 0)::text AS net_sales,
+         COUNT(CASE WHEN status = 'completed' THEN 1 END)::text AS completed_orders,
          COUNT(CASE WHEN status = 'cancelled' THEN 1 END)::text AS cancelled_orders,
-         COALESCE(AVG(CASE WHEN status <> 'cancelled' THEN total END), 0)::text AS avg_ticket
+         COALESCE(AVG(CASE WHEN status = 'completed' THEN total END), 0)::text AS avg_ticket
        FROM filtered_orders`,
       [session.tenantId, startDate, endDate],
     ),
@@ -157,8 +160,8 @@ export async function GET(request: Request) {
        )
        SELECT
          to_char(d.day, 'YYYY-MM-DD') AS day,
-         COALESCE(SUM(CASE WHEN fo.status <> 'cancelled' THEN fo.total ELSE 0 END), 0)::text AS gross_sales,
-         COUNT(CASE WHEN fo.status <> 'cancelled' THEN 1 END)::text AS orders,
+         COALESCE(SUM(CASE WHEN fo.status = 'completed' THEN fo.total ELSE 0 END), 0)::text AS gross_sales,
+         COUNT(CASE WHEN fo.status = 'completed' THEN 1 END)::text AS orders,
          COUNT(CASE WHEN fo.status = 'cancelled' THEN 1 END)::text AS cancelled_orders
        FROM days d
        LEFT JOIN filtered_orders fo
@@ -177,7 +180,7 @@ export async function GET(request: Request) {
            payment_net_amount
          FROM orders
          WHERE tenant_id = $1
-           AND status <> 'cancelled'
+           AND status = 'completed'
            AND timezone('${BUSINESS_TZ}', created_at)::date BETWEEN $2::date AND $3::date
        ),
        payment_lines AS (
@@ -248,7 +251,7 @@ export async function GET(request: Request) {
          COALESCE(SUM(total), 0)::text AS gross_sales
        FROM orders
        WHERE tenant_id = $1
-         AND status <> 'cancelled'
+         AND status = 'completed'
          AND timezone('${BUSINESS_TZ}', created_at)::date BETWEEN $2::date AND $3::date
        GROUP BY type
        ORDER BY SUM(total) DESC`,
@@ -267,7 +270,7 @@ export async function GET(request: Request) {
        LEFT JOIN products p
          ON p.id = oi.product_id
         AND p.tenant_id = o.tenant_id
-       WHERE o.status <> 'cancelled'
+       WHERE o.status = 'completed'
          AND timezone('${BUSINESS_TZ}', o.created_at)::date BETWEEN $2::date AND $3::date
        GROUP BY oi.product_id, COALESCE(p.name, 'Produto removido')
        ORDER BY SUM(oi.quantity) DESC, COALESCE(p.name, 'Produto removido') ASC
@@ -279,6 +282,7 @@ export async function GET(request: Request) {
   const totals = totalsResult.rows[0] || {
     gross_sales: '0',
     fee_total: '0',
+    delivery_fee_total: '0',
     net_sales: '0',
     completed_orders: '0',
     cancelled_orders: '0',
@@ -291,6 +295,7 @@ export async function GET(request: Request) {
       totals: {
         grossSales: Number(totals.gross_sales || 0),
         feeTotal: Number(totals.fee_total || 0),
+        deliveryFeeTotal: Number(totals.delivery_fee_total || 0),
         netSales: Number(totals.net_sales || 0),
         completedOrders: Number(totals.completed_orders || 0),
         cancelledOrders: Number(totals.cancelled_orders || 0),
@@ -329,4 +334,3 @@ export async function GET(request: Request) {
     },
   );
 }
-

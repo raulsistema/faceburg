@@ -1,5 +1,5 @@
 /* eslint-disable no-console */
-const { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage, safeStorage } = require('electron');
+const { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage, safeStorage, shell, session } = require('electron');
 const { fork, execFile } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -17,14 +17,17 @@ const DEFAULT_SETTINGS = {
   tenantName: '',
   userName: '',
   autoStartWithWindows: true,
-  autoStartWhatsApp: true,
-  autoStartPrint: true,
+  autoStartWhatsApp: false,
+  autoStartPrint: false,
+  lastSystemUrl: '',
 };
 
 const LOG_MAX = 200;
 const WORKER_RESTART_DELAY_MS = 5000;
 const WHATSAPP_STOP_GRACE_MS = 5000;
 const PRINT_STOP_GRACE_MS = 3000;
+const SYSTEM_PARTITION = 'persist:faceburg-system';
+const SESSION_COOKIE_NAME = 'faceburg_session';
 
 /* ─── state ──────────────────────────────────────────────────── */
 
@@ -50,11 +53,12 @@ let printRestartReason = 'reinicio solicitado pelo hub';
 let whatsState = { status: 'stopped', qrCode: '', phoneNumber: '', lastError: '' };
 let printState = { status: 'stopped', lastError: '', lastJobAt: '' };
 let logs = [];
+let systemSessionSyncPromise = null;
 
 const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) app.quit();
 
-const APP_USER_MODEL_ID = 'com.faceburg.hub';
+const APP_USER_MODEL_ID = 'com.faceburg.app';
 const WINDOW_ICON_FILE = 'logorbs.ico';
 const TRAY_ICON_FILE = 'logorbs-32.png';
 
@@ -132,12 +136,105 @@ function saveSettings(s) {
   fs.writeFileSync(settingsFilePath(), JSON.stringify(serializable, null, 2), 'utf8');
 }
 
+function persistLastSystemUrl(url) {
+  if (!url) return;
+  const current = readSettings();
+  const serverUrl = current.serverUrl ? normalizeServerUrl(current.serverUrl) : '';
+  const safeUrl = getSafeSystemUrl(url, serverUrl || getConfiguredSystemUrl());
+  if (current.lastSystemUrl === safeUrl) return;
+  saveSettings({ ...current, lastSystemUrl: safeUrl });
+}
+
 /* ─── helpers ────────────────────────────────────────────────── */
 
 function emit(channel, data) {
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.webContents.send(channel, data);
   }
+}
+
+function getConfiguredSystemUrl() {
+  const settings = readSettings();
+  if (!settings.serverUrl) throw new Error('Configure a URL do servidor antes de abrir o sistema.');
+  return normalizeServerUrl(settings.serverUrl);
+}
+
+function getSafeSystemUrl(candidate, serverUrl) {
+  const fallbackUrl = `${serverUrl}/`;
+  const raw = String(candidate || '').trim();
+  if (!raw) return fallbackUrl;
+  try {
+    const parsed = new URL(raw);
+    if (parsed.origin !== serverUrl) return fallbackUrl;
+    return parsed.toString();
+  } catch {
+    return fallbackUrl;
+  }
+}
+
+function getPreferredSystemUrl(preferredUrl = '') {
+  const settings = readSettings();
+  const serverUrl = getConfiguredSystemUrl();
+  return getSafeSystemUrl(preferredUrl || settings.lastSystemUrl, serverUrl);
+}
+
+function isAllowedSystemUrl(url, allowedOrigin) {
+  if (!url) return false;
+  if (url === 'about:blank') return true;
+  try {
+    return new URL(url).origin === allowedOrigin;
+  } catch {
+    return false;
+  }
+}
+
+function bindMainWindowNavigation(targetUrl) {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  const allowedOrigin = new URL(targetUrl).origin;
+
+  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+    if (isAllowedSystemUrl(url, allowedOrigin)) {
+      void mainWindow.loadURL(url);
+      return { action: 'deny' };
+    }
+    void shell.openExternal(url);
+    return { action: 'deny' };
+  });
+
+  mainWindow.webContents.on('will-navigate', (event, url) => {
+    if (isAllowedSystemUrl(url, allowedOrigin)) return;
+    event.preventDefault();
+    void shell.openExternal(url);
+  });
+
+  mainWindow.webContents.on('did-navigate', (_event, url) => {
+    persistLastSystemUrl(url);
+  });
+
+  mainWindow.webContents.on('did-navigate-in-page', (_event, url) => {
+    persistLastSystemUrl(url);
+  });
+
+  mainWindow.webContents.on('did-finish-load', () => {
+    const currentUrl = mainWindow?.webContents.getURL();
+    if (!currentUrl || currentUrl === 'about:blank') return;
+    persistLastSystemUrl(currentUrl);
+  });
+}
+
+async function openSystemWindow(preferredUrl = '') {
+  const targetUrl = getPreferredSystemUrl(preferredUrl);
+
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    createMainWindow(targetUrl);
+    return;
+  }
+
+  const currentUrl = mainWindow.webContents.getURL();
+  if (currentUrl !== targetUrl) {
+    await mainWindow.loadURL(targetUrl);
+  }
+  showMainWindow();
 }
 
 function pushLog(source, message) {
@@ -174,13 +271,119 @@ async function fetchJsonWithTimeout(url, options = {}, timeoutMs = 2500) {
   }
 }
 
+async function fetchJsonWithStatus(url, options = {}) {
+  const response = await fetch(url, options);
+  const data = await response.json().catch(() => ({}));
+  return {
+    ok: response.ok,
+    status: response.status,
+    data,
+  };
+}
+
+function getSystemSession() {
+  return session.fromPartition(SYSTEM_PARTITION);
+}
+
+async function getSystemSessionCookieHeader(serverUrl) {
+  const cookies = await getSystemSession().cookies.get({ url: serverUrl, name: SESSION_COOKIE_NAME });
+  const activeCookie = cookies.find((item) => Boolean(item.value));
+  if (!activeCookie?.value) return '';
+  return `${SESSION_COOKIE_NAME}=${activeCookie.value}`;
+}
+
+async function getSystemSessionProfile(serverUrl, cookieHeader) {
+  const profileResult = await fetchJsonWithStatus(`${serverUrl}/api/auth/me`, {
+    method: 'GET',
+    headers: {
+      cookie: cookieHeader,
+      'cache-control': 'no-cache',
+    },
+  });
+  if (!profileResult.ok || !profileResult.data?.authenticated) {
+    throw new Error('Entre no sistema nesta janela antes de ativar os agentes.');
+  }
+  return profileResult.data;
+}
+
+async function refreshAgentCredentialsFromSystemSession(options = {}) {
+  const current = readSettings();
+  if (!current.serverUrl) {
+    throw new Error('Configure a URL do servidor antes de ativar os agentes.');
+  }
+
+  const cookieHeader = await getSystemSessionCookieHeader(current.serverUrl);
+  if (!cookieHeader) {
+    throw new Error('Entre no sistema nesta janela antes de ativar os agentes.');
+  }
+
+  const profile = await getSystemSessionProfile(current.serverUrl, cookieHeader);
+  const shouldSyncWhats = options.syncWhats !== false;
+  const shouldSyncPrint = options.syncPrint !== false;
+
+  const [whatsLogin, printLogin] = await Promise.all([
+    shouldSyncWhats
+      ? fetchJson(`${current.serverUrl}/api/whatsapp/agent/session-login`, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          cookie: cookieHeader,
+        },
+        body: '{}',
+      })
+      : Promise.resolve(null),
+    shouldSyncPrint
+      ? fetchJson(`${current.serverUrl}/api/print/agent/session-login`, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          cookie: cookieHeader,
+        },
+        body: '{}',
+      })
+      : Promise.resolve(null),
+  ]);
+
+  const next = {
+    ...current,
+    slug: String(profile?.tenant?.slug || current.slug || ''),
+    email: String(profile?.user?.email || current.email || ''),
+    whatsAgentKey: String(whatsLogin?.agentKey || current.whatsAgentKey || ''),
+    printAgentKey: String(printLogin?.agentKey || current.printAgentKey || ''),
+    printerName: String(printLogin?.printerName || current.printerName || ''),
+    tenantName: String(profile?.tenant?.name || current.tenantName || ''),
+    userName: String(profile?.user?.name || current.userName || ''),
+  };
+  saveSettings(next);
+
+  if (!options.silent) {
+    pushLog('system', 'Sessao do sistema reconhecida. App local sincronizado com o login web.');
+  }
+
+  return {
+    authenticated: true,
+    profile,
+    settings: next,
+  };
+}
+
+function syncAgentCredentialsFromSystemSessionOnce() {
+  if (!systemSessionSyncPromise) {
+    systemSessionSyncPromise = refreshAgentCredentialsFromSystemSession({ silent: true })
+      .finally(() => {
+        systemSessionSyncPromise = null;
+      });
+  }
+  return systemSessionSyncPromise;
+}
+
 /* ─── Windows startup ────────────────────────────────────────── */
 
 function applyWindowsStartup(enabled) {
   try {
     app.setLoginItemSettings({
       openAtLogin: enabled,
-      name: 'Faceburg Hub',
+      name: 'Faceburg App',
     });
   } catch (err) {
     console.error('[hub] Falha ao configurar inicializacao com Windows:', err);
@@ -208,8 +411,17 @@ async function checkServerAgentEnabled(serverUrl, agentKey, kind) {
 
 async function refreshAgentCredentialsIfPossible() {
   const current = readSettings();
-  if (!current.serverUrl || !current.slug || !current.email || !current.password) {
+  if (!current.serverUrl) {
     return current;
+  }
+
+  if (!current.slug || !current.email || !current.password) {
+    try {
+      const synced = await refreshAgentCredentialsFromSystemSession({ silent: true });
+      return synced.settings;
+    } catch {
+      return current;
+    }
   }
 
   try {
@@ -259,7 +471,7 @@ async function syncAutoStartAgents() {
     const enabled = await checkServerAgentEnabled(saved.serverUrl, saved.whatsAgentKey, 'whatsapp');
     if (enabled) {
       try {
-        startWhatsAppWorker();
+        await startWhatsAppWorker();
       } catch (err) {
         pushLog('system', `Falha auto-start WhatsApp: ${err.message || err}`);
       }
@@ -275,7 +487,7 @@ async function syncAutoStartAgents() {
     const enabled = await checkServerAgentEnabled(saved.serverUrl, saved.printAgentKey, 'print');
     if (enabled) {
       try {
-        startPrintWorker();
+        await startPrintWorker();
       } catch (err) {
         pushLog('system', `Falha auto-start impressao: ${err.message || err}`);
       }
@@ -319,7 +531,7 @@ function scheduleWhatsAppWorkerRestart(reason, delayMs = WORKER_RESTART_DELAY_MS
     }
 
     try {
-      startWhatsAppWorker();
+      await startWhatsAppWorker();
     } catch (err) {
       pushLog('whatsapp', `Falha ao reiniciar worker: ${err?.message || err}`);
       scheduleWhatsAppWorkerRestart('nova tentativa apos falha', delayMs);
@@ -347,7 +559,7 @@ function schedulePrintWorkerRestart(reason, delayMs = WORKER_RESTART_DELAY_MS) {
     }
 
     try {
-      startPrintWorker();
+      await startPrintWorker();
     } catch (err) {
       pushLog('print', `Falha ao reiniciar worker: ${err?.message || err}`);
       schedulePrintWorkerRestart('nova tentativa apos falha', delayMs);
@@ -384,10 +596,23 @@ function listPrintersWindows() {
 
 /* ─── WhatsApp worker ────────────────────────────────────────── */
 
-function startWhatsAppWorker() {
-  if (whatsWorker) return;
-  const settings = readSettings();
-  if (!settings.whatsAgentKey || !settings.serverUrl) throw new Error('Faca login antes.');
+async function startWhatsAppWorker() {
+  if (whatsWorker) {
+    emit('whatsapp:state', whatsState);
+    return;
+  }
+  let settings = readSettings();
+  if (!settings.serverUrl) throw new Error('Configure a URL do servidor antes de abrir o WhatsApp.');
+
+  try {
+    const synced = await refreshAgentCredentialsFromSystemSession({ syncPrint: false });
+    settings = synced.settings;
+  } catch (error) {
+    if (!settings.whatsAgentKey) throw error;
+    pushLog('whatsapp', 'Usando credencial WhatsApp ja salva neste computador.');
+  }
+
+  if (!settings.whatsAgentKey) throw new Error('Entre no sistema nesta janela antes de abrir o WhatsApp.');
   clearWhatsAppWorkerRestartTimer();
   whatsStopRequested = false;
   whatsRestartRequested = false;
@@ -486,10 +711,20 @@ function stopWhatsAppWorker(options = {}) {
 
 /* ─── Print worker ───────────────────────────────────────────── */
 
-function startPrintWorker() {
+async function startPrintWorker() {
   if (printWorker) return;
-  const settings = readSettings();
-  if (!settings.printAgentKey || !settings.serverUrl) throw new Error('Faca login antes.');
+  let settings = readSettings();
+  if (!settings.serverUrl) throw new Error('Configure a URL do servidor antes de ativar a impressao.');
+
+  try {
+    const synced = await refreshAgentCredentialsFromSystemSession({ syncWhats: false });
+    settings = synced.settings;
+  } catch (error) {
+    if (!settings.printAgentKey) throw error;
+    pushLog('print', 'Usando credencial de impressao ja salva neste computador.');
+  }
+
+  if (!settings.printAgentKey) throw new Error('Entre no sistema nesta janela antes de ativar a impressao.');
   clearPrintWorkerRestartTimer();
   printStopRequested = false;
   printRestartRequested = false;
@@ -626,10 +861,10 @@ function createTray() {
   if (tray) return;
   trayIcon = buildTrayIcon();
   tray = new Tray(trayIcon);
-  tray.setToolTip('Faceburg Hub');
+  tray.setToolTip('Faceburg App');
 
   const ctxMenu = Menu.buildFromTemplate([
-    { label: 'Abrir Faceburg Hub', click: () => showMainWindow() },
+    { label: 'Abrir Faceburg App', click: () => showMainWindow() },
     { type: 'separator' },
     { label: 'Sair', click: () => { forceQuit = true; stopAllAgents(); setTimeout(() => app.quit(), 1000); } },
   ]);
@@ -648,23 +883,28 @@ function createTray() {
 
 /* ─── main window ────────────────────────────────────────────── */
 
-function createMainWindow() {
+function createMainWindow(preferredUrl = '') {
+  const targetUrl = getPreferredSystemUrl(preferredUrl);
   mainWindow = new BrowserWindow({
-    width: 900,
-    height: 640,
-    minWidth: 760,
-    minHeight: 560,
+    width: 1440,
+    height: 920,
+    minWidth: 1024,
+    minHeight: 720,
     autoHideMenuBar: true,
-    title: 'Faceburg Hub',
+    title: 'Faceburg App',
     icon: assetPath(WINDOW_ICON_FILE),
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
+      partition: SYSTEM_PARTITION,
     },
   });
 
-  mainWindow.loadFile(path.join(__dirname, 'renderer', 'index.html'));
+  bindMainWindowNavigation(targetUrl);
+  void mainWindow.loadURL(targetUrl).catch((error) => {
+    pushLog('system', `Falha ao carregar o sistema: ${error?.message || error}`);
+  });
 
   mainWindow.on('close', (event) => {
     if (forceQuit) return;
@@ -673,7 +913,7 @@ function createMainWindow() {
     mainWindow.setSkipTaskbar(true);
     if (tray && !trayHintShown) {
       trayHintShown = true;
-      tray.displayBalloon({ iconType: 'info', title: 'Faceburg Hub', content: 'O app continua ativo na bandeja do sistema.' });
+      tray.displayBalloon({ iconType: 'info', title: 'Faceburg App', content: 'O app continua ativo na bandeja do sistema.' });
     }
   });
 
@@ -747,7 +987,12 @@ ipcMain.handle('hub:login', async (_ev, payload) => {
 ipcMain.handle('hub:save-settings', async (_ev, payload) => {
   const current = readSettings();
   const next = { ...current, ...payload };
-  if (payload.serverUrl) next.serverUrl = normalizeServerUrl(payload.serverUrl);
+  if (payload.serverUrl) {
+    next.serverUrl = normalizeServerUrl(payload.serverUrl);
+    if (!payload.lastSystemUrl) {
+      next.lastSystemUrl = '';
+    }
+  }
   saveSettings(next);
   return next;
 });
@@ -777,8 +1022,8 @@ ipcMain.handle('hub:update-printer', async (_ev, payload) => {
 });
 
 // Individual agent controls
-ipcMain.handle('hub:start-whatsapp', () => {
-  startWhatsAppWorker();
+ipcMain.handle('hub:start-whatsapp', async () => {
+  await startWhatsAppWorker();
   return { ok: true };
 });
 
@@ -792,13 +1037,51 @@ ipcMain.handle('hub:restart-whatsapp', () => {
   return { ok: true };
 });
 
-ipcMain.handle('hub:start-print', () => {
-  startPrintWorker();
+ipcMain.handle('hub:start-print', async () => {
+  await startPrintWorker();
+  return { ok: true };
+});
+
+ipcMain.handle('hub:restart-print', async () => {
+  restartPrintWorker('reconexao solicitada pela tela de pedidos', 700);
   return { ok: true };
 });
 
 ipcMain.handle('hub:stop-print', () => {
   stopPrintWorker();
+  return { ok: true };
+});
+
+ipcMain.handle('hub:open-system', async (_ev, payload) => {
+  await openSystemWindow(String(payload?.url || ''));
+  return { ok: true };
+});
+
+ipcMain.handle('hub:sync-system-session', async () => {
+  try {
+    const synced = await syncAgentCredentialsFromSystemSessionOnce();
+    return synced;
+  } catch (error) {
+    return {
+      authenticated: false,
+      error: error?.message || String(error || 'Sessao indisponivel.'),
+      settings: readSettings(),
+    };
+  }
+});
+
+ipcMain.handle('hub:get-system-url', () => {
+  const settings = readSettings();
+  return {
+    homeUrl: getSafeSystemUrl('', getConfiguredSystemUrl()),
+    lastUrl: getPreferredSystemUrl(settings.lastSystemUrl),
+  };
+});
+
+ipcMain.handle('hub:clear-system-url', async () => {
+  const current = readSettings();
+  const next = { ...current, lastSystemUrl: '' };
+  saveSettings(next);
   return { ok: true };
 });
 

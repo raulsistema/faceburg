@@ -39,16 +39,16 @@ export async function GET() {
     query<StatsRow>(
       `SELECT
         COALESCE(SUM(CASE
-          WHEN o.status <> 'cancelled'
+          WHEN o.status = 'completed'
             AND timezone('America/Sao_Paulo', o.created_at)::date = timezone('America/Sao_Paulo', now())::date
           THEN o.total ELSE 0 END), 0)::text AS sales_today,
         COUNT(CASE
-          WHEN o.status <> 'cancelled'
+          WHEN o.status = 'completed'
             AND timezone('America/Sao_Paulo', o.created_at)::date = timezone('America/Sao_Paulo', now())::date
           THEN 1 END)::text AS orders_today,
         COUNT(CASE WHEN o.status = 'pending' THEN 1 END)::text AS pending_orders,
         COALESCE(AVG(CASE
-          WHEN o.status <> 'cancelled'
+          WHEN o.status = 'completed'
             AND timezone('America/Sao_Paulo', o.created_at)::date = timezone('America/Sao_Paulo', now())::date
           THEN o.total END), 0)::text AS avg_ticket_today,
         AVG(CASE
@@ -64,7 +64,7 @@ export async function GET() {
       `SELECT id, customer_name, total::text, status, type, created_at
        FROM orders
        WHERE tenant_id = $1
-         AND status <> 'cancelled'
+         AND status = 'completed'
        ORDER BY created_at DESC
        LIMIT 5`,
       [session.tenantId],
@@ -81,7 +81,7 @@ export async function GET() {
         ON p.id = oi.product_id
        AND p.tenant_id = o.tenant_id
       WHERE o.tenant_id = $1
-        AND o.status <> 'cancelled'
+        AND o.status = 'completed'
         AND timezone('America/Sao_Paulo', o.created_at)::date = timezone('America/Sao_Paulo', now())::date
       GROUP BY oi.product_id, COALESCE(p.name, 'Produto removido')
       ORDER BY SUM(oi.quantity) DESC, COALESCE(p.name, 'Produto removido') ASC

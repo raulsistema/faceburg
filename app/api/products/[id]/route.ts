@@ -1,5 +1,6 @@
 ﻿import { NextResponse } from 'next/server';
 import pool, { query } from '@/lib/db';
+import { parseMoneyInput } from '@/lib/finance-utils';
 import { fetchProductOptionGroups, normalizeProductOptionGroups, syncProductOptionGroups } from '@/lib/product-options';
 import { getValidatedTenantSession } from '@/lib/tenant-auth';
 
@@ -73,7 +74,7 @@ function normalizeProductPatch(body: Record<string, unknown>, current: ProductRo
   const categoryId = hasOwn(body, 'categoryId') ? String(body.categoryId ?? '').trim() : current.category_id;
   const name = hasOwn(body, 'name') ? String(body.name ?? '').trim() : current.name;
   const description = hasOwn(body, 'description') ? String(body.description ?? '').trim() : String(current.description || '');
-  const price = hasOwn(body, 'price') ? Number(body.price || 0) : Number(current.price || 0);
+  const price = hasOwn(body, 'price') ? parseMoneyInput(body.price) : Number(current.price || 0);
   const imageUrl = hasOwn(body, 'imageUrl') ? String(body.imageUrl ?? '').trim() : String(current.image_url || '');
   const sku = hasOwn(body, 'sku') ? String(body.sku ?? '').trim() : String(current.sku || '');
   const status = hasOwn(body, 'status')

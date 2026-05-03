@@ -1,8 +1,8 @@
 {
-  "name": "faceburg-hub",
+  "name": "faceburg-app",
   "version": "1.0.0",
   "private": true,
-  "description": "Faceburg Hub — Sistema + WhatsApp + Impressao",
+  "description": "Faceburg App - sistema desktop com agentes locais de WhatsApp e impressao",
   "author": "Faceburg",
   "main": "main.js",
   "scripts": {
@@ -21,8 +21,8 @@
     "electron-builder": "^24.13.3"
   },
   "build": {
-    "appId": "com.faceburg.hub",
-    "productName": "Faceburg Hub",
+    "appId": "com.faceburg.app",
+    "productName": "Faceburg App",
     "asar": true,
     "files": [
       "main.js",
@@ -54,7 +54,7 @@
       "installerIcon": "assets/logorbs.ico",
       "uninstallerIcon": "assets/logorbs.ico",
       "installerHeaderIcon": "assets/logorbs.ico",
-      "artifactName": "Faceburg-Hub-Setup-${version}.exe"
+      "artifactName": "Faceburg-App-Setup-${version}.exe"
     }
   }
 }

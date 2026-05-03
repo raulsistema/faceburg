@@ -1,5 +1,6 @@
 import DashboardShell from '@/components/layout/DashboardShell';
 import { query } from '@/lib/db';
+import { normalizePrintCopies, normalizePrintEvents, normalizeReceiptOptions, normalizeReceiptText, normalizeReceiptWidth } from '@/lib/print-settings';
 import { getValidatedTenantSession } from '@/lib/tenant-auth';
 import PrintAgentSettings from './PrintAgentSettings';
 import WhatsAppAgentSettings from './WhatsAppAgentSettings';
@@ -35,6 +36,12 @@ type PrintAgentRow = {
   enabled: boolean;
   agent_key: string | null;
   printer_name: string | null;
+  receipt_width: number | null;
+  print_copies: number | null;
+  print_events: unknown | null;
+  receipt_options: unknown | null;
+  receipt_header: string | null;
+  receipt_footer: string | null;
   last_seen_at: string | null;
 };
 
@@ -83,7 +90,16 @@ export default async function SettingsPage() {
           [session.tenantId],
         ),
         query<PrintAgentRow>(
-          `SELECT enabled, agent_key, printer_name, last_seen_at
+          `SELECT enabled,
+                  agent_key,
+                  printer_name,
+                  receipt_width,
+                  print_copies,
+                  print_events,
+                  receipt_options,
+                  receipt_header,
+                  receipt_footer,
+                  last_seen_at
            FROM printer_agents
            WHERE tenant_id = $1
            LIMIT 1`,
@@ -150,6 +166,12 @@ export default async function SettingsPage() {
         hasAgentKey: Boolean(printAgent?.agent_key),
         agentKey: printAgent?.agent_key || '',
         printerName: printAgent?.printer_name || '',
+        receiptWidth: normalizeReceiptWidth(printAgent?.receipt_width),
+        printCopies: normalizePrintCopies(printAgent?.print_copies),
+        printEvents: normalizePrintEvents(printAgent?.print_events),
+        receiptOptions: normalizeReceiptOptions(printAgent?.receipt_options),
+        receiptHeader: normalizeReceiptText(printAgent?.receipt_header),
+        receiptFooter: normalizeReceiptText(printAgent?.receipt_footer),
         lastSeenAt: printAgent?.last_seen_at || null,
       }
     : null;
@@ -168,7 +190,7 @@ export default async function SettingsPage() {
 
   return (
     <DashboardShell initialData={shellData}>
-      <div className="max-w-3xl space-y-6">
+      <div className="max-w-5xl space-y-6">
         <div className="bg-white border border-slate-200 rounded-2xl p-6 shadow-sm">
           <h2 className="text-xl font-bold text-slate-900 mb-2">Configuracoes da Empresa</h2>
           <p className="text-sm text-slate-500">Area inicial para gestao SaaS por tenant.</p>

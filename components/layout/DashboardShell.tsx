@@ -20,33 +20,80 @@ type MeResponse = {
   };
 };
 
+const ME_CACHE_TTL_MS = 60_000;
+
+type MeCacheEntry = {
+  data: MeResponse | null;
+  loadedAt: number;
+};
+
+let sharedMeCache: MeCacheEntry | undefined;
+let sharedMePromise: Promise<MeResponse | null> | null = null;
+
+function getCachedMe() {
+  if (!sharedMeCache) return undefined;
+  if (Date.now() - sharedMeCache.loadedAt > ME_CACHE_TTL_MS) {
+    sharedMeCache = undefined;
+    return undefined;
+  }
+  return sharedMeCache.data;
+}
+
+async function loadMeOnce(forceRefresh = false) {
+  if (!forceRefresh) {
+    const cached = getCachedMe();
+    if (cached !== undefined) {
+      return cached;
+    }
+  }
+
+  if (!sharedMePromise) {
+    sharedMePromise = (async () => {
+      const response = await fetch('/api/auth/me', { cache: 'no-store' });
+      if (!response.ok) {
+        sharedMeCache = { data: null, loadedAt: Date.now() };
+        return null;
+      }
+
+      const json = (await response.json()) as MeResponse;
+      sharedMeCache = { data: json, loadedAt: Date.now() };
+      return json;
+    })().finally(() => {
+      sharedMePromise = null;
+    });
+  }
+
+  return sharedMePromise;
+}
+
 export default function DashboardShell({
   children,
   initialData,
+  overlaySidebar = false,
 }: {
   children: React.ReactNode;
   initialData?: MeResponse | null;
+  overlaySidebar?: boolean;
 }) {
   const [data, setData] = useState<MeResponse | null>(initialData ?? null);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
 
   useEffect(() => {
     if (initialData) {
+      sharedMeCache = { data: initialData, loadedAt: Date.now() };
       setData(initialData);
       return;
     }
 
-    let mounted = true;
-    async function load() {
-      try {
-        const response = await fetch('/api/auth/me', { cache: 'no-store' });
-        if (!mounted) return;
-        if (!response.ok) {
-          setData(null);
-          return;
-        }
+    const cached = getCachedMe();
+    if (cached !== undefined) {
+      setData(cached);
+    }
 
-        const json = (await response.json()) as MeResponse;
+    let mounted = true;
+    async function load(forceRefresh = false) {
+      try {
+        const json = await loadMeOnce(forceRefresh);
         if (mounted) {
           setData(json);
         }
@@ -54,20 +101,32 @@ export default function DashboardShell({
         // Keep shell functional even if auth endpoint is temporarily unavailable.
       }
     }
-    void load();
+    if (cached === undefined) {
+      void load();
+    }
+
+    function handleAuthChange() {
+      sharedMeCache = undefined;
+      sharedMePromise = null;
+      setData(null);
+      void load(true);
+    }
+
+    window.addEventListener('faceburg-auth-changed', handleAuthChange);
     return () => {
       mounted = false;
+      window.removeEventListener('faceburg-auth-changed', handleAuthChange);
     };
   }, [initialData]);
 
   return (
     <div className="flex min-h-screen bg-slate-50">
-      <Sidebar mobileOpen={mobileMenuOpen} onCloseMobile={() => setMobileMenuOpen(false)} />
+      <Sidebar mobileOpen={mobileMenuOpen} overlayMode={overlaySidebar} onCloseMobile={() => setMobileMenuOpen(false)} />
       {mobileMenuOpen ? (
         <button
           type="button"
           aria-label="Fechar menu lateral"
-          className="fixed inset-0 z-40 bg-slate-950/45 lg:hidden"
+          className={overlaySidebar ? 'fixed inset-0 z-40 bg-slate-950/45' : 'fixed inset-0 z-40 bg-slate-950/45 lg:hidden'}
           onClick={() => setMobileMenuOpen(false)}
         />
       ) : null}
@@ -76,7 +135,7 @@ export default function DashboardShell({
           <div className="flex items-center gap-3">
             <button
               type="button"
-              className="inline-flex h-10 w-10 items-center justify-center rounded-xl border border-slate-200 text-slate-700 lg:hidden"
+              className={overlaySidebar ? 'inline-flex h-10 w-10 items-center justify-center rounded-xl border border-slate-200 text-slate-700' : 'inline-flex h-10 w-10 items-center justify-center rounded-xl border border-slate-200 text-slate-700 lg:hidden'}
               aria-label={mobileMenuOpen ? 'Fechar menu lateral' : 'Abrir menu lateral'}
               onClick={() => setMobileMenuOpen((current) => !current)}
             >

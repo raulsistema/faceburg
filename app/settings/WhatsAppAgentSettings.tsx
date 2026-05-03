@@ -17,7 +17,13 @@ type WhatsAppConfig = {
 type WhatsAppConfigSaveResponse = {
   ok?: boolean;
   enabled?: boolean;
-  requiresHubSetup?: boolean;
+  hasAgentKey?: boolean;
+  agentKey?: string;
+  sessionStatus?: string;
+  qrCode?: string;
+  phoneNumber?: string;
+  lastSeenAt?: string | null;
+  activationPending?: boolean;
   message?: string;
   error?: string;
 };
@@ -222,9 +228,17 @@ export default function WhatsAppAgentSettings({ initialData }: { initialData?: W
       if (typeof json.enabled === 'boolean') {
         setEnabled(json.enabled);
       }
-      setMessageTone(json.requiresHubSetup ? 'warning' : 'success');
+      setData((current) => ({
+        enabled: Boolean(json.enabled ?? current?.enabled),
+        hasAgentKey: Boolean(json.hasAgentKey ?? current?.hasAgentKey),
+        agentKey: String(json.agentKey ?? current?.agentKey ?? ''),
+        sessionStatus: String(json.sessionStatus ?? current?.sessionStatus ?? 'disconnected'),
+        qrCode: String(json.qrCode ?? current?.qrCode ?? ''),
+        phoneNumber: String(json.phoneNumber ?? current?.phoneNumber ?? ''),
+        lastSeenAt: json.lastSeenAt ?? current?.lastSeenAt ?? null,
+      }));
+      setMessageTone(json.activationPending ? 'warning' : 'success');
       setMessage(json.message || (rotateKey ? 'Nova chave do WhatsApp gerada.' : 'Configuracao do WhatsApp salva.'));
-      await loadConfig();
     } catch {
       setError('Falha ao salvar configuracao do WhatsApp.');
     } finally {
@@ -306,7 +320,7 @@ export default function WhatsAppAgentSettings({ initialData }: { initialData?: W
           ) : null}
 
           <div className="text-xs text-slate-500 space-y-1">
-            <p>Agente WhatsApp controlado pelo Faceburg Hub.</p>
+            <p>Conecte o WhatsApp pelo Faceburg App deste computador.</p>
           </div>
 
           <button type="button" className="btn-primary" onClick={() => void saveConfig(false)} disabled={saving}>

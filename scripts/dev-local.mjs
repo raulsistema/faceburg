@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import net from 'node:net';
 import path from 'node:path';
 
 const rootDir = process.cwd();
@@ -10,6 +11,10 @@ const gatewayEntry = path.join(rootDir, 'realtime-gateway.js');
  */
 const children = [];
 let shuttingDown = false;
+const useTurbopack =
+  process.env.NEXT_FORCE_TURBOPACK === '1' &&
+  process.env.NEXT_DISABLE_TURBOPACK !== '1' &&
+  process.platform !== 'win32';
 
 function startProcess(label, args) {
   const child = spawn(process.execPath, args, {
@@ -50,6 +55,33 @@ function shutdown(exitCode = 0) {
   setTimeout(() => process.exit(exitCode), 250);
 }
 
+function isPortAvailable(port) {
+  return new Promise((resolve) => {
+    const server = net.createServer();
+    server.once('error', () => {
+      resolve(false);
+    });
+    server.once('listening', () => {
+      server.close(() => resolve(true));
+    });
+    server.listen(port);
+  });
+}
+
+const busyPorts = [];
+for (const port of [3000, 3001]) {
+  if (!(await isPortAvailable(port))) {
+    busyPorts.push(port);
+  }
+}
+
+if (busyPorts.length) {
+  console.error(`[dev-local] Porta(s) em uso: ${busyPorts.join(', ')}.`);
+  console.error('[dev-local] Ja existe uma instancia do Faceburg rodando ou um processo antigo ficou aberto.');
+  console.error(`[dev-local] Para localizar no PowerShell: Get-NetTCPConnection -LocalPort ${busyPorts.join(',')}`);
+  process.exit(1);
+}
+
 process.on('SIGINT', () => {
   if (shuttingDown) return;
   shuttingDown = true;
@@ -62,5 +94,5 @@ process.on('SIGTERM', () => {
   shutdown(0);
 });
 
-startProcess('Next.js', [nextBin, 'dev', '-p', '3000']);
+startProcess('Next.js', [nextBin, 'dev', ...(useTurbopack ? ['--turbopack'] : []), '-p', '3000']);
 startProcess('Realtime Gateway', [gatewayEntry]);

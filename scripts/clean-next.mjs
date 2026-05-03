@@ -1,7 +1,7 @@
 import { existsSync, rmSync } from 'node:fs';
 import { resolve } from 'node:path';
 
-const targets = ['.next'];
+const targets = ['.next', '.next-dev'];
 
 for (const target of targets) {
   const absolutePath = resolve(process.cwd(), target);

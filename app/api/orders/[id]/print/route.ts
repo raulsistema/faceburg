@@ -14,10 +14,10 @@ type AgentRow = {
   last_seen_at: string | null;
 };
 
-const HUB_HEARTBEAT_GRACE_MS = 2 * 60 * 1000;
+const HUB_HEARTBEAT_GRACE_MS = 5 * 60 * 1000;
 
 function isHubActive(connectionStatus: string, lastSeenAt: string | null) {
-  if (connectionStatus !== 'ready') return false;
+  if (!['ready', 'connecting'].includes(connectionStatus)) return false;
   if (!lastSeenAt) return false;
   const parsed = Date.parse(lastSeenAt);
   if (Number.isNaN(parsed)) return false;
@@ -64,7 +64,7 @@ export async function POST(_: Request, { params }: { params: Promise<{ id: strin
 
   const queued = await enqueueOrderPrintJob(session.tenantId, id, 'manual_receipt');
   if (!queued) {
-    return NextResponse.json({ error: 'Nao foi possivel enviar o recibo para a impressora.' }, { status: 500 });
+    return NextResponse.json({ error: 'Recibo manual desativado nas configuracoes de impressao.' }, { status: 409 });
   }
 
   return NextResponse.json({ ok: true });

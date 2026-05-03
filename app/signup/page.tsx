@@ -33,7 +33,6 @@ export default function SignupPage() {
     }
 
     router.push('/');
-    router.refresh();
   }
 
   return (

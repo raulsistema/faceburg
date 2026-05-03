@@ -15,7 +15,6 @@ type ProductRow = {
   image_url: string | null;
   available: boolean;
   product_type: string;
-  sold_qty: string;
 };
 
 export async function GET() {
@@ -40,21 +39,13 @@ export async function GET() {
          p.category_id,
          p.image_url,
          p.available,
-         p.product_type,
-         COALESCE(SUM(CASE WHEN o.id IS NOT NULL THEN oi.quantity ELSE 0 END), 0)::text AS sold_qty
+         p.product_type
        FROM products p
-       LEFT JOIN order_items oi
-         ON oi.product_id = p.id
-       LEFT JOIN orders o
-         ON o.id = oi.order_id
-        AND o.tenant_id = p.tenant_id
-        AND o.status <> 'cancelled'
        WHERE p.tenant_id = $1
          AND p.available = TRUE
          AND p.product_type <> 'ingredient'
-       GROUP BY p.id, p.name, p.price, p.category_id, p.image_url, p.available, p.product_type, p.display_order
-       ORDER BY COALESCE(SUM(CASE WHEN o.id IS NOT NULL THEN oi.quantity ELSE 0 END), 0) DESC, p.display_order ASC, p.name ASC
-       LIMIT 20`,
+       ORDER BY p.display_order ASC, p.name ASC
+       LIMIT 200`,
       [session.tenantId],
     ),
   ]);

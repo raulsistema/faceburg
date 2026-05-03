@@ -56,11 +56,68 @@ type CardapioSettingsResponse = {
 type WhatsappConfigResponse = {
   enabled?: boolean;
   hasAgentKey?: boolean;
+  agentKey?: string;
   sessionStatus?: string;
+  qrCode?: string;
+  phoneNumber?: string;
   lastSeenAt?: string | null;
-  requiresHubSetup?: boolean;
+  activationPending?: boolean;
   message?: string;
   error?: string;
+};
+
+type PrintConfigResponse = {
+  enabled?: boolean;
+  hasAgentKey?: boolean;
+  connectionStatus?: string;
+  lastError?: string;
+  lastSeenAt?: string | null;
+  error?: string;
+};
+
+type DesktopWhatsappState = {
+  status?: string;
+  qrCode?: string;
+  phoneNumber?: string;
+  lastError?: string;
+};
+
+type DesktopPrintState = {
+  status?: string;
+  lastError?: string;
+  lastJobAt?: string;
+  realtimeConnected?: boolean;
+};
+
+type DesktopBridgeState = {
+  isDesktopApp?: boolean;
+  whatsRunning?: boolean;
+  printRunning?: boolean;
+  whatsapp?: DesktopWhatsappState | null;
+  print?: DesktopPrintState | null;
+};
+
+type DesktopSessionSyncResponse = {
+  authenticated?: boolean;
+  error?: string;
+  settings?: {
+    whatsAgentKey?: string;
+    printAgentKey?: string;
+  };
+};
+
+type FaceburgDesktopBridge = {
+  isDesktopApp: boolean;
+  getState: () => Promise<DesktopBridgeState>;
+  syncSession: () => Promise<DesktopSessionSyncResponse>;
+  startWhatsApp: () => Promise<{ ok: boolean }>;
+  stopWhatsApp: () => Promise<{ ok: boolean }>;
+  restartWhatsApp: () => Promise<{ ok: boolean }>;
+  startPrint?: () => Promise<{ ok: boolean }>;
+  stopPrint?: () => Promise<{ ok: boolean }>;
+  restartPrint?: () => Promise<{ ok: boolean }>;
+  onWhatsAppState: (callback: (state: DesktopWhatsappState) => void) => void | (() => void);
+  onPrintState?: (callback: (state: DesktopPrintState) => void) => void | (() => void);
 };
 
 type PaymentMethodType = 'pix' | 'card' | 'cash' | 'bank_slip' | 'wallet' | 'other';
@@ -77,12 +134,34 @@ type PaymentOption = {
   settlementDays: number;
 };
 
-const columns: { title: string; status: OrderStatus }[] = [
-  { title: 'Novos', status: 'pending' },
-  { title: 'Cozinha', status: 'processing' },
-  { title: 'Entrega', status: 'delivering' },
-  { title: 'Concluidos', status: 'completed' },
+const columns: Array<{ key: string; title: string; statuses: OrderStatus[]; dropStatus: OrderStatus }> = [
+  { key: 'pending', title: 'Novos', statuses: ['pending'], dropStatus: 'pending' },
+  { key: 'processing', title: 'Cozinha', statuses: ['processing'], dropStatus: 'processing' },
+  { key: 'delivering', title: 'Entrega', statuses: ['delivering'], dropStatus: 'delivering' },
+  { key: 'finished', title: 'Finalizados', statuses: ['completed', 'cancelled'], dropStatus: 'completed' },
 ];
+
+function formatCurrency(value: number) {
+  return Number(value || 0).toLocaleString('pt-BR', {
+    style: 'currency',
+    currency: 'BRL',
+  });
+}
+
+function isTerminalOrderStatus(status: OrderStatus) {
+  return status === 'completed' || status === 'cancelled';
+}
+
+function canMoveOrder(order: Pick<Order, 'status' | 'type'>, nextStatus: OrderStatus) {
+  if (order.status === nextStatus) return false;
+  if (order.status === 'cancelled') return false;
+  if (order.status === 'completed') return nextStatus === 'cancelled';
+  if (nextStatus === 'delivering' && order.type !== 'delivery') return false;
+  if (order.status === 'pending') return nextStatus === 'processing' || nextStatus === 'cancelled';
+  if (order.status === 'processing') return nextStatus === 'completed' || nextStatus === 'cancelled' || nextStatus === 'delivering';
+  if (order.status === 'delivering') return nextStatus === 'completed' || nextStatus === 'cancelled';
+  return false;
+}
 
 function sanitizePrepTimeMinutes(value: number | undefined) {
   if (!Number.isFinite(value)) return 40;
@@ -90,7 +169,7 @@ function sanitizePrepTimeMinutes(value: number | undefined) {
 }
 
 function getCountdownReferenceMs(order: Pick<Order, 'status' | 'updatedAt'>, nowMs: number) {
-  if (order.status === 'completed' || order.status === 'cancelled') {
+  if (isTerminalOrderStatus(order.status)) {
     const updatedAtMs = Date.parse(order.updatedAt);
     if (!Number.isNaN(updatedAtMs)) {
       return updatedAtMs;
@@ -109,6 +188,9 @@ function getOrderRemainingMs(order: Pick<Order, 'createdAt' | 'updatedAt' | 'sta
 }
 
 function formatRemainingTime(order: Pick<Order, 'createdAt' | 'updatedAt' | 'status'>, prepTimeMinutes: number, nowMs: number) {
+  if (order.status === 'completed') return 'Finalizado';
+  if (order.status === 'cancelled') return 'Cancelado';
+
   const remainingMs = getOrderRemainingMs(order, prepTimeMinutes, nowMs);
   if (Number.isNaN(remainingMs)) return '--:--';
 
@@ -125,6 +207,9 @@ function formatRemainingTime(order: Pick<Order, 'createdAt' | 'updatedAt' | 'sta
 }
 
 function getRemainingTimeClass(order: Pick<Order, 'createdAt' | 'updatedAt' | 'status'>, prepTimeMinutes: number, nowMs: number) {
+  if (order.status === 'completed') return 'bg-emerald-50 text-emerald-700';
+  if (order.status === 'cancelled') return 'bg-rose-50 text-rose-700';
+
   const remainingMs = getOrderRemainingMs(order, prepTimeMinutes, nowMs);
   if (Number.isNaN(remainingMs)) return 'bg-slate-200 text-slate-500';
   if (remainingMs <= 0) return 'bg-rose-500 text-white';
@@ -222,7 +307,7 @@ function getPaymentDisplayLabel(method: string | null | undefined) {
   if (!value) return 'Nao informado';
   if (value === 'pix') return 'Pix';
   if (value === 'cash' || value === 'money' || value === 'dinheiro') return 'Dinheiro';
-  if (value === 'card' || value === 'cartao' || value === 'cartÃ£o' || value === 'credito' || value === 'debito') return 'Cartao';
+  if (value === 'card' || value === 'cartao' || value === 'cartão' || value === 'credito' || value === 'debito') return 'Cartao';
   return originalValue;
 }
 
@@ -231,7 +316,7 @@ function detectPaymentMethodType(method: string | null | undefined) {
   if (!value) return '';
   if (value === 'pix') return 'pix';
   if (value === 'cash' || value === 'money' || value === 'dinheiro') return 'cash';
-  if (value === 'card' || value === 'cartao' || value === 'cartÃ£o' || value === 'credito' || value === 'debito') return 'card';
+  if (value === 'card' || value === 'cartao' || value === 'cartão' || value === 'credito' || value === 'debito') return 'card';
   if (value === 'bank_slip' || value === 'boleto') return 'bank_slip';
   if (value === 'wallet' || value === 'carteira') return 'wallet';
   return '';
@@ -268,7 +353,7 @@ function buildPaymentOptionDescription(option: PaymentOption) {
   if (option.feePercent > 0 || option.feeFixed > 0) {
     const feeParts: string[] = [];
     if (option.feePercent > 0) feeParts.push(`${option.feePercent.toFixed(2)}%`);
-    if (option.feeFixed > 0) feeParts.push(`R$ ${option.feeFixed.toFixed(2)}`);
+    if (option.feeFixed > 0) feeParts.push(formatCurrency(option.feeFixed));
     parts.push(`Taxa ${feeParts.join(' + ')}`);
   }
 
@@ -278,7 +363,7 @@ function buildPaymentOptionDescription(option: PaymentOption) {
     parts.push('Recebimento imediato');
   }
 
-  return parts.join(' • ');
+  return parts.join(' - ');
 }
 
 function formatItemNotes(notesParsed: unknown): string[] {
@@ -340,19 +425,54 @@ function formatItemNotes(notesParsed: unknown): string[] {
   return [];
 }
 
-function isAgentHubOnline(lastSeenAt: string | null) {
+function getFaceburgDesktopBridge() {
+  if (typeof window === 'undefined') return null;
+  return (window as Window & { faceburgDesktop?: FaceburgDesktopBridge }).faceburgDesktop ?? null;
+}
+
+function isWhatsappDesktopOnline(lastSeenAt: string | null) {
   if (!lastSeenAt) return false;
   const parsed = Date.parse(lastSeenAt);
   if (Number.isNaN(parsed)) return false;
   return Date.now() - parsed <= 2 * 60 * 1000;
 }
 
-function getWhatsappHubStatusLabel(sessionStatus: string, lastSeenAt: string | null) {
-  if (sessionStatus === 'ready' && isAgentHubOnline(lastSeenAt)) return 'Hub conectado';
-  if (sessionStatus === 'qr') return 'Hub aguardando pareamento';
-  if (sessionStatus === 'connecting') return 'Hub conectando';
-  if (sessionStatus === 'auth_failure') return 'Hub com falha de login';
-  return 'Hub desconectado';
+function isPrintDesktopOnline(lastSeenAt: string | null) {
+  if (!lastSeenAt) return false;
+  const parsed = Date.parse(lastSeenAt);
+  if (Number.isNaN(parsed)) return false;
+  return Date.now() - parsed <= 5 * 60 * 1000;
+}
+
+function isLocalWhatsappSessionActive(sessionStatus: string, lastSeenAt: string | null) {
+  if (!['ready', 'qr', 'connecting'].includes(sessionStatus)) return false;
+  return isWhatsappDesktopOnline(lastSeenAt);
+}
+
+function isLocalPrintAgentActive(status: string, lastSeenAt: string | null) {
+  if (!['ready', 'connecting'].includes(status)) return false;
+  return isPrintDesktopOnline(lastSeenAt);
+}
+
+function getWhatsappStatusLabel(
+  sessionStatus: string,
+  lastSeenAt: string | null,
+  enabled: boolean,
+  desktopAppAvailable: boolean,
+) {
+  if (!enabled) return 'Desligado';
+  if (sessionStatus === 'ready' && isWhatsappDesktopOnline(lastSeenAt)) return 'Conectado';
+  if (sessionStatus === 'qr') return 'Escaneie o QR';
+  if (sessionStatus === 'connecting') return desktopAppAvailable ? 'Abrindo no computador' : 'Aguardando o app';
+  if (sessionStatus === 'auth_failure') return 'Reconecte o WhatsApp';
+  return desktopAppAvailable ? 'Preparando conexao' : 'Abra o Faceburg App';
+}
+
+function getPrintStatusLabel(status: string, lastSeenAt: string | null, enabled: boolean, desktopAppAvailable: boolean) {
+  if (!enabled) return 'Desligado';
+  if (isLocalPrintAgentActive(status, lastSeenAt)) return status === 'connecting' ? 'Abrindo no computador' : 'Conectado';
+  if (status === 'error') return 'Erro no agente';
+  return desktopAppAvailable ? 'Preparando impressao' : 'Abra o Faceburg App';
 }
 
 export default function PedidosPage() {
@@ -390,6 +510,13 @@ export default function PedidosPage() {
   const [whatsappHasAgentKey, setWhatsappHasAgentKey] = useState(false);
   const [whatsappSessionStatus, setWhatsappSessionStatus] = useState('disconnected');
   const [whatsappLastSeenAt, setWhatsappLastSeenAt] = useState<string | null>(null);
+  const [printEnabled, setPrintEnabled] = useState(false);
+  const [printHasAgentKey, setPrintHasAgentKey] = useState(false);
+  const [printConnectionStatus, setPrintConnectionStatus] = useState('disconnected');
+  const [printLastSeenAt, setPrintLastSeenAt] = useState<string | null>(null);
+  const [desktopPrintRunning, setDesktopPrintRunning] = useState(false);
+  const [desktopPrintLastError, setDesktopPrintLastError] = useState('');
+  const [desktopAppAvailable, setDesktopAppAvailable] = useState(false);
   const [prepTimeMinutes, setPrepTimeMinutes] = useState(40);
   const [countdownNowMs, setCountdownNowMs] = useState(() => Date.now());
   const seenOrderIdsRef = useRef<Set<string>>(new Set());
@@ -397,6 +524,145 @@ export default function PedidosPage() {
   const audioContextRef = useRef<AudioContext | null>(null);
   const requestInFlightRef = useRef(false);
   const pendingRefreshRef = useRef(false);
+  const desktopSessionSyncRef = useRef<Promise<DesktopSessionSyncResponse | null> | null>(null);
+  const desktopStartRef = useRef<Promise<boolean> | null>(null);
+  const desktopPrintStartRef = useRef<Promise<boolean> | null>(null);
+  const lastDesktopAutoStartAtRef = useRef(0);
+  const lastDesktopPrintAutoStartAtRef = useRef(0);
+
+  const applyDesktopWhatsappState = useCallback((state?: DesktopWhatsappState | null) => {
+    if (!state) return;
+    const nextStatus = String(state.status || 'disconnected');
+    setWhatsappSessionStatus(nextStatus);
+    setWhatsappLastSeenAt(
+      nextStatus === 'ready' || nextStatus === 'qr' || nextStatus === 'connecting'
+        ? new Date().toISOString()
+      : null,
+    );
+  }, []);
+
+  const applyDesktopPrintState = useCallback((state?: DesktopPrintState | null, running?: boolean) => {
+    if (!state) return;
+    const nextStatus = String(state.status || 'disconnected');
+    setPrintConnectionStatus(nextStatus);
+    setPrintLastSeenAt(
+      ['ready', 'connecting', 'error'].includes(nextStatus)
+        ? new Date().toISOString()
+        : null,
+    );
+    setDesktopPrintLastError(String(state.lastError || ''));
+    if (typeof running === 'boolean') {
+      setDesktopPrintRunning(running);
+    } else {
+      setDesktopPrintRunning(['ready', 'connecting', 'error'].includes(nextStatus));
+    }
+  }, []);
+
+  const syncDesktopSession = useCallback((desktopBridge: FaceburgDesktopBridge) => {
+    if (!desktopSessionSyncRef.current) {
+      desktopSessionSyncRef.current = desktopBridge.syncSession()
+        .catch(() => null)
+        .finally(() => {
+          desktopSessionSyncRef.current = null;
+        });
+    }
+    return desktopSessionSyncRef.current;
+  }, []);
+
+  const ensureDesktopWhatsappStarted = useCallback(async (options?: { forceRestart?: boolean }) => {
+    const desktopBridge = getFaceburgDesktopBridge();
+    if (!desktopBridge?.isDesktopApp) return false;
+    if (desktopStartRef.current) return desktopStartRef.current;
+
+    desktopStartRef.current = (async () => {
+      setDesktopAppAvailable(true);
+
+      const desktopState = await desktopBridge.getState().catch(() => null);
+      if (desktopState?.whatsapp) {
+        applyDesktopWhatsappState(desktopState.whatsapp);
+      }
+
+      const currentStatus = String(desktopState?.whatsapp?.status || 'disconnected');
+      const currentLastSeen = ['ready', 'qr', 'connecting'].includes(currentStatus) ? new Date().toISOString() : null;
+      const alreadyActive = Boolean(desktopState?.whatsRunning) && isLocalWhatsappSessionActive(currentStatus, currentLastSeen);
+
+      if (alreadyActive && !options?.forceRestart) {
+        return true;
+      }
+
+      const syncResult = await syncDesktopSession(desktopBridge);
+      if (syncResult?.settings?.whatsAgentKey) {
+        setWhatsappHasAgentKey(true);
+      }
+
+      const result = desktopState?.whatsRunning || options?.forceRestart
+        ? await desktopBridge.restartWhatsApp().catch((error) => ({ error }))
+        : await desktopBridge.startWhatsApp().catch((error) => ({ error }));
+
+      if ('error' in result) return false;
+
+      setWhatsappSessionStatus('connecting');
+      setWhatsappLastSeenAt(new Date().toISOString());
+      return true;
+    })().finally(() => {
+      desktopStartRef.current = null;
+    });
+
+    return desktopStartRef.current;
+  }, [applyDesktopWhatsappState, syncDesktopSession]);
+
+  const ensureDesktopPrintStarted = useCallback(async (options?: { forceRestart?: boolean }) => {
+    const desktopBridge = getFaceburgDesktopBridge();
+    if (!desktopBridge?.isDesktopApp) return false;
+    if (desktopPrintStartRef.current) return desktopPrintStartRef.current;
+
+    desktopPrintStartRef.current = (async () => {
+      setDesktopAppAvailable(true);
+
+      const desktopState = await desktopBridge.getState().catch(() => null);
+      if (desktopState?.print) {
+        applyDesktopPrintState(desktopState.print, Boolean(desktopState.printRunning));
+      }
+
+      const currentStatus = String(desktopState?.print?.status || 'disconnected');
+      const currentLastSeen = ['ready', 'connecting'].includes(currentStatus) ? new Date().toISOString() : null;
+      const alreadyActive = Boolean(desktopState?.printRunning) && isLocalPrintAgentActive(currentStatus, currentLastSeen);
+
+      if (alreadyActive && !options?.forceRestart) {
+        return true;
+      }
+
+      const syncResult = await syncDesktopSession(desktopBridge);
+      if (syncResult?.settings?.printAgentKey) {
+        setPrintHasAgentKey(true);
+      }
+
+      if (!desktopBridge.startPrint) return false;
+
+      const shouldRestart = Boolean(desktopState?.printRunning || options?.forceRestart);
+      let result: { ok?: boolean } | { error: unknown } | undefined;
+      if (shouldRestart && desktopBridge.restartPrint) {
+        result = await desktopBridge.restartPrint().catch((error) => ({ error }));
+      } else {
+        if (shouldRestart && desktopBridge.stopPrint) {
+          await desktopBridge.stopPrint().catch(() => null);
+        }
+        result = await desktopBridge.startPrint().catch((error) => ({ error }));
+      }
+
+      if (!result || 'error' in result) return false;
+
+      setDesktopPrintRunning(true);
+      setPrintConnectionStatus('connecting');
+      setPrintLastSeenAt(new Date().toISOString());
+      setDesktopPrintLastError('');
+      return true;
+    })().finally(() => {
+      desktopPrintStartRef.current = null;
+    });
+
+    return desktopPrintStartRef.current;
+  }, [applyDesktopPrintState, syncDesktopSession]);
 
   useEffect(() => {
     if (!operationalMessage || operationalMessage.tone !== 'success') return;
@@ -537,7 +803,8 @@ export default function PedidosPage() {
 
   const loadOperationalStatus = useCallback(async () => {
     try {
-      const [settingsResponse, whatsappResponse] = await Promise.all([
+      const desktopBridge = getFaceburgDesktopBridge();
+      const [settingsResponse, whatsappResponse, printResponse, desktopState] = await Promise.all([
         fetch('/api/cardapio/settings', {
           cache: 'no-store',
           headers: {
@@ -550,6 +817,15 @@ export default function PedidosPage() {
             'cache-control': 'no-cache',
           },
         }),
+        fetch('/api/print/config', {
+          cache: 'no-store',
+          headers: {
+            'cache-control': 'no-cache',
+          },
+        }),
+        desktopBridge?.isDesktopApp
+          ? desktopBridge.getState().catch(() => null)
+          : Promise.resolve(null),
       ]);
 
       const settingsData = (await settingsResponse.json().catch(() => ({}))) as CardapioSettingsResponse;
@@ -565,10 +841,56 @@ export default function PedidosPage() {
         setWhatsappSessionStatus(String(whatsappData.sessionStatus || 'disconnected'));
         setWhatsappLastSeenAt(whatsappData.lastSeenAt || null);
       }
+
+      const printData = (await printResponse.json().catch(() => ({}))) as PrintConfigResponse;
+      if (printResponse.ok) {
+        setPrintEnabled(Boolean(printData.enabled));
+        setPrintHasAgentKey(Boolean(printData.hasAgentKey));
+        setPrintConnectionStatus(String(printData.connectionStatus || 'disconnected'));
+        setPrintLastSeenAt(printData.lastSeenAt || null);
+        setDesktopPrintLastError(String(printData.lastError || ''));
+      }
+
+      if (desktopState?.isDesktopApp) {
+        setDesktopAppAvailable(true);
+        applyDesktopWhatsappState(desktopState.whatsapp);
+        applyDesktopPrintState(desktopState.print, Boolean(desktopState.printRunning));
+        const desktopStatus = String(desktopState.whatsapp?.status || 'disconnected');
+        const desktopLooksActive = Boolean(desktopState.whatsRunning)
+          && ['ready', 'qr', 'connecting'].includes(desktopStatus);
+        const shouldAutoStart =
+          Boolean(whatsappData.enabled)
+          && !desktopLooksActive
+          && Date.now() - lastDesktopAutoStartAtRef.current > 15000;
+
+        if (shouldAutoStart) {
+          lastDesktopAutoStartAtRef.current = Date.now();
+          void ensureDesktopWhatsappStarted({
+            forceRestart: Boolean(desktopState.whatsRunning),
+          });
+        }
+
+        const desktopPrintStatus = String(desktopState.print?.status || 'disconnected');
+        const desktopPrintLooksActive = Boolean(desktopState.printRunning)
+          && ['ready', 'connecting'].includes(desktopPrintStatus);
+        const shouldAutoStartPrint =
+          Boolean(printData.enabled)
+          && !desktopPrintLooksActive
+          && Date.now() - lastDesktopPrintAutoStartAtRef.current > 15000;
+
+        if (shouldAutoStartPrint) {
+          lastDesktopPrintAutoStartAtRef.current = Date.now();
+          void ensureDesktopPrintStarted({
+            forceRestart: Boolean(desktopState.printRunning),
+          });
+        }
+      } else if (!desktopBridge?.isDesktopApp) {
+        setDesktopAppAvailable(false);
+      }
     } catch {
       // No-op: the screen can keep running with orders even if status probes fail.
     }
-  }, []);
+  }, [applyDesktopPrintState, applyDesktopWhatsappState, ensureDesktopPrintStarted, ensureDesktopWhatsappStarted]);
 
   const loadPaymentOptions = useCallback(async () => {
     setPaymentOptionsLoading(true);
@@ -622,11 +944,68 @@ export default function PedidosPage() {
     }
   }, []);
 
-  const { refreshNow } = useRealtimeRefresh({ load: loadOrders });
+  const { refreshNow } = useRealtimeRefresh({ load: loadOrders, fallbackRefreshMs: 0 });
 
   useEffect(() => {
+    const desktopBridge = getFaceburgDesktopBridge();
+    if (desktopBridge?.isDesktopApp) {
+      setDesktopAppAvailable(true);
+      return;
+    }
     void loadOperationalStatus();
   }, [loadOperationalStatus]);
+
+  useEffect(() => {
+    const desktopBridge = getFaceburgDesktopBridge();
+    if (!desktopBridge?.isDesktopApp) return;
+
+    let active = true;
+    void syncDesktopSession(desktopBridge)
+      .then((result) => {
+        if (!active) return;
+        if (result?.settings?.whatsAgentKey) {
+          setWhatsappHasAgentKey(true);
+        }
+        if (result?.settings?.printAgentKey) {
+          setPrintHasAgentKey(true);
+        }
+      })
+      .catch(() => {})
+      .finally(() => {
+        if (active) {
+          void loadOperationalStatus();
+        }
+      });
+
+    const unsubscribeWhatsApp = desktopBridge.onWhatsAppState((state) => {
+      if (!active) return;
+      applyDesktopWhatsappState(state);
+    });
+
+    const unsubscribePrint = desktopBridge.onPrintState?.((state) => {
+      if (!active) return;
+      applyDesktopPrintState(state);
+    });
+
+    void desktopBridge.getState()
+      .then((state) => {
+        if (!active || !state?.isDesktopApp) return;
+        setDesktopAppAvailable(true);
+        applyDesktopWhatsappState(state.whatsapp);
+        applyDesktopPrintState(state.print, Boolean(state.printRunning));
+      })
+      .catch(() => {});
+
+    return () => {
+      active = false;
+      if (typeof unsubscribeWhatsApp === 'function') {
+        unsubscribeWhatsApp();
+      }
+      if (typeof unsubscribePrint === 'function') {
+        unsubscribePrint();
+      }
+    };
+  }, [applyDesktopPrintState, applyDesktopWhatsappState, loadOperationalStatus, syncDesktopSession]);
 
   useEffect(() => {
     void loadPaymentOptions();
@@ -652,10 +1031,14 @@ export default function PedidosPage() {
         return;
       }
 
-      setDeliveryEnabled(nextValue);
+      const effectiveStoreOpen = typeof data.storeOpen === 'boolean' ? data.storeOpen : nextValue;
+      setDeliveryEnabled(effectiveStoreOpen);
+      if (typeof data.prepTimeMinutes === 'number') {
+        setPrepTimeMinutes(sanitizePrepTimeMinutes(data.prepTimeMinutes));
+      }
       setOperationalMessage({
         tone: 'success',
-        text: nextValue
+        text: effectiveStoreOpen
           ? 'Delivery ON. O cardapio publico voltou a aceitar novos pedidos.'
           : 'Delivery OFF. Novos pedidos do cardapio foram bloqueados.',
       });
@@ -671,10 +1054,37 @@ export default function PedidosPage() {
 
   async function toggleWhatsappStatus() {
     if (whatsappUpdating) return;
-    const nextValue = !whatsappEnabled;
+    const desktopBridge = getFaceburgDesktopBridge();
+    const usingDesktopApp = Boolean(desktopBridge?.isDesktopApp);
+    const shouldReconnectLocalAgent =
+      whatsappEnabled &&
+      usingDesktopApp &&
+      !isLocalWhatsappSessionActive(whatsappSessionStatus, whatsappLastSeenAt);
     setWhatsappUpdating(true);
     setOperationalMessage(null);
     try {
+      if (shouldReconnectLocalAgent) {
+        const started = await ensureDesktopWhatsappStarted({
+          forceRestart: ['auth_failure', 'error', 'disconnected', 'stopped'].includes(whatsappSessionStatus),
+        });
+        setOperationalMessage({
+          tone: started ? 'warning' : 'error',
+          text: started
+            ? 'WhatsApp automatico ja estava ON. Reabrindo o agente neste computador.'
+            : 'Nao foi possivel reabrir o agente WhatsApp neste computador.',
+        });
+        return;
+      }
+
+      const nextValue = !whatsappEnabled;
+
+      if (nextValue && usingDesktopApp) {
+        const syncResult = await syncDesktopSession(desktopBridge!);
+        if (syncResult?.settings?.whatsAgentKey) {
+          setWhatsappHasAgentKey(true);
+        }
+      }
+
       const response = await fetch('/api/whatsapp/config', {
         method: 'PATCH',
         headers: { 'content-type': 'application/json' },
@@ -689,65 +1099,62 @@ export default function PedidosPage() {
         return;
       }
 
-      const configResponse = await fetch('/api/whatsapp/config', {
-        cache: 'no-store',
-        headers: {
-          'cache-control': 'no-cache',
-        },
-      });
-      const configData = (await configResponse.json().catch(() => ({}))) as WhatsappConfigResponse;
-      const patchRequiresHubSetup = Boolean(patchData.requiresHubSetup);
+      const activationPending = Boolean(patchData.activationPending);
       const patchMessage = String(patchData.message || '').trim();
+      const enabled = Boolean(patchData.enabled);
+      const hasAgentKey = Boolean(patchData.hasAgentKey);
+      const sessionStatus = String(patchData.sessionStatus || 'disconnected');
+      const lastSeenAt = patchData.lastSeenAt || null;
+      const desktopOnline = isWhatsappDesktopOnline(lastSeenAt);
 
-      if (configResponse.ok) {
-        const enabled = Boolean(configData.enabled);
-        const hasAgentKey = Boolean(configData.hasAgentKey);
-        const sessionStatus = String(configData.sessionStatus || 'disconnected');
-        const lastSeenAt = configData.lastSeenAt || null;
-        const hubOnline = isAgentHubOnline(lastSeenAt);
+      setWhatsappEnabled(enabled);
+      setWhatsappHasAgentKey(hasAgentKey);
+      setWhatsappSessionStatus(sessionStatus);
+      setWhatsappLastSeenAt(lastSeenAt);
 
-        setWhatsappEnabled(enabled);
-        setWhatsappHasAgentKey(hasAgentKey);
-        setWhatsappSessionStatus(sessionStatus);
-        setWhatsappLastSeenAt(lastSeenAt);
-
-        if (patchRequiresHubSetup) {
-          setOperationalMessage({
-            tone: 'warning',
-            text:
-              patchMessage ||
-              'WhatsApp voltou para OFF porque o Hub nao esta configurado/conectado. Configure o Hub no PC antes de ativar.',
-          });
-          return;
+      if (!enabled) {
+        if (usingDesktopApp) {
+          await desktopBridge!.stopWhatsApp().catch(() => null);
+          setWhatsappSessionStatus('disconnected');
+          setWhatsappLastSeenAt(null);
         }
-
-        if (!enabled) {
-          setOperationalMessage({
-            tone: 'success',
-            text: patchMessage || 'WhatsApp automatico OFF.',
-          });
-          return;
-        }
-
-        if (!hasAgentKey || sessionStatus !== 'ready' || !hubOnline) {
-          setOperationalMessage({
-            tone: 'warning',
-            text: 'WhatsApp ON, mas o Hub do PC ainda nao esta configurado/conectado. Configure em Configuracoes > WhatsApp.',
-          });
-          return;
-        }
-
         setOperationalMessage({
           tone: 'success',
-          text: patchMessage || 'WhatsApp ON com Hub conectado. Mensagens automaticas ativas.',
+          text: patchMessage || 'WhatsApp automatico OFF.',
         });
         return;
       }
 
-      setWhatsappEnabled(nextValue);
+      if (usingDesktopApp) {
+        const startResult = await ensureDesktopWhatsappStarted();
+        if (!startResult) {
+          setOperationalMessage({
+            tone: 'warning',
+            text:
+              patchMessage ||
+              'WhatsApp ativado. Se necessario, recarregue a tela e abra novamente o WhatsApp neste computador.',
+          });
+          return;
+        }
+        setWhatsappSessionStatus('connecting');
+        setWhatsappLastSeenAt(new Date().toISOString());
+      }
+
+      if (!hasAgentKey || sessionStatus !== 'ready' || !desktopOnline || activationPending) {
+        setOperationalMessage({
+          tone: 'warning',
+          text:
+            patchMessage ||
+            (usingDesktopApp
+              ? 'WhatsApp ativado. Se o WhatsApp Web abrir neste computador, conecte a conta da empresa para concluir.'
+              : 'WhatsApp ativado. Abra o Faceburg App neste computador para concluir a conexao.'),
+        });
+        return;
+      }
+
       setOperationalMessage({
-        tone: patchRequiresHubSetup ? 'warning' : 'error',
-        text: patchMessage || 'Nao foi possivel validar o status do WhatsApp agora.',
+        tone: 'success',
+        text: patchMessage || 'WhatsApp conectado. Mensagens automaticas ativas.',
       });
     } catch {
       setOperationalMessage({
@@ -761,6 +1168,34 @@ export default function PedidosPage() {
 
   async function moveOrder(id: string, nextStatus: OrderStatus, cancelReason = '') {
     if (updatingId) return;
+    const previousOrder = orders.find((order) => order.id === id);
+    if (!previousOrder) return;
+
+    const optimisticUpdatedAt = new Date().toISOString();
+    setOrders((current) =>
+      current.map((order) =>
+        order.id === id
+          ? {
+              ...order,
+              status: nextStatus,
+              cancelReason: nextStatus === 'cancelled' ? cancelReason : undefined,
+              updatedAt: optimisticUpdatedAt,
+            }
+          : order,
+      ),
+    );
+
+    setSelectedOrderDetail((current) =>
+      current && current.id === id
+        ? {
+            ...current,
+            status: nextStatus,
+            cancelReason: nextStatus === 'cancelled' ? cancelReason : undefined,
+            updatedAt: optimisticUpdatedAt,
+          }
+        : current,
+    );
+
     setUpdatingId(id);
     try {
       const response = await fetch(`/api/orders/${id}/status`, {
@@ -770,9 +1205,32 @@ export default function PedidosPage() {
       });
       const data = await response.json();
       if (!response.ok) {
+        setOrders((current) =>
+          current.map((order) =>
+            order.id === id
+              ? {
+                  ...order,
+                  status: previousOrder.status,
+                  cancelReason: previousOrder.cancelReason,
+                  updatedAt: previousOrder.updatedAt,
+                }
+              : order,
+          ),
+        );
+        setSelectedOrderDetail((current) =>
+          current && current.id === id
+            ? {
+                ...current,
+                status: previousOrder.status,
+                cancelReason: previousOrder.cancelReason,
+                updatedAt: previousOrder.updatedAt,
+              }
+            : current,
+        );
         setError(data.error || 'Falha ao atualizar pedido.');
         return;
       }
+
       const updatedAt = new Date().toISOString();
       setOrders((current) =>
         current.map((order) =>
@@ -786,8 +1244,40 @@ export default function PedidosPage() {
             : order,
         ),
       );
+      setSelectedOrderDetail((current) =>
+        current && current.id === id
+          ? {
+              ...current,
+              status: nextStatus,
+              cancelReason: nextStatus === 'cancelled' ? cancelReason : undefined,
+              updatedAt,
+            }
+          : current,
+      );
       setError(null);
     } catch {
+      setOrders((current) =>
+        current.map((order) =>
+          order.id === id
+            ? {
+                ...order,
+                status: previousOrder.status,
+                cancelReason: previousOrder.cancelReason,
+                updatedAt: previousOrder.updatedAt,
+              }
+            : order,
+        ),
+      );
+      setSelectedOrderDetail((current) =>
+        current && current.id === id
+          ? {
+              ...current,
+              status: previousOrder.status,
+              cancelReason: previousOrder.cancelReason,
+              updatedAt: previousOrder.updatedAt,
+            }
+          : current,
+      );
       setError('Falha ao atualizar pedido.');
     } finally {
       setUpdatingId(null);
@@ -995,10 +1485,34 @@ export default function PedidosPage() {
     setMenuOrderId(null);
     setOperationalMessage(null);
     try {
-      const response = await fetch(`/api/orders/${order.id}/print`, {
-        method: 'POST',
-      });
-      const data = (await response.json().catch(() => ({}))) as { error?: string };
+      const desktopBridge = getFaceburgDesktopBridge();
+      const usingDesktopApp = Boolean(desktopBridge?.isDesktopApp);
+
+      if (usingDesktopApp && printEnabled) {
+        const localPrintActive = isLocalPrintAgentActive(printConnectionStatus, printLastSeenAt);
+        await ensureDesktopPrintStarted({
+          forceRestart: desktopPrintRunning && !localPrintActive,
+        });
+      }
+
+      const sendPrintRequest = async () => {
+        const response = await fetch(`/api/orders/${order.id}/print`, {
+          method: 'POST',
+        });
+        const data = (await response.json().catch(() => ({}))) as { error?: string };
+        return { response, data };
+      };
+
+      let { response, data } = await sendPrintRequest();
+
+      if (!response.ok && usingDesktopApp && /hub de impressao offline/i.test(String(data.error || ''))) {
+        const restarted = await ensureDesktopPrintStarted({ forceRestart: true });
+        if (restarted) {
+          await new Promise((resolve) => window.setTimeout(resolve, 1200));
+          ({ response, data } = await sendPrintRequest());
+        }
+      }
+
       if (!response.ok) {
         setOperationalMessage({
           tone: 'error',
@@ -1027,6 +1541,7 @@ export default function PedidosPage() {
     if (!draggedOrder) return;
     if (draggedOrder.status === targetStatus) return;
     if (targetStatus === 'cancelled') return;
+    if (!canMoveOrder(draggedOrder, targetStatus)) return;
     await moveOrder(draggingOrderId, targetStatus);
   }
 
@@ -1036,17 +1551,16 @@ export default function PedidosPage() {
   }
 
   const ordersForColumn = useMemo(() => {
-    return (status: OrderStatus) =>
-      orders.filter((order) => {
-        if (status === 'completed') {
-          return order.status === 'completed' || order.status === 'cancelled';
-        }
-        return order.status === status;
-      });
+    return (statuses: OrderStatus[]) =>
+      orders.filter((order) => statuses.includes(order.status));
   }, [orders]);
 
+  const whatsappLocalActive = isLocalWhatsappSessionActive(whatsappSessionStatus, whatsappLastSeenAt);
+  const whatsappNeedsLocalStart = whatsappEnabled && desktopAppAvailable && !whatsappLocalActive;
+  const printLocalActive = isLocalPrintAgentActive(printConnectionStatus, printLastSeenAt);
+
   return (
-    <DashboardShell>
+    <DashboardShell overlaySidebar>
       <div className="flex justify-between items-center mb-6">
         <div>
           <h2 className="text-xl font-bold text-slate-900">Gerenciador de Pedidos</h2>
@@ -1079,7 +1593,7 @@ export default function PedidosPage() {
             className={cn(
               'btn-secondary',
               whatsappEnabled
-                ? whatsappSessionStatus === 'ready' && isAgentHubOnline(whatsappLastSeenAt)
+                ? whatsappLocalActive && whatsappSessionStatus === 'ready'
                   ? 'border-emerald-300 text-emerald-700'
                   : 'border-amber-300 text-amber-700'
                 : 'border-slate-300 text-slate-600',
@@ -1089,7 +1603,7 @@ export default function PedidosPage() {
             onClick={() => void toggleWhatsappStatus()}
             disabled={whatsappUpdating}
           >
-            WhatsApp: {whatsappEnabled ? 'ON' : 'OFF'}
+            WhatsApp: {whatsappNeedsLocalStart ? 'Abrir' : whatsappEnabled ? 'ON' : 'OFF'}
           </button>
           <button
             className="btn-secondary flex items-center gap-2"
@@ -1107,8 +1621,20 @@ export default function PedidosPage() {
 
       <div className="mb-3">
         <p className="text-xs text-slate-500">
-          Status Hub WhatsApp: <span className="font-semibold text-slate-700">{getWhatsappHubStatusLabel(whatsappSessionStatus, whatsappLastSeenAt)}</span>
-          {whatsappHasAgentKey ? '' : ' (sem chave do agente)'}
+          Status do WhatsApp:{' '}
+          <span className="font-semibold text-slate-700">
+            {getWhatsappStatusLabel(whatsappSessionStatus, whatsappLastSeenAt, whatsappEnabled, desktopAppAvailable)}
+          </span>
+          {whatsappHasAgentKey ? '' : desktopAppAvailable ? ' (primeira conexao deste computador)' : ' (abra o Faceburg App neste computador)'}
+        </p>
+        <p className="mt-1 text-xs text-slate-500">
+          Status da impressao:{' '}
+          <span className="font-semibold text-slate-700">
+            {getPrintStatusLabel(printConnectionStatus, printLastSeenAt, printEnabled, desktopAppAvailable)}
+          </span>
+          {printHasAgentKey ? '' : desktopAppAvailable ? ' (primeira conexao deste computador)' : ' (abra o Faceburg App neste computador)'}
+          {desktopPrintLastError ? <span className="text-red-500"> - {desktopPrintLastError}</span> : null}
+          {printEnabled && desktopAppAvailable && !printLocalActive ? <span className="text-amber-600"> - vou tentar abrir ao imprimir</span> : null}
         </p>
       </div>
 
@@ -1129,13 +1655,13 @@ export default function PedidosPage() {
 
       {error ? <p className="text-sm text-red-500 mb-4">{error}</p> : null}
 
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
         {columns.map((column) => (
-          <div key={column.status} className="flex flex-col gap-3">
+          <div key={column.key} className="flex flex-col gap-3">
             <div className="column-header">
               <span>{column.title}</span>
               <span className="bg-slate-300 px-2 py-0.5 rounded-full text-[10px] font-bold text-white">
-                {ordersForColumn(column.status)
+                {ordersForColumn(column.statuses)
                   .length.toString()
                   .padStart(2, '0')}
               </span>
@@ -1144,31 +1670,31 @@ export default function PedidosPage() {
             <div
               className={cn(
                 'kanban-column transition-colors',
-                dragOverStatus === column.status ? 'bg-blue-50/80 ring-1 ring-blue-200' : '',
+                dragOverStatus === column.dropStatus ? 'bg-blue-50/80 ring-1 ring-blue-200' : '',
               )}
               onDragOver={(event) => {
                 event.preventDefault();
                 if (!draggingOrderId) return;
-                if (dragOverStatus !== column.status) {
-                  setDragOverStatus(column.status);
+                if (dragOverStatus !== column.dropStatus) {
+                  setDragOverStatus(column.dropStatus);
                 }
               }}
               onDragLeave={() => {
-                if (dragOverStatus === column.status) {
+                if (dragOverStatus === column.dropStatus) {
                   setDragOverStatus(null);
                 }
               }}
               onDrop={(event) => {
                 event.preventDefault();
-                void handleDropInColumn(column.status);
+                void handleDropInColumn(column.dropStatus);
               }}
             >
               {loading ? <p className="text-xs text-slate-500 px-2">Carregando...</p> : null}
-              {ordersForColumn(column.status)
+              {ordersForColumn(column.statuses)
                 .map((order) => (
                   <div
                     key={order.id}
-                    draggable={updatingId !== order.id}
+                    draggable={updatingId !== order.id && !isTerminalOrderStatus(order.status)}
                     onDragStart={(event) => {
                       event.dataTransfer.effectAllowed = 'move';
                       setDraggingOrderId(order.id);
@@ -1178,14 +1704,21 @@ export default function PedidosPage() {
                       setDragOverStatus(null);
                     }}
                     className={cn(
-                      'card-order group relative cursor-grab active:cursor-grabbing',
+                      'card-order group relative',
+                      isTerminalOrderStatus(order.status) ? 'cursor-default' : 'cursor-grab active:cursor-grabbing',
                       draggingOrderId === order.id ? 'opacity-60' : '',
                     )}
                   >
                     <div
                       className={cn(
                         '-mx-4 -mt-4 mb-3 flex justify-between items-center px-4 py-1.5 shadow-sm',
-                        order.type === 'delivery' ? 'bg-emerald-400' : 'bg-sky-500',
+                        order.status === 'cancelled'
+                          ? 'bg-rose-400'
+                          : order.status === 'completed'
+                            ? 'bg-slate-400'
+                            : order.type === 'delivery'
+                              ? 'bg-emerald-400'
+                              : 'bg-sky-500',
                       )}
                     >
                       <span className="text-[11px] font-extrabold uppercase tracking-[0.16em] text-white flex items-center gap-1.5">
@@ -1216,7 +1749,7 @@ export default function PedidosPage() {
 
                     <div className="flex items-center justify-between mt-auto pt-3 border-t border-slate-100">
                       <div className="flex items-center gap-2">
-                        <span className="text-lg leading-none font-black text-slate-900">R$ {order.total.toFixed(2)}</span>
+                        <span className="text-lg leading-none font-black text-slate-900">{formatCurrency(order.total)}</span>
                       </div>
                       <div className="flex items-center gap-2">
                         {order.status !== 'completed' && order.status !== 'cancelled' ? (
@@ -1274,13 +1807,22 @@ export default function PedidosPage() {
                           Iniciar Preparo
                         </button>
                       ) : null}
-                      {order.status === 'processing' ? (
+                      {order.status === 'processing' && order.type === 'delivery' ? (
                         <button
                           onClick={() => void moveOrder(order.id, 'delivering')}
                           disabled={updatingId === order.id}
                           className="flex-1 bg-sky-500 text-white py-1.5 rounded-md text-[10px] font-bold uppercase tracking-wider hover:bg-sky-600 transition-colors shadow-sm disabled:opacity-50 disabled:cursor-not-allowed"
                         >
                           Saiu p/ Entrega
+                        </button>
+                      ) : null}
+                      {order.status === 'processing' && order.type !== 'delivery' ? (
+                        <button
+                          onClick={() => void moveOrder(order.id, 'completed')}
+                          disabled={updatingId === order.id}
+                          className="flex-1 bg-sky-500 text-white py-1.5 rounded-md text-[10px] font-bold uppercase tracking-wider hover:bg-sky-600 transition-colors shadow-sm disabled:opacity-50 disabled:cursor-not-allowed"
+                        >
+                          Finalizar
                         </button>
                       ) : null}
                       {order.status === 'delivering' ? (
@@ -1356,7 +1898,7 @@ export default function PedidosPage() {
                   </div>
                 ))}
 
-              {!loading && ordersForColumn(column.status).length === 0 ? (
+              {!loading && ordersForColumn(column.statuses).length === 0 ? (
                 <div className="flex flex-col items-center justify-center py-12 opacity-30 select-none">
                   <ShoppingBag className="w-8 h-8 mb-2" />
                   <p className="text-[10px] font-bold uppercase tracking-widest text-center leading-tight">
@@ -1436,7 +1978,7 @@ export default function PedidosPage() {
                           {item.quantity}x {item.productName}
                         </p>
                         <p className="text-xs text-slate-500">
-                          Unitario: R$ {item.unitPrice.toFixed(2)} - Subtotal: R$ {(item.quantity * item.unitPrice).toFixed(2)}
+                          Unitario: {formatCurrency(item.unitPrice)} - Subtotal: {formatCurrency(item.quantity * item.unitPrice)}
                         </p>
                         {notesLines.length > 0 ? (
                           <div className="text-xs text-slate-500 mt-1 space-y-0.5">
@@ -1452,7 +1994,7 @@ export default function PedidosPage() {
 
                 <div className="border-t border-slate-200 pt-3 flex items-center justify-between">
                   <p className="font-bold text-slate-900">Total do pedido</p>
-                  <p className="font-black text-lg text-brand-primary">R$ {selectedOrderDetail.total.toFixed(2)}</p>
+                  <p className="font-black text-lg text-brand-primary">{formatCurrency(selectedOrderDetail.total)}</p>
                 </div>
               </div>
             )}
@@ -1471,7 +2013,7 @@ export default function PedidosPage() {
                 <div className="min-w-0">
                   <p className="text-lg font-bold text-slate-900 truncate">Mapa da Entrega</p>
                   <p className="text-sm text-slate-500 truncate">
-                    {mapModalOrder.customerName} • Pedido #{mapModalOrder.id.slice(0, 8)}
+                    {mapModalOrder.customerName} - Pedido #{mapModalOrder.id.slice(0, 8)}
                   </p>
                 </div>
               </div>
@@ -1582,7 +2124,7 @@ export default function PedidosPage() {
             <div className="px-4 py-3 border-b border-slate-200 flex items-center justify-between">
               <div>
                 <p className="text-sm font-bold text-slate-900">Trocar endereco do pedido</p>
-                <p className="text-xs text-slate-500">Pedido #{editAddressOrder.id.slice(0, 8)} • {editAddressOrder.customerName}</p>
+                <p className="text-xs text-slate-500">Pedido #{editAddressOrder.id.slice(0, 8)} - {editAddressOrder.customerName}</p>
               </div>
               <button
                 onClick={() => {
@@ -1637,7 +2179,7 @@ export default function PedidosPage() {
             <div className="px-4 py-3 border-b border-slate-200 flex items-center justify-between">
               <div>
                 <p className="text-sm font-bold text-slate-900">Trocar forma de pagamento</p>
-                <p className="text-xs text-slate-500">Pedido #{editPaymentOrder.id.slice(0, 8)} • {editPaymentOrder.customerName}</p>
+                <p className="text-xs text-slate-500">Pedido #{editPaymentOrder.id.slice(0, 8)} - {editPaymentOrder.customerName}</p>
               </div>
               <button
                 onClick={() => {

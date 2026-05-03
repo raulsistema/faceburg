@@ -13,6 +13,7 @@ type ReportsResponse = {
   totals: {
     grossSales: number;
     feeTotal: number;
+    deliveryFeeTotal: number;
     netSales: number;
     completedOrders: number;
     cancelledOrders: number;
@@ -199,7 +200,7 @@ export default function RelatoriosPage() {
         </p>
       ) : null}
 
-      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4 mb-6">
+      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4 mb-6">
         <div className="bg-white border border-slate-200 rounded-2xl p-4">
           <p className="text-xs font-semibold text-slate-500 uppercase">Faturamento bruto</p>
           <p className="text-2xl font-black text-slate-900 mt-1">{loading ? '--' : brl(data?.totals.grossSales || 0)}</p>
@@ -207,6 +208,10 @@ export default function RelatoriosPage() {
         <div className="bg-white border border-slate-200 rounded-2xl p-4">
           <p className="text-xs font-semibold text-slate-500 uppercase">Taxas</p>
           <p className="text-2xl font-black text-rose-600 mt-1">{loading ? '--' : brl(data?.totals.feeTotal || 0)}</p>
+        </div>
+        <div className="bg-white border border-slate-200 rounded-2xl p-4">
+          <p className="text-xs font-semibold text-slate-500 uppercase">Taxa de entrega</p>
+          <p className="text-2xl font-black text-sky-600 mt-1">{loading ? '--' : brl(data?.totals.deliveryFeeTotal || 0)}</p>
         </div>
         <div className="bg-white border border-slate-200 rounded-2xl p-4">
           <p className="text-xs font-semibold text-slate-500 uppercase">Liquido previsto</p>

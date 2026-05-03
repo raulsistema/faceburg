@@ -1,6 +1,7 @@
 import pool, { query } from '@/lib/db';
 import { NextResponse } from 'next/server';
 import { getValidatedTenantSession } from '@/lib/tenant-auth';
+import { parseMoneyInput } from '@/lib/finance-utils';
 
 type TabRow = {
   id: string;
@@ -37,7 +38,7 @@ function clampDiscount(subtotal: number, discount: number) {
 }
 
 function normalizeExtraAmount(value: unknown) {
-  const parsed = Number(value || 0);
+  const parsed = parseMoneyInput(value);
   if (!Number.isFinite(parsed)) return Number.NaN;
   return Number(Math.max(0, parsed).toFixed(2));
 }
@@ -147,7 +148,7 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
   const discountProvided = discountRaw !== undefined;
   const surchargeProvided = surchargeRaw !== undefined;
   const deliveryFeeProvided = deliveryFeeRaw !== undefined;
-  const discountAmount = Number(discountRaw || 0);
+  const discountAmount = normalizeExtraAmount(discountRaw);
   const surchargeAmount = normalizeExtraAmount(surchargeRaw);
   const deliveryFeeAmount = normalizeExtraAmount(deliveryFeeRaw);
 

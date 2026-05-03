@@ -20,6 +20,7 @@ export function useRealtimeRefresh({
   initialLoader = true,
 }: UseRealtimeRefreshOptions) {
   const refreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastRefreshAtRef = useRef(0);
   const refreshFnRef = useRef<(showLoader?: boolean, force?: boolean) => void>(() => undefined);
 
@@ -34,8 +35,23 @@ export function useRealtimeRefresh({
       }
     }
 
+    function clearReconnectTimer() {
+      if (reconnectTimerRef.current) {
+        clearTimeout(reconnectTimerRef.current);
+        reconnectTimerRef.current = null;
+      }
+    }
+
+    function closeEventSource() {
+      if (eventSource) {
+        eventSource.close();
+        eventSource = null;
+      }
+    }
+
     function scheduleRefresh(delayMs = fallbackRefreshMs) {
       if (disposed) return;
+      if (!(delayMs > 0)) return;
       clearRefreshTimer();
       if (document.hidden) return;
       refreshTimerRef.current = setTimeout(() => {
@@ -62,17 +78,21 @@ export function useRealtimeRefresh({
 
     function connectEventSource() {
       if (disposed || typeof window === 'undefined' || typeof EventSource === 'undefined') return;
-      if (eventSource) {
-        eventSource.close();
-        eventSource = null;
-      }
+      if (document.hidden) return;
+      clearReconnectTimer();
+      closeEventSource();
       eventSource = new EventSource(eventUrl);
       eventSource.addEventListener(eventName, () => {
         void runRefresh(false, true);
       });
       eventSource.onerror = () => {
         if (disposed) return;
-        scheduleRefresh(30000);
+        closeEventSource();
+        if (document.hidden) return;
+        reconnectTimerRef.current = setTimeout(() => {
+          if (disposed || document.hidden) return;
+          connectEventSource();
+        }, 30000);
       };
     }
 
@@ -97,6 +117,8 @@ export function useRealtimeRefresh({
         }
       } else {
         clearRefreshTimer();
+        clearReconnectTimer();
+        closeEventSource();
       }
     };
 
@@ -106,12 +128,10 @@ export function useRealtimeRefresh({
     return () => {
       disposed = true;
       clearRefreshTimer();
+      clearReconnectTimer();
       window.removeEventListener('focus', onFocus);
       document.removeEventListener('visibilitychange', onVisibility);
-      if (eventSource) {
-        eventSource.close();
-        eventSource = null;
-      }
+      closeEventSource();
     };
   }, [dedupeMs, eventName, eventUrl, fallbackRefreshMs, initialLoader, load]);
 

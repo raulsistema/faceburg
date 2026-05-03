@@ -1,16 +1,15 @@
 import { NextResponse } from 'next/server';
-import pool from '@/lib/db';
 import { getValidatedTenantSession } from '@/lib/tenant-auth';
+import { subscribeTenantOrderEvents, type OrderEventPayload } from '@/lib/order-events-bus';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
 const encoder = new TextEncoder();
-const CHANNEL_NAME = 'tenant_orders';
 const MAX_SSE_LIFETIME_MS = 30 * 60 * 1000;
 
 type OrderNotificationPayload = {
-  tenantId?: string;
+  tenantId: string;
   event?: string;
   orderId?: string;
   ts?: number;
@@ -22,9 +21,10 @@ export async function GET(request: Request) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   }
 
-  const client = await pool.connect();
   let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   let lifetimeTimer: ReturnType<typeof setTimeout> | null = null;
+  let unsubscribe: (() => void) | null = null;
+  let abortHandler: (() => void) | null = null;
   let closed = false;
 
   const stream = new ReadableStream<Uint8Array>({
@@ -40,16 +40,14 @@ export async function GET(request: Request) {
           clearTimeout(lifetimeTimer);
           lifetimeTimer = null;
         }
-        client.removeListener('notification', onNotification);
-        client.removeListener('error', onClientError);
-        client.removeListener('end', onClientError);
-        request.signal.removeEventListener('abort', onAbort);
-        try {
-          await client.query(`UNLISTEN ${CHANNEL_NAME}`);
-        } catch {
-          // Ignora falha no unlisten durante o encerramento.
+        if (unsubscribe) {
+          unsubscribe();
+          unsubscribe = null;
         }
-        client.release();
+        if (abortHandler) {
+          request.signal.removeEventListener('abort', abortHandler);
+          abortHandler = null;
+        }
         try {
           controller.close();
         } catch {
@@ -60,42 +58,35 @@ export async function GET(request: Request) {
       const onAbort = () => {
         void cleanup();
       };
+      abortHandler = onAbort;
 
-      const onClientError = () => {
-        void cleanup();
-      };
-
-      const onNotification = (message: { payload?: string | undefined }) => {
-        if (!message.payload) return;
-        try {
-          const payload = JSON.parse(message.payload) as OrderNotificationPayload;
-          if (payload.tenantId !== session.tenantId) return;
-          controller.enqueue(
-            encoder.encode(`event: order-updated\ndata: ${JSON.stringify(payload)}\n\n`),
-          );
-        } catch {
-          void cleanup();
-        }
+      const onNotification = (payload: OrderEventPayload) => {
+        if (payload.tenantId !== session.tenantId) return;
+        const normalizedPayload: OrderNotificationPayload = {
+          tenantId: payload.tenantId,
+          event: payload.event,
+          orderId: payload.orderId,
+          ts: payload.ts ?? Date.now(),
+        };
+        controller.enqueue(
+          encoder.encode(`event: order-updated\ndata: ${JSON.stringify(normalizedPayload)}\n\n`),
+        );
       };
 
       request.signal.addEventListener('abort', onAbort);
-      client.on('notification', onNotification);
-      client.on('error', onClientError);
-      client.on('end', onClientError);
 
       try {
-        await client.query(`LISTEN ${CHANNEL_NAME}`);
+        unsubscribe = await subscribeTenantOrderEvents(session.tenantId, onNotification);
         controller.enqueue(
           encoder.encode(
             `event: connected\ndata: ${JSON.stringify({ tenantId: session.tenantId, ts: Date.now() })}\n\n`,
           ),
         );
       } catch {
-        request.signal.removeEventListener('abort', onAbort);
-        client.removeListener('notification', onNotification);
-        client.removeListener('error', onClientError);
-        client.removeListener('end', onClientError);
-        client.release();
+        if (abortHandler) {
+          request.signal.removeEventListener('abort', abortHandler);
+          abortHandler = null;
+        }
         controller.error(new Error('Falha ao iniciar eventos de pedidos.'));
         return;
       }
@@ -121,15 +112,14 @@ export async function GET(request: Request) {
       if (lifetimeTimer) {
         clearTimeout(lifetimeTimer);
       }
-      client.removeAllListeners('notification');
-      client.removeAllListeners('error');
-      client.removeAllListeners('end');
-      try {
-        await client.query(`UNLISTEN ${CHANNEL_NAME}`);
-      } catch {
-        // Ignora falha ao cancelar stream.
+      if (unsubscribe) {
+        unsubscribe();
+        unsubscribe = null;
       }
-      client.release();
+      if (abortHandler) {
+        request.signal.removeEventListener('abort', abortHandler);
+        abortHandler = null;
+      }
     },
   });
 

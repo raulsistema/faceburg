@@ -4,6 +4,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import DashboardShell from '@/components/layout/DashboardShell';
 import { Search, Plus, Minus, Trash2, ShoppingCart, Ticket, X, Bike } from 'lucide-react';
 import { cn } from '@/lib/utils';
+import { formatBrl, parseMoneyInput, roundMoney } from '@/lib/finance-utils';
 import { useZipCodeAutofill } from '@/hooks/use-zip-code-autofill';
 import AppImage from '@/components/ui/AppImage';
 
@@ -157,8 +158,16 @@ function maskPhone(raw: string) {
 }
 
 function normalizeMoneyInput(raw: string) {
-  const sanitized = raw.replace(',', '.').replace(/[^\d.]/g, '');
-  return sanitized;
+  return raw.replace(/[^\d,.]/g, '');
+}
+
+function parsePositiveMoneyInput(raw: unknown) {
+  const parsed = parseMoneyInput(raw);
+  return Number.isFinite(parsed) ? roundMoney(Math.max(0, parsed)) : Number.NaN;
+}
+
+function formatMoneyInput(value: number) {
+  return roundMoney(Math.max(0, value)).toFixed(2).replace('.', ',');
 }
 
 function makeLocalId() {
@@ -199,10 +208,10 @@ export default function PDVPage() {
   const [discountModalOpen, setDiscountModalOpen] = useState(false);
   const [checkoutModalOpen, setCheckoutModalOpen] = useState(false);
   const [discountType, setDiscountType] = useState<'percent' | 'amount'>('percent');
-  const [discountInput, setDiscountInput] = useState('0');
+  const [discountInput, setDiscountInput] = useState(formatMoneyInput(0));
   const [appliedDiscount, setAppliedDiscount] = useState(0);
   const [adjustmentModalKind, setAdjustmentModalKind] = useState<AmountAdjustmentKind | null>(null);
-  const [adjustmentInput, setAdjustmentInput] = useState('0');
+  const [adjustmentInput, setAdjustmentInput] = useState(formatMoneyInput(0));
   const [appliedSurcharge, setAppliedSurcharge] = useState(0);
   const [appliedDeliveryFee, setAppliedDeliveryFee] = useState(0);
   const [quickModalOpen, setQuickModalOpen] = useState(false);
@@ -239,8 +248,8 @@ export default function PDVPage() {
     setAppliedDiscount(0);
     setAppliedSurcharge(0);
     setAppliedDeliveryFee(0);
-    setDiscountInput('0');
-    setAdjustmentInput('0');
+    setDiscountInput(formatMoneyInput(0));
+    setAdjustmentInput(formatMoneyInput(0));
     setAdjustmentModalKind(null);
     setCart([]);
     setCheckoutPayments([]);
@@ -264,8 +273,8 @@ export default function PDVPage() {
     setAppliedDiscount(0);
     setAppliedSurcharge(0);
     setAppliedDeliveryFee(0);
-    setDiscountInput('0');
-    setAdjustmentInput('0');
+    setDiscountInput(formatMoneyInput(0));
+    setAdjustmentInput(formatMoneyInput(0));
     setAdjustmentModalKind(null);
     setCheckoutPayments([]);
     setSyncingItems(false);
@@ -362,7 +371,7 @@ export default function PDVPage() {
             setAppliedDiscount(Number(detailTab.discountAmount || 0));
             setAppliedSurcharge(Number(detailTab.surchargeAmount || 0));
             setAppliedDeliveryFee(Number(detailTab.deliveryFeeAmount || 0));
-            setDiscountInput(String(Number(detailTab.discountAmount || 0).toFixed(2)));
+            setDiscountInput(formatMoneyInput(Number(detailTab.discountAmount || 0)));
             setCart(
               detailTab.items.map((item) => ({
                 id: item.productId,
@@ -535,7 +544,7 @@ export default function PDVPage() {
       setAppliedDiscount(Number(detailTab.discountAmount || 0));
       setAppliedSurcharge(Number(detailTab.surchargeAmount || 0));
       setAppliedDeliveryFee(Number(detailTab.deliveryFeeAmount || 0));
-      setDiscountInput(String(Number(detailTab.discountAmount || 0).toFixed(2)));
+      setDiscountInput(formatMoneyInput(Number(detailTab.discountAmount || 0)));
       setCart(
         detailTab.items.map((item) => ({
           id: item.productId,
@@ -692,7 +701,7 @@ export default function PDVPage() {
       setAppliedDiscount(Number(updatedTab.discountAmount || 0));
       setAppliedSurcharge(Number(updatedTab.surchargeAmount || 0));
       setAppliedDeliveryFee(Number(updatedTab.deliveryFeeAmount || 0));
-      setDiscountInput(String(Number(updatedTab.discountAmount || 0).toFixed(2)));
+      setDiscountInput(formatMoneyInput(Number(updatedTab.discountAmount || 0)));
       setError(null);
       if (showSuccessMessage) {
         setMessage('Comanda salva com sucesso.');
@@ -730,7 +739,7 @@ export default function PDVPage() {
     setAppliedDiscount(discountAmount);
     setAppliedSurcharge(surchargeAmount);
     setAppliedDeliveryFee(deliveryFeeAmount);
-    setDiscountInput(String(discountAmount.toFixed(2)));
+    setDiscountInput(formatMoneyInput(discountAmount));
     setTabs((prev) =>
       prev.map((tab) =>
         tab.id === tabId
@@ -842,18 +851,28 @@ export default function PDVPage() {
     queueSyncItems(tabId, []);
   };
 
-  const formatMoneyValue = (value: number) => Number(Math.max(0, value).toFixed(2));
+  const formatMoneyValue = (value: number) => roundMoney(Math.max(0, value));
   const currentAmountAdjustment = adjustmentModalKind === 'surcharge' ? appliedSurcharge : appliedDeliveryFee;
   const amountAdjustmentLabel = adjustmentModalKind === 'deliveryFee' ? 'Taxa de entrega' : 'Acrescimo';
 
   const subtotal = cart.reduce((sum, item) => sum + item.price * item.quantity, 0);
   const total = formatMoneyValue(subtotal - appliedDiscount + appliedSurcharge + appliedDeliveryFee);
   const activePaymentMethods = paymentMethods.length > 0 ? paymentMethods : PAYMENT_OPTIONS;
-  const checkoutPaymentsTotal = checkoutPayments.reduce((sum, line) => sum + Number(line.amount || 0), 0);
-  const checkoutRemaining = Number((total - checkoutPaymentsTotal).toFixed(2));
+  const checkoutPaymentsTotal = roundMoney(
+    checkoutPayments.reduce((sum, line) => {
+      const amount = parsePositiveMoneyInput(line.amount);
+      return sum + (Number.isFinite(amount) ? amount : 0);
+    }, 0),
+  );
+  const checkoutRemaining = roundMoney(total - checkoutPaymentsTotal);
+  const checkoutRemainingAbs = Math.abs(checkoutRemaining) <= 0.01 ? 0 : Math.abs(checkoutRemaining);
+  const checkoutBalanceLabel = checkoutRemaining < -0.01 ? 'Excesso' : 'Restante';
   const checkoutValid =
     checkoutPayments.length > 0 &&
-    checkoutPayments.every((line) => line.paymentMethodId && Number(line.amount || 0) > 0) &&
+    checkoutPayments.every((line) => {
+      const amount = parsePositiveMoneyInput(line.amount);
+      return line.paymentMethodId && Number.isFinite(amount) && amount > 0;
+    }) &&
     Math.abs(checkoutRemaining) <= 0.01;
 
   function createDefaultCheckoutLines(currentTotal: number) {
@@ -866,7 +885,7 @@ export default function PDVPage() {
       {
         id: makeLocalId(),
         paymentMethodId: firstMethodId,
-        amount: Number(currentTotal).toFixed(2),
+        amount: formatMoneyInput(currentTotal),
       },
     ];
   }
@@ -890,7 +909,7 @@ export default function PDVPage() {
     const defaultMethodId = activePaymentMethods[0]?.id || '';
     setCheckoutPayments((prev) => [
       ...prev,
-      { id: makeLocalId(), paymentMethodId: defaultMethodId, amount: '0' },
+      { id: makeLocalId(), paymentMethodId: defaultMethodId, amount: formatMoneyInput(0) },
     ]);
   }
 
@@ -914,7 +933,7 @@ export default function PDVPage() {
     if (subtotal <= 0) {
       if (appliedDiscount !== 0) {
         setAppliedDiscount(0);
-        setDiscountInput('0');
+        setDiscountInput(formatMoneyInput(0));
       }
       if (appliedSurcharge !== 0) {
         setAppliedSurcharge(0);
@@ -925,9 +944,9 @@ export default function PDVPage() {
       return;
     }
     if (appliedDiscount > subtotal) {
-      const nextDiscount = Number(subtotal.toFixed(2));
+      const nextDiscount = roundMoney(subtotal);
       setAppliedDiscount(nextDiscount);
-      setDiscountInput(String(nextDiscount.toFixed(2)));
+      setDiscountInput(formatMoneyInput(nextDiscount));
     }
   }, [subtotal, appliedDeliveryFee, appliedDiscount, appliedSurcharge]);
 
@@ -958,7 +977,7 @@ export default function PDVPage() {
       setError('Selecione uma comanda para aplicar desconto.');
       return;
     }
-    const value = Number(discountInput || 0);
+    const value = parsePositiveMoneyInput(discountInput);
     if (!Number.isFinite(value) || value < 0) {
       setError('Valor de desconto invalido.');
       return;
@@ -969,7 +988,7 @@ export default function PDVPage() {
     } else {
       nextDiscount = value;
     }
-    nextDiscount = Number(Math.min(subtotal, Math.max(0, nextDiscount)).toFixed(2));
+    nextDiscount = roundMoney(Math.min(subtotal, Math.max(0, nextDiscount)));
     setAppliedDiscount(nextDiscount);
     setDiscountModalOpen(false);
     setError(null);
@@ -989,13 +1008,13 @@ export default function PDVPage() {
     }
     setAdjustmentModalKind(kind);
     const currentValue = kind === 'surcharge' ? appliedSurcharge : appliedDeliveryFee;
-    setAdjustmentInput(currentValue.toFixed(2));
+    setAdjustmentInput(formatMoneyInput(currentValue));
     setError(null);
   }
 
   function applyAmountAdjustment() {
     if (!adjustmentModalKind) return;
-    const value = Number(normalizeMoneyInput(adjustmentInput || '0') || 0);
+    const value = parsePositiveMoneyInput(adjustmentInput);
     if (!Number.isFinite(value) || value < 0) {
       setError(`${amountAdjustmentLabel} invalido.`);
       return;
@@ -1015,19 +1034,19 @@ export default function PDVPage() {
     }
 
     setAdjustmentModalKind(null);
-    setAdjustmentInput('0');
+    setAdjustmentInput(formatMoneyInput(0));
     setError(null);
   }
 
   function buildCheckoutPaymentsPayload() {
     return checkoutPayments
       .map((line) => {
-        const amount = Number(normalizeMoneyInput(line.amount || '0') || 0);
+        const amount = parsePositiveMoneyInput(line.amount || '0');
         const method = activePaymentMethods.find((item) => item.id === line.paymentMethodId);
         return {
           paymentMethodId: line.paymentMethodId,
           methodType: method?.methodType || '',
-          amount: Number.isFinite(amount) ? Number(amount.toFixed(2)) : 0,
+          amount: Number.isFinite(amount) ? roundMoney(amount) : 0,
         };
       })
       .filter((line) => line.paymentMethodId && line.amount > 0);
@@ -1078,7 +1097,7 @@ export default function PDVPage() {
       const orderShort = String(data.orderId || '').slice(0, 8);
       setCheckoutModalOpen(false);
       setMessage(
-        `Conta da mesa ${activeTableNumber} fechada. Pedido ${orderShort} - Total R$ ${Number(data.total || 0).toFixed(2)}`,
+        `Conta da mesa ${activeTableNumber} fechada. Pedido ${orderShort} - Total ${formatBrl(Number(data.total || 0))}`,
       );
 
       clearSelectedTab();
@@ -1129,11 +1148,11 @@ export default function PDVPage() {
       setAppliedDiscount(0);
       setAppliedSurcharge(0);
       setAppliedDeliveryFee(0);
-      setDiscountInput('0');
-      setAdjustmentInput('0');
+      setDiscountInput(formatMoneyInput(0));
+      setAdjustmentInput(formatMoneyInput(0));
       setAdjustmentModalKind(null);
       setCheckoutPayments([]);
-      setMessage(`Venda rapida concluida. Pedido ${orderShort} - Total R$ ${Number(data.total || 0).toFixed(2)}`);
+      setMessage(`Venda rapida concluida. Pedido ${orderShort} - Total ${formatBrl(Number(data.total || 0))}`);
     } catch {
       setError('Falha ao finalizar venda.');
     } finally {
@@ -1275,7 +1294,7 @@ export default function PDVPage() {
                     </div>
                   </div>
                   <h4 className="font-bold text-slate-900 text-sm mb-1 leading-tight">{product.name}</h4>
-                  <p className="text-sm font-bold text-brand-primary">R$ {product.price.toFixed(2)}</p>
+                  <p className="text-sm font-bold text-brand-primary">{formatBrl(product.price)}</p>
                 </button>
               ))}
               {filteredProducts.length === 0 ? <p className="text-sm text-slate-500">Nenhum produto disponivel.</p> : null}
@@ -1354,7 +1373,7 @@ export default function PDVPage() {
                         <p className="text-xs font-bold text-slate-900">{tab.tableNumber}</p>
                         <p className="text-[11px] text-slate-600 truncate">{tab.customerName || 'Sem cliente'}</p>
                         <div className="mt-0.5 flex items-center justify-between">
-                          <p className="text-[11px] font-semibold text-brand-primary">R$ {Number(tab.totalAmount || 0).toFixed(2)}</p>
+                          <p className="text-[11px] font-semibold text-brand-primary">{formatBrl(Number(tab.totalAmount || 0))}</p>
                           <span className="text-[10px] font-semibold text-slate-500">{tab.itemsCount} itens</span>
                         </div>
                       </button>
@@ -1383,6 +1402,7 @@ export default function PDVPage() {
                 )}
               </>
             ) : null}
+
           </div>
 
           <div className="px-2.5 py-1.5 border-b border-slate-100 flex items-center justify-between shrink-0">
@@ -1406,7 +1426,7 @@ export default function PDVPage() {
               <div key={item.id} className="flex items-center justify-between gap-4 group">
                 <div className="flex-1">
                   <p className="text-sm font-bold text-slate-900 leading-tight mb-0.5">{item.name}</p>
-                  <p className="text-xs text-slate-500">R$ {item.price.toFixed(2)} / un</p>
+                  <p className="text-xs text-slate-500">{formatBrl(item.price)} / un</p>
                 </div>
                 <div className="flex items-center gap-3">
                   <button onClick={() => updateQuantity(item.id, -1)} className="p-1 rounded-md bg-slate-100 text-slate-500 hover:bg-slate-200">
@@ -1418,7 +1438,7 @@ export default function PDVPage() {
                   </button>
                 </div>
                 <div className="text-right min-w-[60px]">
-                  <p className="text-sm font-bold text-slate-900">R$ {(item.price * item.quantity).toFixed(2)}</p>
+                  <p className="text-sm font-bold text-slate-900">{formatBrl(item.price * item.quantity)}</p>
                 </div>
               </div>
             ))}
@@ -1436,7 +1456,7 @@ export default function PDVPage() {
             <div className="space-y-2">
               <div className="flex justify-between text-sm">
                 <span className="text-slate-500">Subtotal</span>
-                <span className="font-medium text-slate-900">R$ {subtotal.toFixed(2)}</span>
+                <span className="font-medium text-slate-900">{formatBrl(subtotal)}</span>
               </div>
               <div className="flex justify-between text-sm">
                 <div className="flex items-center gap-1 text-slate-500">
@@ -1449,7 +1469,7 @@ export default function PDVPage() {
                   disabled={saleMode === 'tab' ? !selectedTabId : false}
                   className="font-medium text-green-600 hover:underline disabled:text-slate-400 disabled:no-underline"
                 >
-                  - R$ {appliedDiscount.toFixed(2)}
+                  - {formatBrl(appliedDiscount)}
                 </button>
               </div>
               <div className="flex justify-between text-sm">
@@ -1463,7 +1483,7 @@ export default function PDVPage() {
                   disabled={(saleMode === 'tab' ? !selectedTabId : false) || subtotal <= 0}
                   className="font-medium text-sky-600 hover:underline disabled:text-slate-400 disabled:no-underline"
                 >
-                  + R$ {appliedSurcharge.toFixed(2)}
+                  + {formatBrl(appliedSurcharge)}
                 </button>
               </div>
               <div className="flex justify-between text-sm">
@@ -1477,12 +1497,12 @@ export default function PDVPage() {
                   disabled={(saleMode === 'tab' ? !selectedTabId : false) || subtotal <= 0}
                   className="font-medium text-emerald-600 hover:underline disabled:text-slate-400 disabled:no-underline"
                 >
-                  + R$ {appliedDeliveryFee.toFixed(2)}
+                  + {formatBrl(appliedDeliveryFee)}
                 </button>
               </div>
               <div className="pt-2 border-t border-slate-200 flex justify-between">
                 <span className="font-bold text-slate-900">Total</span>
-                <span className="font-black text-xl text-brand-primary">R$ {total.toFixed(2)}</span>
+                <span className="font-black text-xl text-brand-primary">{formatBrl(total)}</span>
               </div>
             </div>
 
@@ -1607,23 +1627,23 @@ export default function PDVPage() {
             <div className="mt-3 rounded-xl border border-slate-200 bg-slate-50 p-3 space-y-1.5 text-sm">
               <div className="flex items-center justify-between text-slate-600">
                 <span>Subtotal</span>
-                <span>R$ {subtotal.toFixed(2)}</span>
+                <span>{formatBrl(subtotal)}</span>
               </div>
               <div className="flex items-center justify-between text-slate-600">
                 <span>Desconto</span>
-                <span>- R$ {appliedDiscount.toFixed(2)}</span>
+                <span>- {formatBrl(appliedDiscount)}</span>
               </div>
               <div className="flex items-center justify-between text-slate-600">
                 <span>Acrescimo</span>
-                <span>+ R$ {appliedSurcharge.toFixed(2)}</span>
+                <span>+ {formatBrl(appliedSurcharge)}</span>
               </div>
               <div className="flex items-center justify-between text-slate-600">
                 <span>Taxa de entrega</span>
-                <span>+ R$ {appliedDeliveryFee.toFixed(2)}</span>
+                <span>+ {formatBrl(appliedDeliveryFee)}</span>
               </div>
               <div className="flex items-center justify-between border-t border-slate-200 pt-2 font-semibold text-slate-900">
                 <span>Total a pagar</span>
-                <strong className="text-brand-primary text-base">R$ {total.toFixed(2)}</strong>
+                <strong className="text-brand-primary text-base">{formatBrl(total)}</strong>
               </div>
             </div>
 
@@ -1642,13 +1662,12 @@ export default function PDVPage() {
                     ))}
                   </select>
                   <input
-                    type="number"
-                    min="0"
-                    step="0.01"
+                    type="text"
+                    inputMode="decimal"
                     value={line.amount}
                     onChange={(e) => updateCheckoutPaymentLine(line.id, { amount: normalizeMoneyInput(e.target.value) })}
                     className="w-full rounded-lg border border-slate-200 px-2 py-2 text-xs text-right"
-                    placeholder="0.00"
+                    placeholder="0,00"
                   />
                   <button
                     type="button"
@@ -1669,7 +1688,7 @@ export default function PDVPage() {
                   + Adicionar forma
                 </button>
                 <p className={cn('text-xs font-semibold', Math.abs(checkoutRemaining) <= 0.01 ? 'text-emerald-600' : 'text-rose-600')}>
-                  Restante: R$ {checkoutRemaining.toFixed(2)}
+                  {checkoutBalanceLabel}: {formatBrl(checkoutRemainingAbs)}
                 </p>
               </div>
             </div>
@@ -1746,16 +1765,15 @@ export default function PDVPage() {
               </button>
             </div>
             <input
-              type="number"
-              min="0"
-              step="0.01"
+              type="text"
+              inputMode="decimal"
               value={discountInput}
-              onChange={(e) => setDiscountInput(e.target.value)}
+              onChange={(e) => setDiscountInput(normalizeMoneyInput(e.target.value))}
               className="mt-3 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm"
-              placeholder={discountType === 'percent' ? 'Ex.: 10' : 'Ex.: 15.00'}
+              placeholder={discountType === 'percent' ? 'Ex.: 10' : 'Ex.: 15,00'}
             />
             <p className="mt-2 text-xs text-slate-500">
-              Subtotal: R$ {subtotal.toFixed(2)} - Total atual: R$ {total.toFixed(2)}
+              Subtotal: {formatBrl(subtotal)} - Total atual: {formatBrl(total)}
             </p>
             <div className="mt-4 flex gap-2">
               <button
@@ -1763,7 +1781,7 @@ export default function PDVPage() {
                 className="flex-1 rounded-lg border border-slate-200 px-4 py-2 text-sm font-semibold text-slate-700"
                 onClick={() => {
                   setAppliedDiscount(0);
-                  setDiscountInput('0');
+                  setDiscountInput(formatMoneyInput(0));
                   setDiscountModalOpen(false);
                   if (saleMode === 'tab' && selectedTabIdRef.current) {
                     void saveTabMeta({ discountAmount: 0 }, false);
@@ -1790,22 +1808,21 @@ export default function PDVPage() {
             className="absolute inset-0 bg-slate-950/45"
             onClick={() => {
               setAdjustmentModalKind(null);
-              setAdjustmentInput('0');
+              setAdjustmentInput(formatMoneyInput(0));
             }}
           />
           <div className="relative z-10 w-full max-w-md rounded-2xl border border-slate-200 bg-white p-6 shadow-2xl">
             <h3 className="text-lg font-bold text-slate-900">Ajustar {amountAdjustmentLabel.toLowerCase()}</h3>
             <input
-              type="number"
-              min="0"
-              step="0.01"
+              type="text"
+              inputMode="decimal"
               value={adjustmentInput}
               onChange={(e) => setAdjustmentInput(normalizeMoneyInput(e.target.value))}
               className="mt-4 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm"
-              placeholder="Ex.: 5.00"
+              placeholder="Ex.: 5,00"
             />
             <p className="mt-2 text-xs text-slate-500">
-              Valor atual: R$ {currentAmountAdjustment.toFixed(2)} - Total atual: R$ {total.toFixed(2)}
+              Valor atual: {formatBrl(currentAmountAdjustment)} - Total atual: {formatBrl(total)}
             </p>
             <div className="mt-4 flex gap-2">
               <button
@@ -1823,7 +1840,7 @@ export default function PDVPage() {
                       void saveTabMeta({ deliveryFeeAmount: 0 }, false);
                     }
                   }
-                  setAdjustmentInput('0');
+                  setAdjustmentInput(formatMoneyInput(0));
                   setAdjustmentModalKind(null);
                 }}
               >

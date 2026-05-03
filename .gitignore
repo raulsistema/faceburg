@@ -1,8 +1,14 @@
 node_modules/
 .next/
+.next-dev/
+.next-build-check/
 coverage/
 .DS_Store
 *.log
+*.err
+*.out
+*.xlsx
+telas-sistema.csv
 .env*
 !.env.example
 tsconfig.tsbuildinfo

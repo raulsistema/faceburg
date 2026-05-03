@@ -20,7 +20,7 @@ function normalizePaymentMethodType(value: unknown) {
   const paymentMethod = String(value || '').trim().toLowerCase();
   if (paymentMethod === 'pix') return 'pix';
   if (paymentMethod === 'cash' || paymentMethod === 'money' || paymentMethod === 'dinheiro') return 'cash';
-  if (paymentMethod === 'card' || paymentMethod === 'cartao' || paymentMethod === 'credito' || paymentMethod === 'debito') return 'card';
+  if (paymentMethod === 'card' || paymentMethod === 'cartao' || paymentMethod === 'cartão' || paymentMethod === 'credito' || paymentMethod === 'debito') return 'card';
   if (paymentMethod === 'bank_slip' || paymentMethod === 'boleto') return 'bank_slip';
   if (paymentMethod === 'wallet' || paymentMethod === 'carteira') return 'wallet';
   if (paymentMethod === 'other') return 'other';

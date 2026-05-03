@@ -44,6 +44,16 @@ type TenantRow = {
   status: string;
   prep_time_minutes: number;
   delivery_fee_base: string;
+  delivery_fee_mode: string;
+  delivery_fee_per_km: string;
+  delivery_origin_use_issuer: boolean;
+  delivery_origin_zip_code: string | null;
+  delivery_origin_street: string | null;
+  delivery_origin_number: string | null;
+  delivery_origin_complement: string | null;
+  delivery_origin_neighborhood: string | null;
+  delivery_origin_city: string | null;
+  delivery_origin_state: string | null;
   store_open: boolean;
   menu_cover_image_url: string | null;
   whatsapp_phone: string | null;
@@ -71,6 +81,16 @@ export async function GET(request: Request) {
               status,
               prep_time_minutes,
               delivery_fee_base::text,
+              delivery_fee_mode,
+              delivery_fee_per_km::text,
+              delivery_origin_use_issuer,
+              delivery_origin_zip_code,
+              delivery_origin_street,
+              delivery_origin_number,
+              delivery_origin_complement,
+              delivery_origin_neighborhood,
+              delivery_origin_city,
+              delivery_origin_state,
               store_open,
               menu_cover_image_url,
               whatsapp_phone
@@ -103,7 +123,7 @@ export async function GET(request: Request) {
               p.name,
               p.description,
               p.price::text,
-              NULL::text AS image_url,
+              p.image_url,
               p.available,
               p.sku,
               p.product_type,
@@ -157,6 +177,16 @@ export async function GET(request: Request) {
     settings: {
       prepTimeMinutes: Number(tenant.prep_time_minutes || 40),
       deliveryFeeBase: Number(tenant.delivery_fee_base || 0),
+      deliveryFeeMode: String(tenant.delivery_fee_mode || '').trim().toLowerCase() === 'per_km' ? 'per_km' : 'fixed',
+      deliveryFeePerKm: Number(tenant.delivery_fee_per_km || 0),
+      deliveryOriginUseIssuer: Boolean(tenant.delivery_origin_use_issuer),
+      deliveryOriginZipCode: tenant.delivery_origin_zip_code || '',
+      deliveryOriginStreet: tenant.delivery_origin_street || '',
+      deliveryOriginNumber: tenant.delivery_origin_number || '',
+      deliveryOriginComplement: tenant.delivery_origin_complement || '',
+      deliveryOriginNeighborhood: tenant.delivery_origin_neighborhood || '',
+      deliveryOriginCity: tenant.delivery_origin_city || '',
+      deliveryOriginState: tenant.delivery_origin_state || '',
       storeOpen: Boolean(tenant.store_open),
       coverImageUrl: tenant.menu_cover_image_url || '',
       whatsappPhone: tenant.whatsapp_phone || '',

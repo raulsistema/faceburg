@@ -1,5 +1,7 @@
 import { NextResponse } from 'next/server';
 import { query } from '@/lib/db';
+import { normalizeDeliveryFeeMode, normalizeDeliveryOriginUseIssuer } from '@/lib/delivery-fee';
+import { parseMoneyInput } from '@/lib/finance-utils';
 import { getValidatedTenantSession } from '@/lib/tenant-auth';
 
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
@@ -7,6 +9,8 @@ const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
 type TenantSettingsRow = {
   prep_time_minutes: number;
   delivery_fee_base: string;
+  delivery_fee_mode: string;
+  delivery_fee_per_km: string;
   store_open: boolean;
   logo_url: string | null;
   menu_cover_image_url: string | null;
@@ -24,11 +28,53 @@ type TenantSettingsRow = {
   issuer_neighborhood: string | null;
   issuer_city: string | null;
   issuer_state: string | null;
+  delivery_origin_use_issuer: boolean;
+  delivery_origin_zip_code: string | null;
+  delivery_origin_street: string | null;
+  delivery_origin_number: string | null;
+  delivery_origin_complement: string | null;
+  delivery_origin_neighborhood: string | null;
+  delivery_origin_city: string | null;
+  delivery_origin_state: string | null;
+};
+
+type CardapioSettingsResponse = {
+  prepTimeMinutes: number;
+  deliveryFeeBase: number;
+  deliveryFeeMode: 'fixed' | 'per_km';
+  deliveryFeePerKm: number;
+  storeOpen: boolean;
+  logoUrl: string;
+  coverImageUrl: string;
+  whatsappPhone: string;
+  issuerName: string;
+  issuerTradeName: string;
+  issuerDocument: string;
+  issuerStateRegistration: string;
+  issuerEmail: string;
+  issuerPhone: string;
+  issuerZipCode: string;
+  issuerStreet: string;
+  issuerNumber: string;
+  issuerComplement: string;
+  issuerNeighborhood: string;
+  issuerCity: string;
+  issuerState: string;
+  deliveryOriginUseIssuer: boolean;
+  deliveryOriginZipCode: string;
+  deliveryOriginStreet: string;
+  deliveryOriginNumber: string;
+  deliveryOriginComplement: string;
+  deliveryOriginNeighborhood: string;
+  deliveryOriginCity: string;
+  deliveryOriginState: string;
 };
 
 const SETTINGS_SELECT_SQL = `SELECT
   prep_time_minutes,
   delivery_fee_base::text,
+  delivery_fee_mode,
+  delivery_fee_per_km::text,
   store_open,
   logo_url,
   menu_cover_image_url,
@@ -45,7 +91,15 @@ const SETTINGS_SELECT_SQL = `SELECT
   issuer_complement,
   issuer_neighborhood,
   issuer_city,
-  issuer_state
+  issuer_state,
+  delivery_origin_use_issuer,
+  delivery_origin_zip_code,
+  delivery_origin_street,
+  delivery_origin_number,
+  delivery_origin_complement,
+  delivery_origin_neighborhood,
+  delivery_origin_city,
+  delivery_origin_state
  FROM tenants
  WHERE id = $1
  LIMIT 1`;
@@ -71,22 +125,12 @@ function validateImagePayload(imageUrl: string) {
   return null;
 }
 
-export async function GET() {
-  const session = await getValidatedTenantSession();
-  if (!session) {
-    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-  }
-
-  const result = await query<TenantSettingsRow>(SETTINGS_SELECT_SQL, [session.tenantId]);
-
-  if (!result.rowCount) {
-    return NextResponse.json({ error: 'Tenant not found' }, { status: 404 });
-  }
-
-  const row = result.rows[0];
-  return NextResponse.json({
+function serializeTenantSettings(row: TenantSettingsRow): CardapioSettingsResponse {
+  return {
     prepTimeMinutes: Number(row.prep_time_minutes || 40),
     deliveryFeeBase: Number(row.delivery_fee_base || 5),
+    deliveryFeeMode: normalizeDeliveryFeeMode(row.delivery_fee_mode),
+    deliveryFeePerKm: Number(row.delivery_fee_per_km || 0),
     storeOpen: Boolean(row.store_open),
     logoUrl: row.logo_url || '',
     coverImageUrl: row.menu_cover_image_url || '',
@@ -104,7 +148,31 @@ export async function GET() {
     issuerNeighborhood: row.issuer_neighborhood || '',
     issuerCity: row.issuer_city || '',
     issuerState: row.issuer_state || '',
-  });
+    deliveryOriginUseIssuer: Boolean(row.delivery_origin_use_issuer),
+    deliveryOriginZipCode: row.delivery_origin_zip_code || '',
+    deliveryOriginStreet: row.delivery_origin_street || '',
+    deliveryOriginNumber: row.delivery_origin_number || '',
+    deliveryOriginComplement: row.delivery_origin_complement || '',
+    deliveryOriginNeighborhood: row.delivery_origin_neighborhood || '',
+    deliveryOriginCity: row.delivery_origin_city || '',
+    deliveryOriginState: row.delivery_origin_state || '',
+  };
+}
+
+export async function GET() {
+  const session = await getValidatedTenantSession();
+  if (!session) {
+    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+  }
+
+  const result = await query<TenantSettingsRow>(SETTINGS_SELECT_SQL, [session.tenantId]);
+
+  if (!result.rowCount) {
+    return NextResponse.json({ error: 'Tenant not found' }, { status: 404 });
+  }
+
+  const row = result.rows[0];
+  return NextResponse.json(serializeTenantSettings(row));
 }
 
 export async function PATCH(request: Request) {
@@ -130,8 +198,14 @@ export async function PATCH(request: Request) {
     ? Number(body.prepTimeMinutes)
     : Number(current.prep_time_minutes || 40);
   const deliveryFeeBase = hasOwn(body, 'deliveryFeeBase')
-    ? Number(body.deliveryFeeBase)
+    ? parseMoneyInput(body.deliveryFeeBase)
     : Number(current.delivery_fee_base || 0);
+  const deliveryFeeMode = hasOwn(body, 'deliveryFeeMode')
+    ? normalizeDeliveryFeeMode(body.deliveryFeeMode)
+    : normalizeDeliveryFeeMode(current.delivery_fee_mode);
+  const deliveryFeePerKm = hasOwn(body, 'deliveryFeePerKm')
+    ? parseMoneyInput(body.deliveryFeePerKm)
+    : Number(current.delivery_fee_per_km || 0);
   const storeOpen = hasOwn(body, 'storeOpen')
     ? Boolean(body.storeOpen)
     : Boolean(current.store_open);
@@ -184,12 +258,50 @@ export async function PATCH(request: Request) {
     ? String(body.issuerState ?? '').trim()
     : String(current.issuer_state || '').trim()
   ).toUpperCase();
+  const deliveryOriginUseIssuer = hasOwn(body, 'deliveryOriginUseIssuer')
+    ? normalizeDeliveryOriginUseIssuer(body.deliveryOriginUseIssuer)
+    : Boolean(current.delivery_origin_use_issuer);
+  const deliveryOriginZipCode = hasOwn(body, 'deliveryOriginZipCode')
+    ? String(body.deliveryOriginZipCode ?? '').trim()
+    : String(current.delivery_origin_zip_code || '').trim();
+  const deliveryOriginStreet = hasOwn(body, 'deliveryOriginStreet')
+    ? String(body.deliveryOriginStreet ?? '').trim()
+    : String(current.delivery_origin_street || '').trim();
+  const deliveryOriginNumber = hasOwn(body, 'deliveryOriginNumber')
+    ? String(body.deliveryOriginNumber ?? '').trim()
+    : String(current.delivery_origin_number || '').trim();
+  const deliveryOriginComplement = hasOwn(body, 'deliveryOriginComplement')
+    ? String(body.deliveryOriginComplement ?? '').trim()
+    : String(current.delivery_origin_complement || '').trim();
+  const deliveryOriginNeighborhood = hasOwn(body, 'deliveryOriginNeighborhood')
+    ? String(body.deliveryOriginNeighborhood ?? '').trim()
+    : String(current.delivery_origin_neighborhood || '').trim();
+  const deliveryOriginCity = hasOwn(body, 'deliveryOriginCity')
+    ? String(body.deliveryOriginCity ?? '').trim()
+    : String(current.delivery_origin_city || '').trim();
+  const deliveryOriginState = (hasOwn(body, 'deliveryOriginState')
+    ? String(body.deliveryOriginState ?? '').trim()
+    : String(current.delivery_origin_state || '').trim()
+  ).toUpperCase();
 
   if (!Number.isFinite(prepTimeMinutes) || prepTimeMinutes < 5 || prepTimeMinutes > 180) {
     return NextResponse.json({ error: 'Tempo de preparo deve ficar entre 5 e 180 minutos.' }, { status: 400 });
   }
   if (!Number.isFinite(deliveryFeeBase) || deliveryFeeBase < 0) {
     return NextResponse.json({ error: 'Taxa de entrega invalida.' }, { status: 400 });
+  }
+  if (!Number.isFinite(deliveryFeePerKm) || deliveryFeePerKm < 0) {
+    return NextResponse.json({ error: 'Valor por km invalido.' }, { status: 400 });
+  }
+  if (
+    deliveryFeeMode === 'per_km' &&
+    !deliveryOriginUseIssuer &&
+    (!deliveryOriginStreet || !deliveryOriginCity || deliveryOriginState.length !== 2)
+  ) {
+    return NextResponse.json(
+      { error: 'Informe rua, cidade e UF para o endereco base da entrega.' },
+      { status: 400 },
+    );
   }
   const logoImageValidationError = validateImagePayload(logoUrl);
   if (logoImageValidationError) {
@@ -204,27 +316,39 @@ export async function PATCH(request: Request) {
     `UPDATE tenants
      SET prep_time_minutes = $1,
          delivery_fee_base = $2,
-         store_open = $3,
-         logo_url = NULLIF($4, ''),
-         menu_cover_image_url = NULLIF($5, ''),
-         whatsapp_phone = NULLIF($6, ''),
-         issuer_name = NULLIF($7, ''),
-         issuer_trade_name = NULLIF($8, ''),
-         issuer_document = NULLIF($9, ''),
-         issuer_state_registration = NULLIF($10, ''),
-         issuer_email = NULLIF($11, ''),
-         issuer_phone = NULLIF($12, ''),
-         issuer_zip_code = NULLIF($13, ''),
-         issuer_street = NULLIF($14, ''),
-         issuer_number = NULLIF($15, ''),
-         issuer_complement = NULLIF($16, ''),
-         issuer_neighborhood = NULLIF($17, ''),
-         issuer_city = NULLIF($18, ''),
-         issuer_state = NULLIF($19, '')
-     WHERE id = $20`,
+         delivery_fee_mode = $3,
+         delivery_fee_per_km = $4,
+         store_open = $5,
+         logo_url = NULLIF($6, ''),
+         menu_cover_image_url = NULLIF($7, ''),
+         whatsapp_phone = NULLIF($8, ''),
+         issuer_name = NULLIF($9, ''),
+         issuer_trade_name = NULLIF($10, ''),
+         issuer_document = NULLIF($11, ''),
+         issuer_state_registration = NULLIF($12, ''),
+         issuer_email = NULLIF($13, ''),
+         issuer_phone = NULLIF($14, ''),
+         issuer_zip_code = NULLIF($15, ''),
+         issuer_street = NULLIF($16, ''),
+         issuer_number = NULLIF($17, ''),
+         issuer_complement = NULLIF($18, ''),
+         issuer_neighborhood = NULLIF($19, ''),
+         issuer_city = NULLIF($20, ''),
+         issuer_state = NULLIF($21, ''),
+         delivery_origin_use_issuer = $22,
+         delivery_origin_zip_code = NULLIF($23, ''),
+         delivery_origin_street = NULLIF($24, ''),
+         delivery_origin_number = NULLIF($25, ''),
+         delivery_origin_complement = NULLIF($26, ''),
+         delivery_origin_neighborhood = NULLIF($27, ''),
+         delivery_origin_city = NULLIF($28, ''),
+         delivery_origin_state = NULLIF($29, '')
+     WHERE id = $30`,
     [
       Math.round(prepTimeMinutes),
       deliveryFeeBase,
+      deliveryFeeMode,
+      deliveryFeePerKm,
       storeOpen,
       logoUrl,
       coverImageUrl,
@@ -242,9 +366,48 @@ export async function PATCH(request: Request) {
       issuerNeighborhood,
       issuerCity,
       issuerState,
+      deliveryOriginUseIssuer,
+      deliveryOriginZipCode,
+      deliveryOriginStreet,
+      deliveryOriginNumber,
+      deliveryOriginComplement,
+      deliveryOriginNeighborhood,
+      deliveryOriginCity,
+      deliveryOriginState,
       session.tenantId,
     ],
   );
 
-  return NextResponse.json({ ok: true });
+  return NextResponse.json({
+    ok: true,
+    prepTimeMinutes: Math.round(prepTimeMinutes),
+    deliveryFeeBase,
+    deliveryFeeMode,
+    deliveryFeePerKm,
+    storeOpen,
+    logoUrl,
+    coverImageUrl,
+    whatsappPhone,
+    issuerName,
+    issuerTradeName,
+    issuerDocument,
+    issuerStateRegistration,
+    issuerEmail,
+    issuerPhone,
+    issuerZipCode,
+    issuerStreet,
+    issuerNumber,
+    issuerComplement,
+    issuerNeighborhood,
+    issuerCity,
+    issuerState,
+    deliveryOriginUseIssuer,
+    deliveryOriginZipCode,
+    deliveryOriginStreet,
+    deliveryOriginNumber,
+    deliveryOriginComplement,
+    deliveryOriginNeighborhood,
+    deliveryOriginCity,
+    deliveryOriginState,
+  });
 }

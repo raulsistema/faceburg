@@ -162,15 +162,29 @@ function scheduleListenerReconnect() {
   if (listenerReconnectTimer) return;
   listenerReconnectTimer = setTimeout(() => {
     listenerReconnectTimer = null;
-    void startDbListener();
+    void startDbListener().catch((error) => {
+      const message = error instanceof Error ? error.message : String(error || 'erro desconhecido');
+      console.error(`[realtime-gateway] Falha ao reconectar LISTEN: ${message}`);
+      scheduleListenerReconnect();
+    });
   }, 3000);
 }
 
 async function startDbListener() {
   if (listenerClient) return listenerClient;
   const client = await pool.connect();
-  listenerClient = client;
-  await client.query(`LISTEN ${CHANNEL_NAME}`);
+  try {
+    await client.query(`LISTEN ${CHANNEL_NAME}`);
+    listenerClient = client;
+    console.log(`[realtime-gateway] LISTEN conectado: ${CHANNEL_NAME}`);
+  } catch (error) {
+    try {
+      client.release();
+    } catch {
+      // ignore
+    }
+    throw error;
+  }
 
   client.on('notification', (message) => {
     if (!message.payload) return;

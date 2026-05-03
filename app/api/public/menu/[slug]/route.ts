@@ -14,6 +14,8 @@ type TenantRow = {
   whatsapp_phone: string | null;
   prep_time_minutes: number;
   delivery_fee_base: string;
+  delivery_fee_mode: string;
+  delivery_fee_per_km: string;
   store_open: boolean;
   primary_color: string;
   status: string;
@@ -35,26 +37,7 @@ type ProductRow = {
   image_url: string | null;
   product_type: string;
   product_meta: Record<string, unknown>;
-};
-
-type OptionGroupRow = {
-  id: string;
-  product_id: string;
-  name: string;
-  min_select: number;
-  max_select: number;
-  required: boolean;
-  display_order: number;
-};
-
-type OptionRow = {
-  id: string;
-  group_id: string;
-  name: string;
-  image_url: string | null;
-  price_addition: string;
-  active: boolean;
-  display_order: number;
+  option_group_count: number;
 };
 
 type MenuStoryRow = {
@@ -66,141 +49,121 @@ type MenuStoryRow = {
   expires_at: string | null;
 };
 
+const PUBLIC_MENU_CACHE_HEADERS = {
+  'Cache-Control': 'public, max-age=15, stale-while-revalidate=60',
+};
+
+function publicTenantImageUrl(slug: string, kind: 'logo' | 'cover', value: string | null) {
+  if (!value) return null;
+  return `/api/public/tenant-image/${encodeURIComponent(slug)}/${kind}`;
+}
+
 export async function GET(_: Request, { params }: { params: Promise<{ slug: string }> }) {
-  const { slug } = await params;
+  try {
+    const { slug } = await params;
 
-  const tenantResult = await query<TenantRow>(
-    `SELECT id, name, slug, logo_url, menu_cover_image_url, issuer_street, issuer_number, issuer_city, issuer_state, whatsapp_phone, prep_time_minutes, delivery_fee_base::text, store_open, primary_color, status
-     FROM tenants
-     WHERE slug = $1
-     LIMIT 1`,
-    [slug],
-  );
+    const tenantResult = await query<TenantRow>(
+      `SELECT id, name, slug, logo_url, menu_cover_image_url, issuer_street, issuer_number, issuer_city, issuer_state, whatsapp_phone, prep_time_minutes, delivery_fee_base::text, delivery_fee_mode, delivery_fee_per_km::text, store_open, primary_color, status
+       FROM tenants
+       WHERE slug = $1
+       LIMIT 1`,
+      [slug],
+    );
 
-  if (!tenantResult.rowCount) {
-    return NextResponse.json({ error: 'Tenant not found' }, { status: 404 });
+    if (!tenantResult.rowCount) {
+      return NextResponse.json({ error: 'Tenant not found' }, { status: 404 });
+    }
+
+    const tenant = tenantResult.rows[0];
+    if (tenant.status !== 'active') {
+      return NextResponse.json({ error: 'Tenant inactive' }, { status: 403 });
+    }
+
+    const [categoriesResult, productsResult, storiesResult] = await Promise.all([
+      query<CategoryRow>(
+        `SELECT id, name, icon, display_order
+         FROM categories
+         WHERE tenant_id = $1 AND active = TRUE
+         ORDER BY display_order ASC, name ASC`,
+        [tenant.id],
+      ),
+      query<ProductRow>(
+        `SELECT p.id,
+                p.category_id,
+                p.name,
+                p.description,
+                p.price::text,
+                p.image_url,
+                p.product_type,
+                p.product_meta,
+                COALESCE(option_counts.option_group_count, 0)::int AS option_group_count
+         FROM products p
+         LEFT JOIN (
+           SELECT product_id,
+                  COUNT(*)::int AS option_group_count
+           FROM product_option_groups pog
+           WHERE pog.tenant_id = $1
+           GROUP BY product_id
+         ) option_counts ON TRUE
+           AND option_counts.product_id = p.id
+         WHERE p.tenant_id = $1
+           AND p.available = TRUE
+           AND p.status = 'published'
+           AND p.product_type <> 'ingredient'
+         ORDER BY p.display_order ASC, p.name ASC`,
+        [tenant.id],
+      ),
+      query<MenuStoryRow>(
+        `SELECT id,
+                title,
+                subtitle,
+                image_url,
+                display_order,
+                expires_at
+           FROM menu_stories
+          WHERE tenant_id = $1
+            AND active = TRUE
+            AND (expires_at IS NULL OR expires_at > NOW())
+          ORDER BY display_order ASC, created_at ASC`,
+        [tenant.id],
+      ),
+    ]);
+
+    return NextResponse.json({
+      tenant: {
+        name: tenant.name,
+        slug: tenant.slug,
+        logoUrl: publicTenantImageUrl(tenant.slug, 'logo', tenant.logo_url),
+        coverImageUrl: publicTenantImageUrl(tenant.slug, 'cover', tenant.menu_cover_image_url),
+        issuerStreet: tenant.issuer_street,
+        issuerNumber: tenant.issuer_number,
+        issuerCity: tenant.issuer_city,
+        issuerState: tenant.issuer_state,
+        whatsappPhone: tenant.whatsapp_phone,
+        prepTimeMinutes: Number(tenant.prep_time_minutes || 40),
+        deliveryFeeBase: Number(tenant.delivery_fee_base || 5),
+        deliveryFeeMode: String(tenant.delivery_fee_mode || '').trim().toLowerCase() === 'per_km' ? 'per_km' : 'fixed',
+        deliveryFeePerKm: Number(tenant.delivery_fee_per_km || 0),
+        storeOpen: Boolean(tenant.store_open),
+        primaryColor: tenant.primary_color,
+      },
+      stories: storiesResult.rows.map((story) => ({
+        id: story.id,
+        title: story.title,
+        subtitle: story.subtitle || '',
+        imageUrl: story.image_url,
+        displayOrder: Number(story.display_order || 0),
+        expiresAt: story.expires_at,
+      })),
+      categories: categoriesResult.rows,
+      products: productsResult.rows.map(({ option_group_count: optionGroupCount, ...product }) => ({
+        ...product,
+        optionGroupCount,
+        optionGroups: [],
+      })),
+    }, { headers: PUBLIC_MENU_CACHE_HEADERS });
+  } catch (error) {
+    console.error('[public-menu] failed to load menu', error);
+    return NextResponse.json({ error: 'Falha ao carregar cardapio.' }, { status: 500 });
   }
-
-  const tenant = tenantResult.rows[0];
-  if (tenant.status !== 'active') {
-    return NextResponse.json({ error: 'Tenant inactive' }, { status: 403 });
-  }
-
-  const categoriesResult = await query<CategoryRow>(
-    `SELECT id, name, icon, display_order
-     FROM categories
-     WHERE tenant_id = $1 AND active = TRUE
-     ORDER BY display_order ASC, name ASC`,
-    [tenant.id],
-  );
-
-  const productsResult = await query<ProductRow>(
-    `SELECT id, category_id, name, description, price::text, image_url, product_type, product_meta
-     FROM products
-     WHERE tenant_id = $1
-       AND available = TRUE
-       AND status = 'published'
-       AND product_type <> 'ingredient'
-     ORDER BY display_order ASC, name ASC`,
-    [tenant.id],
-  );
-
-  const optionGroupsResult = await query<OptionGroupRow>(
-    `SELECT id, product_id, name, min_select, max_select, required, display_order
-     FROM product_option_groups
-     WHERE tenant_id = $1
-     ORDER BY display_order ASC, name ASC`,
-    [tenant.id],
-  );
-
-  const optionsResult = await query<OptionRow>(
-    `SELECT id, group_id, name, image_url, price_addition::text, active, display_order
-     FROM product_options
-     WHERE tenant_id = $1 AND active = TRUE
-     ORDER BY display_order ASC, name ASC`,
-    [tenant.id],
-  );
-
-  const storiesResult = await query<MenuStoryRow>(
-    `SELECT id,
-            title,
-            subtitle,
-            image_url,
-            display_order,
-            expires_at
-       FROM menu_stories
-      WHERE tenant_id = $1
-        AND active = TRUE
-        AND (expires_at IS NULL OR expires_at > NOW())
-      ORDER BY display_order ASC, created_at ASC`,
-    [tenant.id],
-  );
-
-  const optionsByGroup = new Map<string, Array<{ id: string; name: string; imageUrl: string | null; priceAddition: number }>>();
-  for (const option of optionsResult.rows) {
-    const current = optionsByGroup.get(option.group_id) || [];
-    current.push({
-      id: option.id,
-      name: option.name,
-      imageUrl: option.image_url,
-      priceAddition: Number(option.price_addition),
-    });
-    optionsByGroup.set(option.group_id, current);
-  }
-
-  const groupsByProduct = new Map<
-    string,
-    Array<{
-      id: string;
-      name: string;
-      minSelect: number;
-      maxSelect: number;
-      required: boolean;
-      options: Array<{ id: string; name: string; imageUrl: string | null; priceAddition: number }>;
-    }>
-  >();
-
-  for (const group of optionGroupsResult.rows) {
-    const current = groupsByProduct.get(group.product_id) || [];
-    current.push({
-      id: group.id,
-      name: group.name,
-      minSelect: group.min_select,
-      maxSelect: group.max_select,
-      required: group.required,
-      options: optionsByGroup.get(group.id) || [],
-    });
-    groupsByProduct.set(group.product_id, current);
-  }
-
-  return NextResponse.json({
-    tenant: {
-      name: tenant.name,
-      slug: tenant.slug,
-      logoUrl: tenant.logo_url,
-      coverImageUrl: tenant.menu_cover_image_url,
-      issuerStreet: tenant.issuer_street,
-      issuerNumber: tenant.issuer_number,
-      issuerCity: tenant.issuer_city,
-      issuerState: tenant.issuer_state,
-      whatsappPhone: tenant.whatsapp_phone,
-      prepTimeMinutes: Number(tenant.prep_time_minutes || 40),
-      deliveryFeeBase: Number(tenant.delivery_fee_base || 5),
-      storeOpen: Boolean(tenant.store_open),
-      primaryColor: tenant.primary_color,
-    },
-    stories: storiesResult.rows.map((story) => ({
-      id: story.id,
-      title: story.title,
-      subtitle: story.subtitle || '',
-      imageUrl: story.image_url,
-      displayOrder: Number(story.display_order || 0),
-      expiresAt: story.expires_at,
-    })),
-    categories: categoriesResult.rows,
-    products: productsResult.rows.map((product) => ({
-      ...product,
-      optionGroups: groupsByProduct.get(product.id) || [],
-    })),
-  });
 }
