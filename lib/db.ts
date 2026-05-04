@@ -74,6 +74,7 @@ async function initializeDb() {
           delivery_fee_base NUMERIC(10,2) NOT NULL DEFAULT 5,
           delivery_fee_mode TEXT NOT NULL DEFAULT 'fixed',
           delivery_fee_per_km NUMERIC(10,2) NOT NULL DEFAULT 0,
+          delivery_fee_table JSONB NOT NULL DEFAULT '[]'::jsonb,
           store_open BOOLEAN NOT NULL DEFAULT TRUE,
           primary_color TEXT DEFAULT '#3b82f6',
           plan TEXT NOT NULL DEFAULT 'starter',
@@ -266,7 +267,7 @@ async function initializeDb() {
           printer_name TEXT,
           receipt_width INTEGER NOT NULL DEFAULT 32,
           print_copies INTEGER NOT NULL DEFAULT 1,
-          print_events JSONB NOT NULL DEFAULT '{"new_order": true, "status_processing": true, "status_delivering": false, "status_completed": false, "status_cancelled": true, "manual_receipt": true}'::jsonb,
+          print_events JSONB NOT NULL DEFAULT '{"new_order": true, "status_processing": true, "status_delivering": false, "status_completed": false, "status_cancelled": false, "manual_receipt": true}'::jsonb,
           receipt_options JSONB NOT NULL DEFAULT '{"showStoreInfo": true, "showCustomerPhone": true, "showDeliveryAddress": true, "showPayment": true, "showItemNotes": true, "showTotals": true}'::jsonb,
           receipt_header TEXT,
           receipt_footer TEXT,
@@ -546,6 +547,13 @@ async function initializeDb() {
             WHERE table_name = 'tenants' AND column_name = 'delivery_fee_per_km'
           ) THEN
             ALTER TABLE tenants ADD COLUMN delivery_fee_per_km NUMERIC(10,2) NOT NULL DEFAULT 0;
+          END IF;
+
+          IF NOT EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_name = 'tenants' AND column_name = 'delivery_fee_table'
+          ) THEN
+            ALTER TABLE tenants ADD COLUMN delivery_fee_table JSONB NOT NULL DEFAULT '[]'::jsonb;
           END IF;
 
           IF NOT EXISTS (
@@ -908,7 +916,7 @@ async function initializeDb() {
             SELECT 1 FROM information_schema.columns
             WHERE table_name = 'printer_agents' AND column_name = 'print_events'
           ) THEN
-            ALTER TABLE printer_agents ADD COLUMN print_events JSONB NOT NULL DEFAULT '{"new_order": true, "status_processing": true, "status_delivering": false, "status_completed": false, "status_cancelled": true, "manual_receipt": true}'::jsonb;
+            ALTER TABLE printer_agents ADD COLUMN print_events JSONB NOT NULL DEFAULT '{"new_order": true, "status_processing": true, "status_delivering": false, "status_completed": false, "status_cancelled": false, "manual_receipt": true}'::jsonb;
           END IF;
 
           IF NOT EXISTS (

@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { query } from '@/lib/db';
+import { normalizeDeliveryFeeMode, normalizeDeliveryFeeTable } from '@/lib/delivery-fee';
 
 type TenantRow = {
   id: string;
@@ -16,6 +17,7 @@ type TenantRow = {
   delivery_fee_base: string;
   delivery_fee_mode: string;
   delivery_fee_per_km: string;
+  delivery_fee_table: unknown;
   store_open: boolean;
   primary_color: string;
   status: string;
@@ -63,7 +65,7 @@ export async function GET(_: Request, { params }: { params: Promise<{ slug: stri
     const { slug } = await params;
 
     const tenantResult = await query<TenantRow>(
-      `SELECT id, name, slug, logo_url, menu_cover_image_url, issuer_street, issuer_number, issuer_city, issuer_state, whatsapp_phone, prep_time_minutes, delivery_fee_base::text, delivery_fee_mode, delivery_fee_per_km::text, store_open, primary_color, status
+      `SELECT id, name, slug, logo_url, menu_cover_image_url, issuer_street, issuer_number, issuer_city, issuer_state, whatsapp_phone, prep_time_minutes, delivery_fee_base::text, delivery_fee_mode, delivery_fee_per_km::text, delivery_fee_table, store_open, primary_color, status
        FROM tenants
        WHERE slug = $1
        LIMIT 1`,
@@ -142,8 +144,9 @@ export async function GET(_: Request, { params }: { params: Promise<{ slug: stri
         whatsappPhone: tenant.whatsapp_phone,
         prepTimeMinutes: Number(tenant.prep_time_minutes || 40),
         deliveryFeeBase: Number(tenant.delivery_fee_base || 5),
-        deliveryFeeMode: String(tenant.delivery_fee_mode || '').trim().toLowerCase() === 'per_km' ? 'per_km' : 'fixed',
+        deliveryFeeMode: normalizeDeliveryFeeMode(tenant.delivery_fee_mode),
         deliveryFeePerKm: Number(tenant.delivery_fee_per_km || 0),
+        deliveryFeeTable: normalizeDeliveryFeeTable(tenant.delivery_fee_table),
         storeOpen: Boolean(tenant.store_open),
         primaryColor: tenant.primary_color,
       },

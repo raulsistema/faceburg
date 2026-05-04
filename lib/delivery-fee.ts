@@ -1,4 +1,9 @@
-type DeliveryFeeMode = 'fixed' | 'per_km';
+type DeliveryFeeMode = 'fixed' | 'per_km' | 'distance_table';
+
+export type DeliveryFeeTier = {
+  upToMeters: number;
+  fee: number;
+};
 
 export type TenantDeliveryFeeConfig = {
   slug?: string | null;
@@ -19,6 +24,7 @@ export type TenantDeliveryFeeConfig = {
   deliveryFeeBase?: number | string | null;
   deliveryFeeMode?: string | null;
   deliveryFeePerKm?: number | string | null;
+  deliveryFeeTable?: unknown;
 };
 
 export type DeliveryAddressInput = {
@@ -37,6 +43,8 @@ export type DeliveryFeeQuote = {
   distanceKm: number | null;
   deliveryFeeMode: DeliveryFeeMode;
   deliveryFeePerKm: number;
+  distanceMeters: number | null;
+  matchedTier: DeliveryFeeTier | null;
   usedFallback: boolean;
 };
 
@@ -88,6 +96,26 @@ const DEFAULT_OSRM_ROUTE_URL = 'https://router.project-osrm.org';
 const GEOCODE_TIMEOUT_MS = 5_000;
 const ROUTE_TIMEOUT_MS = 6_500;
 
+export const DEFAULT_DELIVERY_FEE_TABLE: DeliveryFeeTier[] = [
+  { upToMeters: 1500, fee: 3 },
+  { upToMeters: 2000, fee: 4.5 },
+  { upToMeters: 3000, fee: 4.5 },
+  { upToMeters: 4000, fee: 6 },
+  { upToMeters: 5000, fee: 7.5 },
+  { upToMeters: 6000, fee: 9 },
+  { upToMeters: 7000, fee: 10.5 },
+  { upToMeters: 8000, fee: 12 },
+  { upToMeters: 9000, fee: 13.5 },
+  { upToMeters: 10000, fee: 15 },
+  { upToMeters: 11000, fee: 16.5 },
+  { upToMeters: 12000, fee: 18 },
+  { upToMeters: 13000, fee: 19.5 },
+  { upToMeters: 14000, fee: 21 },
+  { upToMeters: 15000, fee: 22.5 },
+  { upToMeters: 16000, fee: 24 },
+  { upToMeters: 17000, fee: 25.5 },
+];
+
 function text(value: unknown) {
   return String(value ?? '').trim();
 }
@@ -103,7 +131,46 @@ function toMoney(value: unknown) {
 }
 
 export function normalizeDeliveryFeeMode(value: unknown): DeliveryFeeMode {
-  return String(value || '').trim().toLowerCase() === 'per_km' ? 'per_km' : 'fixed';
+  const normalized = String(value || '').trim().toLowerCase();
+  if (normalized === 'per_km') return 'per_km';
+  if (normalized === 'distance_table') return 'distance_table';
+  return 'fixed';
+}
+
+export function normalizeDeliveryFeeTable(value: unknown): DeliveryFeeTier[] {
+  const parsed = typeof value === 'string'
+    ? (() => {
+        try {
+          return JSON.parse(value) as unknown;
+        } catch {
+          return [];
+        }
+      })()
+    : value;
+
+  if (!Array.isArray(parsed)) return [];
+
+  const tiersByMeters = new Map<number, number>();
+  for (const item of parsed) {
+    if (!item || typeof item !== 'object') continue;
+    const record = item as Record<string, unknown>;
+    const upToMeters = Math.round(Number(record.upToMeters ?? record.up_to_meters ?? record.meters ?? 0));
+    const fee = toMoney(record.fee ?? record.price ?? record.value ?? 0);
+    if (upToMeters <= 0 || fee < 0) continue;
+    tiersByMeters.set(upToMeters, fee);
+  }
+
+  return Array.from(tiersByMeters.entries())
+    .map(([upToMeters, fee]) => ({ upToMeters, fee }))
+    .sort((a, b) => a.upToMeters - b.upToMeters)
+    .slice(0, 40);
+}
+
+export function findDeliveryFeeTier(distanceMeters: number, table: DeliveryFeeTier[]) {
+  const normalizedDistance = Math.max(1, Math.ceil(distanceMeters));
+  const normalizedTable = normalizeDeliveryFeeTable(table);
+  if (!normalizedTable.length) return null;
+  return normalizedTable.find((tier) => normalizedDistance <= tier.upToMeters) ?? normalizedTable[normalizedTable.length - 1];
 }
 
 export function normalizeDeliveryOriginUseIssuer(value: unknown) {
@@ -341,11 +408,29 @@ export async function quoteDeliveryFee(
   const deliveryFeePerKm = toMoney(config.deliveryFeePerKm);
 
   if (deliveryFeeMode !== 'per_km' || deliveryFeePerKm <= 0) {
+    const deliveryFeeTable = normalizeDeliveryFeeTable(config.deliveryFeeTable);
+    if (deliveryFeeMode !== 'distance_table' || !deliveryFeeTable.length) {
+      return {
+        deliveryFeeAmount: deliveryFeeBase,
+        distanceKm: null,
+        distanceMeters: null,
+        deliveryFeeMode,
+        deliveryFeePerKm,
+        matchedTier: null,
+        usedFallback: false,
+      };
+    }
+  }
+
+  const deliveryFeeTable = normalizeDeliveryFeeTable(config.deliveryFeeTable);
+  if (deliveryFeeMode === 'distance_table' && !deliveryFeeTable.length) {
     return {
       deliveryFeeAmount: deliveryFeeBase,
       distanceKm: null,
+      distanceMeters: null,
       deliveryFeeMode,
       deliveryFeePerKm,
+      matchedTier: null,
       usedFallback: false,
     };
   }
@@ -355,8 +440,10 @@ export async function quoteDeliveryFee(
     return {
       deliveryFeeAmount: deliveryFeeBase,
       distanceKm: null,
+      distanceMeters: null,
       deliveryFeeMode,
       deliveryFeePerKm,
+      matchedTier: null,
       usedFallback: true,
     };
   }
@@ -370,8 +457,10 @@ export async function quoteDeliveryFee(
     return {
       deliveryFeeAmount: deliveryFeeBase,
       distanceKm: null,
+      distanceMeters: null,
       deliveryFeeMode,
       deliveryFeePerKm,
+      matchedTier: null,
       usedFallback: true,
     };
   }
@@ -381,10 +470,28 @@ export async function quoteDeliveryFee(
     return {
       deliveryFeeAmount: deliveryFeeBase,
       distanceKm: null,
+      distanceMeters: null,
       deliveryFeeMode,
       deliveryFeePerKm,
+      matchedTier: null,
       usedFallback: true,
     };
+  }
+
+  const distanceMeters = Math.ceil(distanceKm * 1000);
+  if (deliveryFeeMode === 'distance_table') {
+    const matchedTier = findDeliveryFeeTier(distanceMeters, deliveryFeeTable);
+    if (matchedTier) {
+      return {
+        deliveryFeeAmount: matchedTier.fee,
+        distanceKm,
+        distanceMeters,
+        deliveryFeeMode,
+        deliveryFeePerKm,
+        matchedTier,
+        usedFallback: false,
+      };
+    }
   }
 
   const calculatedFee = roundMoney(distanceKm * deliveryFeePerKm);
@@ -392,8 +499,10 @@ export async function quoteDeliveryFee(
   return {
     deliveryFeeAmount: Math.max(deliveryFeeBase, calculatedFee),
     distanceKm,
+    distanceMeters,
     deliveryFeeMode,
     deliveryFeePerKm,
+    matchedTier: null,
     usedFallback: false,
   };
 }

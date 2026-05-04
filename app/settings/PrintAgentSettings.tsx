@@ -55,9 +55,6 @@ type SaveOptions = {
 const EVENT_OPTIONS: Array<{ key: PrintEventKey; label: string; detail: string }> = [
   { key: 'new_order', label: 'Pedido novo', detail: 'Entrada do site e PDV' },
   { key: 'status_processing', label: 'Em preparo', detail: 'Via da cozinha' },
-  { key: 'status_delivering', label: 'Saiu entrega', detail: 'Controle do entregador' },
-  { key: 'status_completed', label: 'Concluido', detail: 'Comprovante final' },
-  { key: 'status_cancelled', label: 'Cancelado', detail: 'Com motivo' },
   { key: 'manual_receipt', label: 'Recibo manual', detail: 'Botao imprimir' },
 ];
 

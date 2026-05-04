@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { query } from '@/lib/db';
-import { normalizeDeliveryFeeMode, normalizeDeliveryOriginUseIssuer } from '@/lib/delivery-fee';
+import { normalizeDeliveryFeeMode, normalizeDeliveryFeeTable, normalizeDeliveryOriginUseIssuer } from '@/lib/delivery-fee';
 import { parseMoneyInput } from '@/lib/finance-utils';
 import { getValidatedTenantSession } from '@/lib/tenant-auth';
 
@@ -11,6 +11,7 @@ type TenantSettingsRow = {
   delivery_fee_base: string;
   delivery_fee_mode: string;
   delivery_fee_per_km: string;
+  delivery_fee_table: unknown;
   store_open: boolean;
   logo_url: string | null;
   menu_cover_image_url: string | null;
@@ -41,8 +42,9 @@ type TenantSettingsRow = {
 type CardapioSettingsResponse = {
   prepTimeMinutes: number;
   deliveryFeeBase: number;
-  deliveryFeeMode: 'fixed' | 'per_km';
+  deliveryFeeMode: 'fixed' | 'per_km' | 'distance_table';
   deliveryFeePerKm: number;
+  deliveryFeeTable: Array<{ upToMeters: number; fee: number }>;
   storeOpen: boolean;
   logoUrl: string;
   coverImageUrl: string;
@@ -75,6 +77,7 @@ const SETTINGS_SELECT_SQL = `SELECT
   delivery_fee_base::text,
   delivery_fee_mode,
   delivery_fee_per_km::text,
+  delivery_fee_table,
   store_open,
   logo_url,
   menu_cover_image_url,
@@ -131,6 +134,7 @@ function serializeTenantSettings(row: TenantSettingsRow): CardapioSettingsRespon
     deliveryFeeBase: Number(row.delivery_fee_base || 5),
     deliveryFeeMode: normalizeDeliveryFeeMode(row.delivery_fee_mode),
     deliveryFeePerKm: Number(row.delivery_fee_per_km || 0),
+    deliveryFeeTable: normalizeDeliveryFeeTable(row.delivery_fee_table),
     storeOpen: Boolean(row.store_open),
     logoUrl: row.logo_url || '',
     coverImageUrl: row.menu_cover_image_url || '',
@@ -206,6 +210,9 @@ export async function PATCH(request: Request) {
   const deliveryFeePerKm = hasOwn(body, 'deliveryFeePerKm')
     ? parseMoneyInput(body.deliveryFeePerKm)
     : Number(current.delivery_fee_per_km || 0);
+  const deliveryFeeTable = hasOwn(body, 'deliveryFeeTable')
+    ? normalizeDeliveryFeeTable(body.deliveryFeeTable)
+    : normalizeDeliveryFeeTable(current.delivery_fee_table);
   const storeOpen = hasOwn(body, 'storeOpen')
     ? Boolean(body.storeOpen)
     : Boolean(current.store_open);
@@ -293,8 +300,11 @@ export async function PATCH(request: Request) {
   if (!Number.isFinite(deliveryFeePerKm) || deliveryFeePerKm < 0) {
     return NextResponse.json({ error: 'Valor por km invalido.' }, { status: 400 });
   }
+  if (deliveryFeeMode === 'distance_table' && deliveryFeeTable.length === 0) {
+    return NextResponse.json({ error: 'Cadastre pelo menos uma faixa de entrega.' }, { status: 400 });
+  }
   if (
-    deliveryFeeMode === 'per_km' &&
+    deliveryFeeMode !== 'fixed' &&
     !deliveryOriginUseIssuer &&
     (!deliveryOriginStreet || !deliveryOriginCity || deliveryOriginState.length !== 2)
   ) {
@@ -318,37 +328,39 @@ export async function PATCH(request: Request) {
          delivery_fee_base = $2,
          delivery_fee_mode = $3,
          delivery_fee_per_km = $4,
-         store_open = $5,
-         logo_url = NULLIF($6, ''),
-         menu_cover_image_url = NULLIF($7, ''),
-         whatsapp_phone = NULLIF($8, ''),
-         issuer_name = NULLIF($9, ''),
-         issuer_trade_name = NULLIF($10, ''),
-         issuer_document = NULLIF($11, ''),
-         issuer_state_registration = NULLIF($12, ''),
-         issuer_email = NULLIF($13, ''),
-         issuer_phone = NULLIF($14, ''),
-         issuer_zip_code = NULLIF($15, ''),
-         issuer_street = NULLIF($16, ''),
-         issuer_number = NULLIF($17, ''),
-         issuer_complement = NULLIF($18, ''),
-         issuer_neighborhood = NULLIF($19, ''),
-         issuer_city = NULLIF($20, ''),
-         issuer_state = NULLIF($21, ''),
-         delivery_origin_use_issuer = $22,
-         delivery_origin_zip_code = NULLIF($23, ''),
-         delivery_origin_street = NULLIF($24, ''),
-         delivery_origin_number = NULLIF($25, ''),
-         delivery_origin_complement = NULLIF($26, ''),
-         delivery_origin_neighborhood = NULLIF($27, ''),
-         delivery_origin_city = NULLIF($28, ''),
-         delivery_origin_state = NULLIF($29, '')
-     WHERE id = $30`,
+         delivery_fee_table = $5::jsonb,
+         store_open = $6,
+         logo_url = NULLIF($7, ''),
+         menu_cover_image_url = NULLIF($8, ''),
+         whatsapp_phone = NULLIF($9, ''),
+         issuer_name = NULLIF($10, ''),
+         issuer_trade_name = NULLIF($11, ''),
+         issuer_document = NULLIF($12, ''),
+         issuer_state_registration = NULLIF($13, ''),
+         issuer_email = NULLIF($14, ''),
+         issuer_phone = NULLIF($15, ''),
+         issuer_zip_code = NULLIF($16, ''),
+         issuer_street = NULLIF($17, ''),
+         issuer_number = NULLIF($18, ''),
+         issuer_complement = NULLIF($19, ''),
+         issuer_neighborhood = NULLIF($20, ''),
+         issuer_city = NULLIF($21, ''),
+         issuer_state = NULLIF($22, ''),
+         delivery_origin_use_issuer = $23,
+         delivery_origin_zip_code = NULLIF($24, ''),
+         delivery_origin_street = NULLIF($25, ''),
+         delivery_origin_number = NULLIF($26, ''),
+         delivery_origin_complement = NULLIF($27, ''),
+         delivery_origin_neighborhood = NULLIF($28, ''),
+         delivery_origin_city = NULLIF($29, ''),
+         delivery_origin_state = NULLIF($30, '')
+     WHERE id = $31`,
     [
       Math.round(prepTimeMinutes),
       deliveryFeeBase,
       deliveryFeeMode,
       deliveryFeePerKm,
+      JSON.stringify(deliveryFeeTable),
       storeOpen,
       logoUrl,
       coverImageUrl,
@@ -384,6 +396,7 @@ export async function PATCH(request: Request) {
     deliveryFeeBase,
     deliveryFeeMode,
     deliveryFeePerKm,
+    deliveryFeeTable,
     storeOpen,
     logoUrl,
     coverImageUrl,

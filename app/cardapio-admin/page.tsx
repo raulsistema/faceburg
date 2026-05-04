@@ -27,6 +27,26 @@ import { cn } from '@/lib/utils';
 
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
 
+const DEFAULT_DELIVERY_FEE_TABLE: DeliveryFeeTier[] = [
+  { upToMeters: 1500, fee: 3 },
+  { upToMeters: 2000, fee: 4.5 },
+  { upToMeters: 3000, fee: 4.5 },
+  { upToMeters: 4000, fee: 6 },
+  { upToMeters: 5000, fee: 7.5 },
+  { upToMeters: 6000, fee: 9 },
+  { upToMeters: 7000, fee: 10.5 },
+  { upToMeters: 8000, fee: 12 },
+  { upToMeters: 9000, fee: 13.5 },
+  { upToMeters: 10000, fee: 15 },
+  { upToMeters: 11000, fee: 16.5 },
+  { upToMeters: 12000, fee: 18 },
+  { upToMeters: 13000, fee: 19.5 },
+  { upToMeters: 14000, fee: 21 },
+  { upToMeters: 15000, fee: 22.5 },
+  { upToMeters: 16000, fee: 24 },
+  { upToMeters: 17000, fee: 25.5 },
+];
+
 type Category = {
   id: string;
   name: string;
@@ -81,11 +101,17 @@ type LinkData = {
   publishedProducts: number;
 };
 
+type DeliveryFeeTier = {
+  upToMeters: number;
+  fee: number;
+};
+
 type CardapioSettings = {
   prepTimeMinutes: number;
   deliveryFeeBase: number;
-  deliveryFeeMode: 'fixed' | 'per_km';
+  deliveryFeeMode: 'fixed' | 'per_km' | 'distance_table';
   deliveryFeePerKm: number;
+  deliveryFeeTable: DeliveryFeeTier[];
   deliveryOriginUseIssuer: boolean;
   deliveryOriginZipCode: string;
   deliveryOriginStreet: string;
@@ -602,12 +628,43 @@ function syncCategoryProductCounts(categories: Category[], products: Product[]) 
   );
 }
 
+function normalizeDeliveryFeeMode(value: unknown): CardapioSettings['deliveryFeeMode'] {
+  const normalized = String(value || '').trim();
+  if (normalized === 'per_km' || normalized === 'distance_table') return normalized;
+  return 'fixed';
+}
+
+function normalizeDeliveryFeeTable(value: unknown): DeliveryFeeTier[] {
+  if (!Array.isArray(value)) return DEFAULT_DELIVERY_FEE_TABLE;
+  const tiersByMeters = new Map<number, number>();
+  for (const item of value) {
+    if (!item || typeof item !== 'object') continue;
+    const record = item as Record<string, unknown>;
+    const upToMeters = Math.round(Number(record.upToMeters ?? 0));
+    const fee = Number(record.fee ?? 0);
+    if (upToMeters <= 0 || !Number.isFinite(fee) || fee < 0) continue;
+    tiersByMeters.set(upToMeters, Number(fee.toFixed(2)));
+  }
+  const tiers = Array.from(tiersByMeters.entries())
+    .map(([upToMeters, fee]) => ({ upToMeters, fee }))
+    .sort((a, b) => a.upToMeters - b.upToMeters);
+  return tiers.length > 0 ? tiers : DEFAULT_DELIVERY_FEE_TABLE;
+}
+
+function formatDistanceMeters(value: number) {
+  if (value >= 1000) {
+    return `${(value / 1000).toLocaleString('pt-BR', { maximumFractionDigits: 1 })} km`;
+  }
+  return `${value} m`;
+}
+
 function normalizeSettings(settings?: CardapioSettings | null): CardapioSettings {
   return {
     prepTimeMinutes: Number(settings?.prepTimeMinutes ?? 40),
     deliveryFeeBase: Number(settings?.deliveryFeeBase ?? 0),
-    deliveryFeeMode: settings?.deliveryFeeMode === 'per_km' ? 'per_km' : 'fixed',
+    deliveryFeeMode: normalizeDeliveryFeeMode(settings?.deliveryFeeMode),
     deliveryFeePerKm: Number(settings?.deliveryFeePerKm ?? 0),
+    deliveryFeeTable: normalizeDeliveryFeeTable(settings?.deliveryFeeTable),
     deliveryOriginUseIssuer: settings?.deliveryOriginUseIssuer !== false,
     deliveryOriginZipCode: settings?.deliveryOriginZipCode || '',
     deliveryOriginStreet: settings?.deliveryOriginStreet || '',
@@ -657,6 +714,7 @@ export default function CardapioAdminPage() {
     deliveryFeeBase: 5,
     deliveryFeeMode: 'fixed',
     deliveryFeePerKm: 0,
+    deliveryFeeTable: DEFAULT_DELIVERY_FEE_TABLE,
     deliveryOriginUseIssuer: true,
     deliveryOriginZipCode: '',
     deliveryOriginStreet: '',
@@ -1528,6 +1586,56 @@ export default function CardapioAdminPage() {
     setSettings(normalizeSettings(data as CardapioSettings));
 
     setSuccessMessage('Configuracoes do cardapio salvas com sucesso.');
+  }
+
+  function updateDeliveryFeeTier(index: number, patch: Partial<DeliveryFeeTier>) {
+    setSettings((current) => ({
+      ...current,
+      deliveryFeeTable: current.deliveryFeeTable.map((tier, currentIndex) =>
+        currentIndex === index
+          ? {
+              ...tier,
+              ...patch,
+            }
+          : tier,
+      ),
+    }));
+  }
+
+  function addDeliveryFeeTier() {
+    setSettings((current) => {
+      const currentTable = normalizeDeliveryFeeTable(current.deliveryFeeTable);
+      const lastTier = currentTable[currentTable.length - 1] || DEFAULT_DELIVERY_FEE_TABLE[0];
+      return {
+        ...current,
+        deliveryFeeTable: [
+          ...currentTable,
+          {
+            upToMeters: Number(lastTier.upToMeters || 0) + 1000,
+            fee: Number((Number(lastTier.fee || 0) + 1.5).toFixed(2)),
+          },
+        ],
+      };
+    });
+  }
+
+  function removeDeliveryFeeTier(index: number) {
+    setSettings((current) => {
+      const nextTable = current.deliveryFeeTable.filter((_, currentIndex) => currentIndex !== index);
+      return {
+        ...current,
+        deliveryFeeTable: nextTable.length > 0 ? nextTable : DEFAULT_DELIVERY_FEE_TABLE,
+      };
+    });
+  }
+
+  function applyDefaultDeliveryFeeTable() {
+    setSettings((current) => ({
+      ...current,
+      deliveryFeeMode: 'distance_table',
+      deliveryFeeTable: DEFAULT_DELIVERY_FEE_TABLE,
+      deliveryFeeBase: DEFAULT_DELIVERY_FEE_TABLE[0]?.fee ?? current.deliveryFeeBase,
+    }));
   }
 
   async function copyPublicMenuLink() {
@@ -2752,20 +2860,25 @@ export default function CardapioAdminPage() {
                       onChange={(event) =>
                         setSettings((current) => ({
                           ...current,
-                          deliveryFeeMode: event.target.value === 'per_km' ? 'per_km' : 'fixed',
+                          deliveryFeeMode: normalizeDeliveryFeeMode(event.target.value),
                         }))
                       }
                       className="mt-2 w-full rounded-2xl border border-slate-200 px-4 py-3 text-sm outline-none transition focus:border-orange-300 focus:ring-4 focus:ring-orange-100"
                     >
                       <option value="fixed">Taxa fixa</option>
                       <option value="per_km">Por km</option>
+                      <option value="distance_table">Tabela por distancia</option>
                     </select>
                   </div>
                 </div>
                 <div className="grid gap-4 md:grid-cols-2">
                   <div>
                     <label className="text-xs font-medium uppercase tracking-[0.16em] text-slate-500">
-                      {settings.deliveryFeeMode === 'per_km' ? 'Taxa minima de entrega' : 'Taxa fixa de entrega'}
+                      {settings.deliveryFeeMode === 'fixed'
+                        ? 'Taxa fixa de entrega'
+                        : settings.deliveryFeeMode === 'per_km'
+                          ? 'Taxa minima de entrega'
+                          : 'Taxa reserva'}
                     </label>
                     <input
                       type="number"
@@ -2803,10 +2916,119 @@ export default function CardapioAdminPage() {
                     <p className="mt-2 text-xs text-slate-500">
                       {settings.deliveryFeeMode === 'per_km'
                         ? 'O cardapio usa a taxa minima como piso e aplica este valor multiplicado pelo trajeto viario calculado.'
-                        : 'Ative o modo por km para calcular automaticamente a taxa no cardapio publico.'}
+                        : settings.deliveryFeeMode === 'distance_table'
+                          ? 'No modo tabela, este campo fica de reserva para quando o mapa nao conseguir calcular a distancia.'
+                          : 'Ative um modo de distancia para calcular automaticamente a taxa no cardapio publico.'}
                     </p>
                   </div>
                 </div>
+                {settings.deliveryFeeMode === 'distance_table' ? (
+                  <div className="rounded-[24px] border border-orange-200 bg-orange-50/60 p-4">
+                    <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+                      <div>
+                        <label className="text-xs font-medium uppercase tracking-[0.16em] text-orange-700">
+                          Tabela de entrega por distancia
+                        </label>
+                        <p className="mt-2 text-sm text-slate-700">
+                          O cliente informa o endereco, o sistema mede o trajeto e cobra a primeira faixa que cobre a distancia.
+                        </p>
+                        <p className="mt-1 text-xs text-slate-500">
+                          Exemplo: se deu 2,7 km, entra na faixa ate 3 km.
+                        </p>
+                      </div>
+                      <div className="flex flex-wrap gap-2">
+                        <button
+                          type="button"
+                          onClick={applyDefaultDeliveryFeeTable}
+                          className="rounded-2xl border border-orange-200 bg-white px-4 py-2 text-sm font-semibold text-orange-700 transition hover:bg-orange-100"
+                        >
+                          Usar tabela Face-Burg
+                        </button>
+                        <button
+                          type="button"
+                          onClick={addDeliveryFeeTier}
+                          className="inline-flex items-center gap-2 rounded-2xl bg-orange-500 px-4 py-2 text-sm font-semibold text-white transition hover:bg-orange-600"
+                        >
+                          <Plus className="h-4 w-4" />
+                          Adicionar faixa
+                        </button>
+                      </div>
+                    </div>
+
+                    <div className="mt-4 overflow-hidden rounded-2xl border border-orange-100 bg-white">
+                      <div className="grid grid-cols-[1fr_1fr_auto] gap-2 border-b border-orange-100 bg-orange-50 px-3 py-2 text-xs font-semibold uppercase tracking-[0.14em] text-orange-700">
+                        <span>Ate</span>
+                        <span>Taxa</span>
+                        <span className="sr-only">Acoes</span>
+                      </div>
+                      <div className="divide-y divide-slate-100">
+                        {settings.deliveryFeeTable.map((tier, index) => (
+                          <div key={`${tier.upToMeters}-${index}`} className="grid grid-cols-[1fr_1fr_auto] gap-2 p-3">
+                            <div>
+                              <input
+                                type="number"
+                                min="0"
+                                step="1"
+                                value={tier.upToMeters}
+                                onChange={(event) =>
+                                  updateDeliveryFeeTier(index, {
+                                    upToMeters: Math.max(1, Math.round(Number(event.target.value || 0))),
+                                  })
+                                }
+                                className="w-full rounded-xl border border-slate-200 px-3 py-2 text-sm outline-none transition focus:border-orange-300 focus:ring-4 focus:ring-orange-100"
+                              />
+                              <p className="mt-1 text-[11px] font-medium text-slate-500">
+                                {formatDistanceMeters(Number(tier.upToMeters || 0))}
+                              </p>
+                            </div>
+                            <div>
+                              <input
+                                type="number"
+                                min="0"
+                                step="0.01"
+                                value={tier.fee}
+                                onChange={(event) =>
+                                  updateDeliveryFeeTier(index, {
+                                    fee: Math.max(0, Number(event.target.value || 0)),
+                                  })
+                                }
+                                className="w-full rounded-xl border border-slate-200 px-3 py-2 text-sm outline-none transition focus:border-orange-300 focus:ring-4 focus:ring-orange-100"
+                              />
+                              <p className="mt-1 text-[11px] font-medium text-slate-500">
+                                {formatCurrency(Number(tier.fee || 0))}
+                              </p>
+                            </div>
+                            <button
+                              type="button"
+                              onClick={() => removeDeliveryFeeTier(index)}
+                              className="mt-0.5 inline-flex h-10 w-10 items-center justify-center rounded-xl border border-rose-200 text-rose-600 transition hover:bg-rose-50"
+                              aria-label="Remover faixa"
+                            >
+                              <Trash2 className="h-4 w-4" />
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+
+                    <div className="mt-3 grid gap-2 text-xs text-slate-600 sm:grid-cols-3">
+                      <div className="rounded-2xl bg-white px-3 py-2">
+                        <span className="block font-semibold text-slate-900">Primeira faixa</span>
+                        {formatDistanceMeters(settings.deliveryFeeTable[0]?.upToMeters || 0)} por{' '}
+                        {formatCurrency(settings.deliveryFeeTable[0]?.fee || 0)}
+                      </div>
+                      <div className="rounded-2xl bg-white px-3 py-2">
+                        <span className="block font-semibold text-slate-900">Ultima faixa</span>
+                        {formatDistanceMeters(settings.deliveryFeeTable.at(-1)?.upToMeters || 0)} por{' '}
+                        {formatCurrency(settings.deliveryFeeTable.at(-1)?.fee || 0)}
+                      </div>
+                      <div className="rounded-2xl bg-white px-3 py-2">
+                        <span className="block font-semibold text-slate-900">Acima da ultima</span>
+                        Usa a ultima taxa como protecao.
+                      </div>
+                    </div>
+                  </div>
+                ) : null}
                 <div className="rounded-[24px] border border-slate-200 bg-slate-50/80 p-4">
                   <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
                     <div>

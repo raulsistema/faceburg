@@ -408,7 +408,7 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
       }
     }
 
-    shouldQueuePrint = status === 'processing' || status === 'delivering' || status === 'completed' || status === 'cancelled';
+    shouldQueuePrint = status === 'processing';
     shouldQueueWhatsapp = status === 'delivering';
     orderEventKind = status === 'cancelled' ? 'cancelled' : 'updated';
 

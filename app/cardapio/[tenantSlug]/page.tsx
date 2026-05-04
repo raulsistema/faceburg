@@ -39,10 +39,16 @@ type Tenant = {
   whatsappPhone: string | null;
   prepTimeMinutes: number;
   deliveryFeeBase: number;
-  deliveryFeeMode: 'fixed' | 'per_km';
+  deliveryFeeMode: 'fixed' | 'per_km' | 'distance_table';
   deliveryFeePerKm: number;
+  deliveryFeeTable: DeliveryFeeTier[];
   storeOpen: boolean;
   primaryColor: string;
+};
+
+type DeliveryFeeTier = {
+  upToMeters: number;
+  fee: number;
 };
 
 type ProductOption = {
@@ -198,8 +204,10 @@ type AddressStreetSuggestion = {
 type DeliveryFeeQuoteResponse = {
   deliveryFeeAmount?: number;
   distanceKm?: number | null;
-  deliveryFeeMode?: 'fixed' | 'per_km';
+  distanceMeters?: number | null;
+  deliveryFeeMode?: 'fixed' | 'per_km' | 'distance_table';
   deliveryFeePerKm?: number;
+  matchedTier?: DeliveryFeeTier | null;
   usedFallback?: boolean;
   error?: string;
 };
@@ -286,6 +294,13 @@ function hasManualAddressDraft(form: AddressFormState) {
 
 function brl(value: number) {
   return value.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
+}
+
+function formatDistanceMeters(value: number) {
+  if (value >= 1000) {
+    return `${(value / 1000).toLocaleString('pt-BR', { maximumFractionDigits: 1 })} km`;
+  }
+  return `${value} m`;
 }
 
 function formatPaymentMethodLabel(value: string) {
@@ -584,6 +599,7 @@ export default function PublicMenuPage() {
   const [customerDocumentNumber, setCustomerDocumentNumber] = useState('');
   const [customerLookupLoading, setCustomerLookupLoading] = useState(false);
   const [customerLookupDone, setCustomerLookupDone] = useState(false);
+  const [customerLookupFound, setCustomerLookupFound] = useState(false);
   const [savedAddresses, setSavedAddresses] = useState<SavedAddress[]>([]);
   const [addressEntryMode, setAddressEntryMode] = useState<AddressEntryMode>('new');
   const [selectedSavedAddressId, setSelectedSavedAddressId] = useState('');
@@ -869,6 +885,7 @@ export default function PublicMenuPage() {
       };
       applyKnownCustomer(data);
       setCustomerLookupDone(true);
+      setCustomerLookupFound(true);
       return data;
     } finally {
       setPortalSaving(false);
@@ -963,7 +980,15 @@ export default function PublicMenuPage() {
               })
               .filter((method: PaymentMethodOption) => method.id);
         if (mounted) {
-          setTenant(data.tenant);
+          const tenantData = data.tenant as Tenant;
+          setTenant({
+            ...tenantData,
+            deliveryFeeMode:
+              tenantData.deliveryFeeMode === 'per_km' || tenantData.deliveryFeeMode === 'distance_table'
+                ? tenantData.deliveryFeeMode
+                : 'fixed',
+            deliveryFeeTable: Array.isArray(tenantData.deliveryFeeTable) ? tenantData.deliveryFeeTable : [],
+          });
           setMenuStories(Array.isArray(data.stories) ? data.stories : []);
           setCategories(data.categories || []);
           setProducts(data.products || []);
@@ -971,7 +996,7 @@ export default function PublicMenuPage() {
           setSelectedPaymentMethodId((current) => {
             return nextPaymentMethods.some((method) => method.id === current)
               ? current
-              : nextPaymentMethods[0]?.id || '';
+              : '';
           });
           setActiveCategory('all');
         }
@@ -1010,6 +1035,7 @@ export default function PublicMenuPage() {
     setCustomerDocumentNumber(emptyState.customerDocumentNumber);
     setCustomerLookupLoading(false);
     setCustomerLookupDone(false);
+    setCustomerLookupFound(false);
     setSavedAddresses(emptyState.savedAddresses);
     setAddressEntryMode(emptyState.addressEntryMode);
     setSelectedSavedAddressId(emptyState.selectedSavedAddressId);
@@ -1096,6 +1122,7 @@ export default function PublicMenuPage() {
     if (digits.length < 10) {
       const keepManualAddressDraft = addressEntryModeRef.current === 'new' && hasManualAddressDraft(addressFormRef.current);
       setCustomerLookupDone(false);
+      setCustomerLookupFound(false);
       setCustomerLookupLoading(false);
       setSavedAddresses([]);
       setAddressEntryMode('new');
@@ -1112,8 +1139,12 @@ export default function PublicMenuPage() {
     let active = true;
     const requestTenantSlug = tenantSlug;
     const requestDigits = digits;
+    setCustomerLookupDone(false);
+    setCustomerLookupFound(false);
     const timeout = setTimeout(async () => {
       if (!active) return;
+      setCustomerLookupDone(false);
+      setCustomerLookupFound(false);
       setCustomerLookupLoading(true);
       try {
         const data = await syncPortalByPhone(requestDigits);
@@ -1123,6 +1154,7 @@ export default function PublicMenuPage() {
         if (!data?.found) {
           const keepManualAddressDraft = addressEntryModeRef.current === 'new' && hasManualAddressDraft(addressFormRef.current);
           setCustomerLookupDone(true);
+          setCustomerLookupFound(false);
           setSavedAddresses([]);
           setAddressEntryMode('new');
           setSelectedSavedAddressId('');
@@ -1136,8 +1168,10 @@ export default function PublicMenuPage() {
         }
 
         setCustomerLookupDone(true);
+        setCustomerLookupFound(true);
       } catch {
         setCustomerLookupDone(false);
+        setCustomerLookupFound(false);
       } finally {
         setCustomerLookupLoading(false);
       }
@@ -1149,6 +1183,10 @@ export default function PublicMenuPage() {
     };
   }, [tenantSlug, customerPhone, syncPortalByPhone]);
 
+  const checkoutPhoneDigits = normalizePhone(customerPhone);
+  const portalCustomerMatchesCheckout = Boolean(
+    portalCustomer?.phone && checkoutPhoneDigits && normalizePhone(portalCustomer.phone) === checkoutPhoneDigits,
+  );
   const usingNewAddress = orderType === 'delivery' && (savedAddresses.length === 0 || addressEntryMode === 'new');
 
   const filteredProducts = useMemo(() => {
@@ -1339,12 +1377,14 @@ export default function PublicMenuPage() {
       };
     }
 
-    if (tenant.deliveryFeeMode !== 'per_km') {
+    if (tenant.deliveryFeeMode === 'fixed') {
       setDeliveryFeeQuote({
         deliveryFeeAmount: Number(tenant.deliveryFeeBase || 0),
         distanceKm: null,
+        distanceMeters: null,
         deliveryFeeMode: 'fixed',
         deliveryFeePerKm: Number(tenant.deliveryFeePerKm || 0),
+        matchedTier: null,
         usedFallback: false,
       });
       setDeliveryFeeLoading(false);
@@ -1396,8 +1436,10 @@ export default function PublicMenuPage() {
           setDeliveryFeeQuote({
             deliveryFeeAmount: Number(tenant.deliveryFeeBase || 0),
             distanceKm: null,
-            deliveryFeeMode: 'per_km',
+            distanceMeters: null,
+            deliveryFeeMode: tenant.deliveryFeeMode,
             deliveryFeePerKm: Number(tenant.deliveryFeePerKm || 0),
+            matchedTier: null,
             usedFallback: true,
           });
           return;
@@ -1405,8 +1447,10 @@ export default function PublicMenuPage() {
         setDeliveryFeeQuote({
           deliveryFeeAmount: Number(data.deliveryFeeAmount ?? tenant.deliveryFeeBase ?? 0),
           distanceKm: data.distanceKm ?? null,
-          deliveryFeeMode: data.deliveryFeeMode === 'per_km' ? 'per_km' : 'fixed',
+          distanceMeters: data.distanceMeters ?? null,
+          deliveryFeeMode: data.deliveryFeeMode === 'per_km' || data.deliveryFeeMode === 'distance_table' ? data.deliveryFeeMode : 'fixed',
           deliveryFeePerKm: Number(data.deliveryFeePerKm ?? tenant.deliveryFeePerKm ?? 0),
+          matchedTier: data.matchedTier ?? null,
           usedFallback: Boolean(data.usedFallback),
         });
       } catch {
@@ -1414,8 +1458,10 @@ export default function PublicMenuPage() {
         setDeliveryFeeQuote({
           deliveryFeeAmount: Number(tenant.deliveryFeeBase || 0),
           distanceKm: null,
-          deliveryFeeMode: 'per_km',
+          distanceMeters: null,
+          deliveryFeeMode: tenant.deliveryFeeMode,
           deliveryFeePerKm: Number(tenant.deliveryFeePerKm || 0),
+          matchedTier: null,
           usedFallback: true,
         });
       } finally {
@@ -1852,6 +1898,8 @@ export default function PublicMenuPage() {
     checkoutKeyRef.current = createCheckoutKey();
     setCheckoutOpen(true);
     setCheckoutStep('cart');
+    setSelectedPaymentMethodId('');
+    setChangeFor('');
     setFormError(null);
   }
 
@@ -1860,6 +1908,8 @@ export default function PublicMenuPage() {
     checkoutKeyRef.current = createCheckoutKey();
     setCheckoutOpen(true);
     setCheckoutStep(step);
+    setSelectedPaymentMethodId('');
+    setChangeFor('');
     setFormError(null);
   }
 
@@ -1867,6 +1917,8 @@ export default function PublicMenuPage() {
     checkoutKeyRef.current = '';
     setCheckoutOpen(false);
     setCheckoutStep('cart');
+    setSelectedPaymentMethodId('');
+    setChangeFor('');
     setFormError(null);
   }
 
@@ -1888,18 +1940,18 @@ export default function PublicMenuPage() {
     }
     if (checkoutStep === 'cart') {
       if (!cart.length) return setFormError('Seu carrinho esta vazio.');
-      if (portalCustomer && customerName.trim() && normalizePhone(customerPhone).length >= 10) {
+      if (portalCustomerMatchesCheckout && customerName.trim() && checkoutPhoneDigits.length >= 10) {
         return setCheckoutStep('address');
       }
       return setCheckoutStep('customer');
     }
     if (checkoutStep === 'customer') {
-      if (!customerName.trim() || customerPhone.replace(/\D/g, '').length < 10) return setFormError('Informe nome e celular valido.');
-      if (!portalCustomer) {
+      if (!customerName.trim() || checkoutPhoneDigits.length < 10) return setFormError('Informe nome e celular valido.');
+      if (!portalCustomerMatchesCheckout || !customerLookupFound) {
         try {
           await ensurePortalCustomer();
         } catch (error) {
-          return setFormError(error instanceof Error ? error.message : 'Nao foi possivel ativar seu portal agora.');
+          return setFormError(error instanceof Error ? error.message : 'Nao foi possivel criar o cadastro do cliente agora.');
         }
       }
       return setCheckoutStep('address');
@@ -1924,7 +1976,7 @@ export default function PublicMenuPage() {
     }
     if (checkoutStep === 'payment') {
       if (!selectedPaymentMethod) {
-        return setFormError('A loja ainda nao configurou formas de pagamento para este cardapio.');
+        return setFormError('Selecione uma forma de pagamento para continuar.');
       }
       if (
         selectedPaymentMethod.methodType === 'cash' &&
@@ -1950,7 +2002,11 @@ export default function PublicMenuPage() {
     setFormError(null);
     try {
       if (!selectedPaymentMethod?.id) {
-        setFormError('A loja ainda nao configurou formas de pagamento para este cardapio.');
+        setFormError(
+          availablePaymentMethods.length > 0
+            ? 'Selecione uma forma de pagamento para continuar.'
+            : 'A loja ainda nao configurou formas de pagamento para este cardapio.',
+        );
         return;
       }
       if (usingNewAddress && !addressForm.street.trim()) {
@@ -2239,10 +2295,17 @@ export default function PublicMenuPage() {
                 <div>
                   <p className="text-slate-500 flex items-center gap-2"><Bike className="w-4 h-4" /> Taxa de entrega</p>
                   <p className="font-bold text-slate-900">
-                    {tenant.deliveryFeeMode === 'per_km'
+                    {tenant.deliveryFeeMode === 'distance_table' && tenant.deliveryFeeTable?.length
+                      ? `A partir de ${brl(Number(tenant.deliveryFeeTable[0]?.fee || tenant.deliveryFeeBase || 0))}`
+                      : tenant.deliveryFeeMode === 'per_km'
                       ? `${brl(Number(tenant.deliveryFeeBase || 0))} minimo • ${brl(Number(tenant.deliveryFeePerKm || 0))}/km`
                       : `A partir de ${brl(Number(tenant.deliveryFeeBase || 0))}`}
                   </p>
+                  {tenant.deliveryFeeMode === 'distance_table' && tenant.deliveryFeeTable?.length ? (
+                    <p className="mt-1 text-xs text-slate-500">
+                      Ate {formatDistanceMeters(tenant.deliveryFeeTable.at(-1)?.upToMeters || 0)} por faixa.
+                    </p>
+                  ) : null}
                 </div>
                 <div>
                   <p className="text-slate-500 flex items-center gap-2"><Store className="w-4 h-4" /> Status</p>
@@ -3130,9 +3193,13 @@ export default function PublicMenuPage() {
                     </div>
                     {customerLookupLoading ? (
                       <p className="text-xs text-slate-500 mt-1">Buscando cadastro...</p>
-                    ) : customerLookupDone ? (
+                    ) : customerLookupDone && customerLookupFound ? (
                       <p className="text-xs text-emerald-600 mt-1">
                         {savedAddresses.length > 0 ? 'Cliente encontrado com enderecos salvos.' : 'Cliente encontrado.'}
+                      </p>
+                    ) : customerLookupDone ? (
+                      <p className="text-xs text-sky-700 mt-1">
+                        Cliente novo. Informe o nome para criar o cadastro ao tocar em Proximo.
                       </p>
                     ) : null}
                   </div>
@@ -3376,13 +3443,13 @@ export default function PublicMenuPage() {
                   </div>
                   <div className="flex justify-between font-bold text-slate-900"><span>Total</span><span>{brl(total)}</span></div>
                 </div>
-                {tenant?.deliveryFeeMode === 'per_km' && deliveryFeeQuote?.usedFallback ? (
+                {tenant?.deliveryFeeMode !== 'fixed' && deliveryFeeQuote?.usedFallback ? (
                   <p className="text-xs text-amber-700">
-                    Nao foi possivel calcular o trajeto agora. O sistema usou a taxa minima da loja.
+                    Nao foi possivel calcular o trajeto agora. O sistema usou a taxa reserva da loja.
                   </p>
                 ) : null}
                 {formError ? <p className="text-sm text-rose-600">{formError}</p> : null}
-                {checkoutStep === 'review' ? <button onClick={submitOrder} disabled={submitting} className="w-full py-3 rounded-xl bg-emerald-500 text-white font-bold disabled:opacity-60">{submitting ? 'Enviando pedido...' : 'Finalizar pedido'}</button> : <button onClick={goNextStep} className="w-full py-3 rounded-xl bg-rose-500 text-white font-bold">Proximo</button>}
+                {checkoutStep === 'review' ? <button onClick={submitOrder} disabled={submitting} className="w-full py-3 rounded-xl bg-emerald-500 text-white font-bold disabled:opacity-60">{submitting ? 'Enviando pedido...' : 'Finalizar pedido'}</button> : <button onClick={goNextStep} disabled={portalSaving} className="w-full py-3 rounded-xl bg-rose-500 text-white font-bold disabled:opacity-60">{checkoutStep === 'customer' && portalSaving ? 'Salvando cliente...' : 'Proximo'}</button>}
               </div>
             ) : null}
           </div>

@@ -18,6 +18,7 @@ type TenantRow = {
   delivery_fee_base: string;
   delivery_fee_mode: string;
   delivery_fee_per_km: string;
+  delivery_fee_table: unknown;
   issuer_street: string | null;
   issuer_number: string | null;
   issuer_neighborhood: string | null;
@@ -367,7 +368,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ slu
     }
 
     const tenantResult = await query<TenantRow>(
-      `SELECT id, slug, status, store_open, delivery_fee_base::text, delivery_fee_mode, delivery_fee_per_km::text, issuer_street, issuer_number, issuer_neighborhood, issuer_city, issuer_state, issuer_zip_code, delivery_origin_use_issuer, delivery_origin_street, delivery_origin_number, delivery_origin_complement, delivery_origin_neighborhood, delivery_origin_city, delivery_origin_state, delivery_origin_zip_code
+      `SELECT id, slug, status, store_open, delivery_fee_base::text, delivery_fee_mode, delivery_fee_per_km::text, delivery_fee_table, issuer_street, issuer_number, issuer_neighborhood, issuer_city, issuer_state, issuer_zip_code, delivery_origin_use_issuer, delivery_origin_street, delivery_origin_number, delivery_origin_complement, delivery_origin_neighborhood, delivery_origin_city, delivery_origin_state, delivery_origin_zip_code
        FROM tenants
        WHERE slug = $1
        LIMIT 1`,
@@ -884,6 +885,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ slu
               deliveryFeeBase: tenant.delivery_fee_base,
               deliveryFeeMode: tenant.delivery_fee_mode,
               deliveryFeePerKm: tenant.delivery_fee_per_km,
+              deliveryFeeTable: tenant.delivery_fee_table,
             },
             resolvedDeliveryAddressInput || {
               freeform: resolvedDeliveryAddress,
@@ -979,6 +981,8 @@ export async function POST(request: Request, { params }: { params: Promise<{ slu
       total: orderTotal,
       deliveryFeeAmount,
       distanceKm: deliveryFeeQuote?.distanceKm ?? null,
+      distanceMeters: deliveryFeeQuote?.distanceMeters ?? null,
+      matchedTier: deliveryFeeQuote?.matchedTier ?? null,
       paymentMethodId: selectedPaymentMethod.id,
       paymentFeeAmount,
       message: 'Pedido recebido com sucesso.',

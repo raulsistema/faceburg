@@ -1,5 +1,6 @@
 ﻿import { NextResponse } from 'next/server';
 import { query } from '@/lib/db';
+import { normalizeDeliveryFeeMode, normalizeDeliveryFeeTable } from '@/lib/delivery-fee';
 import { getValidatedTenantSession } from '@/lib/tenant-auth';
 
 type CategoryRow = {
@@ -46,6 +47,7 @@ type TenantRow = {
   delivery_fee_base: string;
   delivery_fee_mode: string;
   delivery_fee_per_km: string;
+  delivery_fee_table: unknown;
   delivery_origin_use_issuer: boolean;
   delivery_origin_zip_code: string | null;
   delivery_origin_street: string | null;
@@ -83,6 +85,7 @@ export async function GET(request: Request) {
               delivery_fee_base::text,
               delivery_fee_mode,
               delivery_fee_per_km::text,
+              delivery_fee_table,
               delivery_origin_use_issuer,
               delivery_origin_zip_code,
               delivery_origin_street,
@@ -177,8 +180,9 @@ export async function GET(request: Request) {
     settings: {
       prepTimeMinutes: Number(tenant.prep_time_minutes || 40),
       deliveryFeeBase: Number(tenant.delivery_fee_base || 0),
-      deliveryFeeMode: String(tenant.delivery_fee_mode || '').trim().toLowerCase() === 'per_km' ? 'per_km' : 'fixed',
+      deliveryFeeMode: normalizeDeliveryFeeMode(tenant.delivery_fee_mode),
       deliveryFeePerKm: Number(tenant.delivery_fee_per_km || 0),
+      deliveryFeeTable: normalizeDeliveryFeeTable(tenant.delivery_fee_table),
       deliveryOriginUseIssuer: Boolean(tenant.delivery_origin_use_issuer),
       deliveryOriginZipCode: tenant.delivery_origin_zip_code || '',
       deliveryOriginStreet: tenant.delivery_origin_street || '',

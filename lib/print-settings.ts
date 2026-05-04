@@ -30,7 +30,7 @@ export const DEFAULT_PRINT_EVENTS: PrintEvents = {
   status_processing: true,
   status_delivering: false,
   status_completed: false,
-  status_cancelled: true,
+  status_cancelled: false,
   manual_receipt: true,
 };
 
