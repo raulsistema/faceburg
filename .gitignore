@@ -14,6 +14,8 @@ telas-sistema.csv
 tsconfig.tsbuildinfo
 .wwebjs_cache/
 tmp-swbot/
+tmp-whatsapp-products/
+Conversa do WhatsApp*.zip
 tmp_*.js
 faceburg-hub/node_modules/
 faceburg-hub/dist/
