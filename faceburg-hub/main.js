@@ -7,7 +7,7 @@ const path = require('node:path');
 /* ─── constants ──────────────────────────────────────────────── */
 
 const DEFAULT_SETTINGS = {
-  serverUrl: 'http://localhost:3000',
+  serverUrl: 'https://faceburg.vercel.app',
   slug: '',
   email: '',
   password: '',
@@ -32,7 +32,6 @@ const SESSION_COOKIE_NAME = 'faceburg_session';
 /* ─── state ──────────────────────────────────────────────────── */
 
 let mainWindow = null;
-let systemWindow = null;
 let tray = null;
 let trayIcon = null;
 let forceQuit = false;
@@ -73,10 +72,6 @@ function assetPath(fileName) {
   return path.join(__dirname, 'assets', fileName);
 }
 
-function rendererIndexPath() {
-  return path.join(__dirname, 'renderer', 'index.html');
-}
-
 function loadImageFromAssets(fileName, resizeOptions = null) {
   try {
     const image = nativeImage.createFromPath(assetPath(fileName));
@@ -111,6 +106,20 @@ function decryptPassword(stored) {
   return stored;
 }
 
+function migrateDefaultServerUrl(settings) {
+  const serverUrl = String(settings.serverUrl || '').replace(/\/$/, '');
+
+  if (serverUrl === 'http://localhost:3000' || serverUrl === 'http://127.0.0.1:3000') {
+    return {
+      ...settings,
+      serverUrl: DEFAULT_SETTINGS.serverUrl,
+      lastSystemUrl: '',
+    };
+  }
+
+  return settings;
+}
+
 function readSettings() {
   try {
     const f = settingsFilePath();
@@ -120,10 +129,10 @@ function readSettings() {
       raw.passwordEncrypted
         ? decryptPassword(String(raw.passwordEncrypted))
         : String(raw.password || '');
-    return {
+    return migrateDefaultServerUrl({
       ...raw,
       password,
-    };
+    });
   } catch {
     return { ...DEFAULT_SETTINGS };
   }
@@ -193,35 +202,35 @@ function isAllowedSystemUrl(url, allowedOrigin) {
   }
 }
 
-function bindSystemWindowNavigation(browserWindow, targetUrl) {
-  if (!browserWindow || browserWindow.isDestroyed()) return;
+function bindMainWindowNavigation(targetUrl) {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
   const allowedOrigin = new URL(targetUrl).origin;
 
-  browserWindow.webContents.setWindowOpenHandler(({ url }) => {
+  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
     if (isAllowedSystemUrl(url, allowedOrigin)) {
-      void browserWindow.loadURL(url);
+      void mainWindow.loadURL(url);
       return { action: 'deny' };
     }
     void shell.openExternal(url);
     return { action: 'deny' };
   });
 
-  browserWindow.webContents.on('will-navigate', (event, url) => {
+  mainWindow.webContents.on('will-navigate', (event, url) => {
     if (isAllowedSystemUrl(url, allowedOrigin)) return;
     event.preventDefault();
     void shell.openExternal(url);
   });
 
-  browserWindow.webContents.on('did-navigate', (_event, url) => {
+  mainWindow.webContents.on('did-navigate', (_event, url) => {
     persistLastSystemUrl(url);
   });
 
-  browserWindow.webContents.on('did-navigate-in-page', (_event, url) => {
+  mainWindow.webContents.on('did-navigate-in-page', (_event, url) => {
     persistLastSystemUrl(url);
   });
 
-  browserWindow.webContents.on('did-finish-load', () => {
-    const currentUrl = browserWindow?.webContents.getURL();
+  mainWindow.webContents.on('did-finish-load', () => {
+    const currentUrl = mainWindow?.webContents.getURL();
     if (!currentUrl || currentUrl === 'about:blank') return;
     persistLastSystemUrl(currentUrl);
   });
@@ -230,35 +239,16 @@ function bindSystemWindowNavigation(browserWindow, targetUrl) {
 async function openSystemWindow(preferredUrl = '') {
   const targetUrl = getPreferredSystemUrl(preferredUrl);
 
-  if (!systemWindow || systemWindow.isDestroyed()) {
-    systemWindow = new BrowserWindow({
-      width: 1440,
-      height: 920,
-      minWidth: 1024,
-      minHeight: 720,
-      autoHideMenuBar: true,
-      title: 'Faceburg Sistema',
-      icon: assetPath(WINDOW_ICON_FILE),
-      webPreferences: {
-        preload: path.join(__dirname, 'preload.js'),
-        contextIsolation: true,
-        nodeIntegration: false,
-        partition: SYSTEM_PARTITION,
-      },
-    });
-
-    bindSystemWindowNavigation(systemWindow, targetUrl);
-    systemWindow.on('closed', () => {
-      systemWindow = null;
-    });
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    createMainWindow(targetUrl);
+    return;
   }
 
-  const currentUrl = systemWindow.webContents.getURL();
+  const currentUrl = mainWindow.webContents.getURL();
   if (currentUrl !== targetUrl) {
-    await systemWindow.loadURL(targetUrl);
+    await mainWindow.loadURL(targetUrl);
   }
-  systemWindow.show();
-  systemWindow.focus();
+  showMainWindow();
 }
 
 function pushLog(source, message) {
@@ -907,7 +897,8 @@ function createTray() {
 
 /* ─── main window ────────────────────────────────────────────── */
 
-function createMainWindow() {
+function createMainWindow(preferredUrl = '') {
+  const targetUrl = getPreferredSystemUrl(preferredUrl);
   mainWindow = new BrowserWindow({
     width: 1440,
     height: 920,
@@ -921,17 +912,12 @@ function createMainWindow() {
       contextIsolation: true,
       nodeIntegration: false,
       partition: SYSTEM_PARTITION,
-      webviewTag: true,
     },
   });
 
-  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
-    void shell.openExternal(url);
-    return { action: 'deny' };
-  });
-
-  void mainWindow.loadFile(rendererIndexPath()).catch((error) => {
-    pushLog('system', `Falha ao carregar o painel local: ${error?.message || error}`);
+  bindMainWindowNavigation(targetUrl);
+  void mainWindow.loadURL(targetUrl).catch((error) => {
+    pushLog('system', `Falha ao carregar o sistema: ${error?.message || error}`);
   });
 
   mainWindow.on('close', (event) => {

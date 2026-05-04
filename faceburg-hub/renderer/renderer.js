@@ -1,6 +1,6 @@
 /* eslint-disable no-alert */
 
-const DEFAULT_SERVER_URL = 'http://localhost:3000';
+const DEFAULT_SERVER_URL = 'https://faceburg.vercel.app';
 
 const $ = (selector) => document.querySelector(selector);
 

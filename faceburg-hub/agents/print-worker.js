@@ -4,7 +4,7 @@ const os = require('node:os');
 const WebSocket = require('ws');
 const { printTextWindows } = require('./native-printer');
 
-const SERVER_URL = String(process.env.HUB_SERVER_URL || process.env.PRINT_SERVER_URL || 'http://localhost:3000').replace(/\/$/, '');
+const SERVER_URL = String(process.env.HUB_SERVER_URL || process.env.PRINT_SERVER_URL || 'https://faceburg.vercel.app').replace(/\/$/, '');
 const AGENT_KEY = String(process.env.HUB_AGENT_KEY || process.env.PRINT_AGENT_KEY || '');
 const PRINTER_NAME = String(process.env.HUB_PRINTER_NAME || process.env.PRINTER_NAME || '');
 
