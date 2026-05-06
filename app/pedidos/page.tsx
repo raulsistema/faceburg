@@ -5,6 +5,13 @@ import DashboardShell from '@/components/layout/DashboardShell';
 import { MapPin, ShoppingBag, Printer, RefreshCw, Menu, ChevronDown, Eye, Ban, X, Bike } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useRealtimeRefresh } from '@/hooks/use-realtime-refresh';
+import {
+  DEFAULT_ORDER_NOTIFICATION_SOUND,
+  getOrderNotificationSoundLabel,
+  normalizeOrderNotificationSound,
+  type OrderNotificationSound,
+  scheduleOrderNotificationSound,
+} from '@/lib/order-notification-sounds';
 
 type OrderStatus = 'pending' | 'processing' | 'delivering' | 'completed' | 'cancelled';
 
@@ -50,6 +57,7 @@ type OrderDetail = {
 type CardapioSettingsResponse = {
   storeOpen?: boolean;
   prepTimeMinutes?: number;
+  orderNotificationSound?: string;
   error?: string;
 };
 
@@ -569,6 +577,7 @@ export default function PedidosPage() {
   const [paymentOptionsLoading, setPaymentOptionsLoading] = useState(false);
   const [mapModalOrder, setMapModalOrder] = useState<Order | null>(null);
   const [sirenEnabled, setSirenEnabled] = useState(true);
+  const [orderNotificationSound, setOrderNotificationSound] = useState<OrderNotificationSound>(DEFAULT_ORDER_NOTIFICATION_SOUND);
   const [deliveryEnabled, setDeliveryEnabled] = useState(true);
   const [deliveryUpdating, setDeliveryUpdating] = useState(false);
   const [whatsappEnabled, setWhatsappEnabled] = useState(false);
@@ -802,22 +811,8 @@ export default function PedidosPage() {
       }
     }
 
-    const startAt = ctx.currentTime + 0.02;
-    const bursts = 6;
-    for (let i = 0; i < bursts; i += 1) {
-      const osc = ctx.createOscillator();
-      const gain = ctx.createGain();
-      osc.type = 'square';
-      osc.frequency.value = i % 2 === 0 ? 880 : 660;
-      gain.gain.value = 0.07;
-      osc.connect(gain);
-      gain.connect(ctx.destination);
-      const from = startAt + i * 0.22;
-      const to = from + 0.14;
-      osc.start(from);
-      osc.stop(to);
-    }
-  }, [sirenEnabled]);
+    scheduleOrderNotificationSound(ctx, orderNotificationSound);
+  }, [orderNotificationSound, sirenEnabled]);
 
   const dispatchNewOrderLocalJobs = useCallback(async (newOrders: Order[]) => {
     const desktopBridge = getFaceburgDesktopBridge();
@@ -955,6 +950,7 @@ export default function PedidosPage() {
       if (settingsResponse.ok) {
         setDeliveryEnabled(Boolean(settingsData.storeOpen));
         setPrepTimeMinutes(sanitizePrepTimeMinutes(settingsData.prepTimeMinutes));
+        setOrderNotificationSound(normalizeOrderNotificationSound(settingsData.orderNotificationSound));
       }
 
       const whatsappData = (await whatsappResponse.json().catch(() => ({}))) as WhatsappConfigResponse;
@@ -1986,7 +1982,7 @@ export default function PedidosPage() {
             type="button"
             onClick={() => setSirenEnabled((current) => !current)}
           >
-            Sirene: {sirenEnabled ? 'ON' : 'OFF'}
+            Som: {sirenEnabled ? getOrderNotificationSoundLabel(orderNotificationSound) : 'OFF'}
           </button>
           <button
             className={cn(

@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { query } from '@/lib/db';
 import { normalizeDeliveryFeeMode, normalizeDeliveryFeeTable, normalizeDeliveryOriginUseIssuer } from '@/lib/delivery-fee';
 import { parseMoneyInput } from '@/lib/finance-utils';
+import { normalizeOrderNotificationSound } from '@/lib/order-notification-sounds';
 import { getValidatedTenantSession } from '@/lib/tenant-auth';
 
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
@@ -13,6 +14,7 @@ type TenantSettingsRow = {
   delivery_fee_per_km: string;
   delivery_fee_table: unknown;
   store_open: boolean;
+  order_notification_sound: string | null;
   logo_url: string | null;
   menu_cover_image_url: string | null;
   whatsapp_phone: string | null;
@@ -46,6 +48,7 @@ type CardapioSettingsResponse = {
   deliveryFeePerKm: number;
   deliveryFeeTable: Array<{ upToMeters: number; fee: number }>;
   storeOpen: boolean;
+  orderNotificationSound: string;
   logoUrl: string;
   coverImageUrl: string;
   whatsappPhone: string;
@@ -79,6 +82,7 @@ const SETTINGS_SELECT_SQL = `SELECT
   delivery_fee_per_km::text,
   delivery_fee_table,
   store_open,
+  order_notification_sound,
   logo_url,
   menu_cover_image_url,
   whatsapp_phone,
@@ -136,6 +140,7 @@ function serializeTenantSettings(row: TenantSettingsRow): CardapioSettingsRespon
     deliveryFeePerKm: Number(row.delivery_fee_per_km || 0),
     deliveryFeeTable: normalizeDeliveryFeeTable(row.delivery_fee_table),
     storeOpen: Boolean(row.store_open),
+    orderNotificationSound: normalizeOrderNotificationSound(row.order_notification_sound),
     logoUrl: row.logo_url || '',
     coverImageUrl: row.menu_cover_image_url || '',
     whatsappPhone: row.whatsapp_phone || '',
@@ -216,6 +221,9 @@ export async function PATCH(request: Request) {
   const storeOpen = hasOwn(body, 'storeOpen')
     ? Boolean(body.storeOpen)
     : Boolean(current.store_open);
+  const orderNotificationSound = hasOwn(body, 'orderNotificationSound')
+    ? normalizeOrderNotificationSound(body.orderNotificationSound)
+    : normalizeOrderNotificationSound(current.order_notification_sound);
   const logoUrl = hasOwn(body, 'logoUrl')
     ? String(body.logoUrl ?? '').trim()
     : String(current.logo_url || '').trim();
@@ -330,31 +338,32 @@ export async function PATCH(request: Request) {
          delivery_fee_per_km = $4,
          delivery_fee_table = $5::jsonb,
          store_open = $6,
-         logo_url = NULLIF($7, ''),
-         menu_cover_image_url = NULLIF($8, ''),
-         whatsapp_phone = NULLIF($9, ''),
-         issuer_name = NULLIF($10, ''),
-         issuer_trade_name = NULLIF($11, ''),
-         issuer_document = NULLIF($12, ''),
-         issuer_state_registration = NULLIF($13, ''),
-         issuer_email = NULLIF($14, ''),
-         issuer_phone = NULLIF($15, ''),
-         issuer_zip_code = NULLIF($16, ''),
-         issuer_street = NULLIF($17, ''),
-         issuer_number = NULLIF($18, ''),
-         issuer_complement = NULLIF($19, ''),
-         issuer_neighborhood = NULLIF($20, ''),
-         issuer_city = NULLIF($21, ''),
-         issuer_state = NULLIF($22, ''),
-         delivery_origin_use_issuer = $23,
-         delivery_origin_zip_code = NULLIF($24, ''),
-         delivery_origin_street = NULLIF($25, ''),
-         delivery_origin_number = NULLIF($26, ''),
-         delivery_origin_complement = NULLIF($27, ''),
-         delivery_origin_neighborhood = NULLIF($28, ''),
-         delivery_origin_city = NULLIF($29, ''),
-         delivery_origin_state = NULLIF($30, '')
-     WHERE id = $31`,
+         order_notification_sound = $7,
+         logo_url = NULLIF($8, ''),
+         menu_cover_image_url = NULLIF($9, ''),
+         whatsapp_phone = NULLIF($10, ''),
+         issuer_name = NULLIF($11, ''),
+         issuer_trade_name = NULLIF($12, ''),
+         issuer_document = NULLIF($13, ''),
+         issuer_state_registration = NULLIF($14, ''),
+         issuer_email = NULLIF($15, ''),
+         issuer_phone = NULLIF($16, ''),
+         issuer_zip_code = NULLIF($17, ''),
+         issuer_street = NULLIF($18, ''),
+         issuer_number = NULLIF($19, ''),
+         issuer_complement = NULLIF($20, ''),
+         issuer_neighborhood = NULLIF($21, ''),
+         issuer_city = NULLIF($22, ''),
+         issuer_state = NULLIF($23, ''),
+         delivery_origin_use_issuer = $24,
+         delivery_origin_zip_code = NULLIF($25, ''),
+         delivery_origin_street = NULLIF($26, ''),
+         delivery_origin_number = NULLIF($27, ''),
+         delivery_origin_complement = NULLIF($28, ''),
+         delivery_origin_neighborhood = NULLIF($29, ''),
+         delivery_origin_city = NULLIF($30, ''),
+         delivery_origin_state = NULLIF($31, '')
+     WHERE id = $32`,
     [
       Math.round(prepTimeMinutes),
       deliveryFeeBase,
@@ -362,6 +371,7 @@ export async function PATCH(request: Request) {
       deliveryFeePerKm,
       JSON.stringify(deliveryFeeTable),
       storeOpen,
+      orderNotificationSound,
       logoUrl,
       coverImageUrl,
       whatsappPhone,
@@ -398,6 +408,7 @@ export async function PATCH(request: Request) {
     deliveryFeePerKm,
     deliveryFeeTable,
     storeOpen,
+    orderNotificationSound,
     logoUrl,
     coverImageUrl,
     whatsappPhone,

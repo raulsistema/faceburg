@@ -79,6 +79,7 @@ async function initializeDb() {
           delivery_fee_per_km NUMERIC(10,2) NOT NULL DEFAULT 0,
           delivery_fee_table JSONB NOT NULL DEFAULT '[]'::jsonb,
           store_open BOOLEAN NOT NULL DEFAULT TRUE,
+          order_notification_sound TEXT NOT NULL DEFAULT 'classic',
           primary_color TEXT DEFAULT '#3b82f6',
           plan TEXT NOT NULL DEFAULT 'starter',
           status TEXT NOT NULL DEFAULT 'active',
@@ -620,6 +621,13 @@ async function initializeDb() {
             WHERE table_name = 'tenants' AND column_name = 'store_open'
           ) THEN
             ALTER TABLE tenants ADD COLUMN store_open BOOLEAN NOT NULL DEFAULT TRUE;
+          END IF;
+
+          IF NOT EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_name = 'tenants' AND column_name = 'order_notification_sound'
+          ) THEN
+            ALTER TABLE tenants ADD COLUMN order_notification_sound TEXT NOT NULL DEFAULT 'classic';
           END IF;
 
           IF NOT EXISTS (

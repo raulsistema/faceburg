@@ -4,6 +4,7 @@ import { normalizePrintCopies, normalizePrintEvents, normalizeReceiptOptions, no
 import { getValidatedTenantSession } from '@/lib/tenant-auth';
 import LocalAgentSettings from './LocalAgentSettings';
 import EmitenteSettings from './EmitenteSettings';
+import OrderSoundSettings from './OrderSoundSettings';
 
 type TenantRow = {
   id: string;
@@ -15,6 +16,7 @@ type TenantRow = {
   prep_time_minutes: number;
   delivery_fee_base: string;
   store_open: boolean;
+  order_notification_sound: string | null;
   whatsapp_phone: string | null;
   issuer_name: string | null;
   issuer_trade_name: string | null;
@@ -69,6 +71,7 @@ export default async function SettingsPage() {
             prep_time_minutes,
             delivery_fee_base::text,
             store_open,
+            order_notification_sound,
             whatsapp_phone,
             issuer_name,
             issuer_trade_name,
@@ -159,6 +162,12 @@ export default async function SettingsPage() {
       }
     : null;
 
+  const orderSoundInitialData = tenant
+    ? {
+        orderNotificationSound: tenant.order_notification_sound || 'classic',
+      }
+    : null;
+
   const printInitialData = tenant
     ? {
         enabled: Boolean(printAgent?.enabled),
@@ -218,6 +227,7 @@ export default async function SettingsPage() {
         </div>
 
         <EmitenteSettings initialData={emitenteInitialData} />
+        <OrderSoundSettings initialData={orderSoundInitialData} />
         <LocalAgentSettings
           tenantId={tenant?.id || ''}
           tenantSlug={tenant?.slug || ''}
