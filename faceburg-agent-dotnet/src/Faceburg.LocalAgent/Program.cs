@@ -21,6 +21,7 @@ builder.Services.AddSingleton<NativePrinterApi>();
 builder.Services.AddSingleton<EscPosTextBuilder>();
 builder.Services.AddSingleton<PrintService>();
 builder.Services.AddSingleton<WhatsAppSidecarService>();
+builder.Services.AddSingleton<StartupRegistrationService>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<WhatsAppSidecarService>());
 builder.Services.AddCors(options =>
 {
@@ -65,6 +66,7 @@ app.MapGet("/", () => Results.Content(AdminPage.Html, "text/html; charset=utf-8"
 
 app.MapGet("/api/health", async (
     ConfigStore store,
+    StartupRegistrationService startup,
     WhatsAppSidecarService whatsapp,
     CancellationToken cancellationToken) =>
 {
@@ -79,6 +81,8 @@ app.MapGet("/api/health", async (
         tenantSlug = config.TenantSlug,
         terminalId = config.TerminalId,
         printerName = config.DefaultPrinter,
+        startWithWindows = config.StartWithWindows,
+        startupRegistered = startup.IsRegistered(),
         configUpdatedAt = config.UpdatedAt,
         whatsapp = whatsapp.CurrentStatus,
     });
@@ -103,7 +107,12 @@ app.MapGet("/api/config", async (HttpContext http, ConfigStore store, Cancellati
     return authError ?? Results.Ok(config);
 });
 
-app.MapPut("/api/config", async (HttpContext http, AgentConfig incoming, ConfigStore store, CancellationToken cancellationToken) =>
+app.MapPut("/api/config", async (
+    HttpContext http,
+    AgentConfig incoming,
+    ConfigStore store,
+    StartupRegistrationService startup,
+    CancellationToken cancellationToken) =>
 {
     var current = await store.LoadAsync(cancellationToken);
     var authError = Authorize(http, current);
@@ -113,6 +122,7 @@ app.MapPut("/api/config", async (HttpContext http, AgentConfig incoming, ConfigS
         ? current.LocalToken
         : incoming.LocalToken;
     var saved = await store.SaveAsync(incoming, cancellationToken);
+    await startup.ApplyAsync(saved, cancellationToken);
     return Results.Ok(saved);
 });
 
@@ -259,6 +269,7 @@ app.MapPost("/api/dispatch", async (
     });
 });
 
+await app.Services.GetRequiredService<StartupRegistrationService>().ApplyAsync(startupConfig);
 app.Run();
 
 static IResult? Authorize(HttpContext http, AgentConfig config)

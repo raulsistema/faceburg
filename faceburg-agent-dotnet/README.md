@@ -50,6 +50,7 @@ dist\Faceburg.LocalAgent.exe
 ```
 
 O script tambem instala as dependencias do `whatsapp-sidecar` dentro da pasta publicada.
+Quando `node.exe` existe no PC de build, ele tambem e copiado para `dist\node\node.exe`, deixando o WhatsApp pronto para outro Windows sem instalar Node separado.
 
 Para abrir depois de publicar, use:
 

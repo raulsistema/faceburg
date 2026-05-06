@@ -66,6 +66,7 @@ type LocalAgentConfig = {
   codePage?: string;
   cutPaper?: boolean;
   pulseDrawer?: boolean;
+  startWithWindows?: boolean;
   requireLocalToken?: boolean;
   localToken?: string;
   whatsAppEnabled?: boolean;
@@ -84,6 +85,8 @@ type LocalAgentHealth = {
   tenantSlug?: string;
   terminalId?: string;
   printerName?: string;
+  startWithWindows?: boolean;
+  startupRegistered?: boolean;
   configUpdatedAt?: string;
   whatsapp?: LocalWhatsAppStatus;
 };
@@ -345,7 +348,8 @@ export default function LocalAgentSettings({
   const [codePage, setCodePage] = useState(DEFAULT_CODE_PAGE);
   const [cutPaper, setCutPaper] = useState(true);
   const [pulseDrawer, setPulseDrawer] = useState(false);
-  const [whatsappHeadless, setWhatsappHeadless] = useState(false);
+  const [startWithWindows, setStartWithWindows] = useState(true);
+  const [whatsappHeadless, setWhatsappHeadless] = useState(true);
   const [agentConfig, setAgentConfig] = useState<LocalAgentConfig | null>(null);
   const [agentHealth, setAgentHealth] = useState<LocalAgentHealth | null>(null);
   const [whatsappStatus, setWhatsappStatus] = useState<LocalWhatsAppStatus | null>(null);
@@ -414,8 +418,9 @@ export default function LocalAgentSettings({
     setCodePage(String(config.codePage || DEFAULT_CODE_PAGE));
     setCutPaper(config.cutPaper !== false);
     setPulseDrawer(Boolean(config.pulseDrawer));
+    setStartWithWindows(config.startWithWindows !== false);
     setWhatsAppEnabled(Boolean(config.whatsAppEnabled));
-    setWhatsappHeadless(Boolean(config.whatsAppHeadless));
+    setWhatsappHeadless(config.whatsAppHeadless !== false);
   }, []);
 
   const refreshAgent = useCallback(async () => {
@@ -501,6 +506,7 @@ export default function LocalAgentSettings({
       codePage: codePage || DEFAULT_CODE_PAGE,
       cutPaper,
       pulseDrawer,
+      startWithWindows,
       requireLocalToken: Boolean(agentConfig?.requireLocalToken),
       localToken: agentConfig?.localToken || '',
       whatsAppEnabled: whatsappEnabled,
@@ -765,6 +771,16 @@ export default function LocalAgentSettings({
                     onChange={(event) => setTerminalId(event.target.value)}
                     placeholder="ATENDIMENTO"
                   />
+                </label>
+                <label className="md:col-span-2 flex items-start justify-between gap-4 rounded-lg border border-slate-200 px-3 py-2 text-sm font-semibold text-slate-800">
+                  <span>
+                    <span className="block">Iniciar agente com o Windows</span>
+                    <span className="block text-xs font-normal text-slate-500">
+                      Abre o agente em segundo plano quando este computador ligar.
+                      {agentHealth?.startupRegistered ? ' Registrado neste Windows.' : ''}
+                    </span>
+                  </span>
+                  <input type="checkbox" checked={startWithWindows} onChange={(event) => setStartWithWindows(event.target.checked)} />
                 </label>
               </div>
             </div>

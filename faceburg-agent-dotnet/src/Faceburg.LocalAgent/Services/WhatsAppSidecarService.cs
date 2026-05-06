@@ -163,7 +163,7 @@ public sealed class WhatsAppSidecarService(
 
         var startInfo = new ProcessStartInfo
         {
-            FileName = ResolveNodeExecutable(),
+            FileName = ResolveNodeExecutable(workingDirectory),
             Arguments = $"\"{scriptPath}\"",
             WorkingDirectory = workingDirectory,
             UseShellExecute = false,
@@ -341,8 +341,17 @@ public sealed class WhatsAppSidecarService(
         return digits.StartsWith("55", StringComparison.Ordinal) ? digits : $"55{digits}";
     }
 
-    private static string ResolveNodeExecutable()
+    private static string ResolveNodeExecutable(string sidecarDirectory)
     {
+        var candidates = new[]
+        {
+            Path.Combine(AppContext.BaseDirectory, "node", "node.exe"),
+            Path.Combine(AppContext.BaseDirectory, "node.exe"),
+            Path.Combine(sidecarDirectory, "node.exe"),
+        };
+        var bundled = candidates.FirstOrDefault(File.Exists);
+        if (bundled is not null) return bundled;
+
         return "node";
     }
 

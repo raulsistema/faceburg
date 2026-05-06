@@ -26,4 +26,14 @@ if (Test-Path (Join-Path $sidecar "package.json")) {
   npm install --omit=dev --prefix $sidecar
 }
 
+$nodeCommand = Get-Command node.exe -ErrorAction SilentlyContinue
+if ($nodeCommand) {
+  $nodeDir = Join-Path $resolvedOut "node"
+  New-Item -ItemType Directory -Path $nodeDir -Force | Out-Null
+  Copy-Item -LiteralPath $nodeCommand.Source -Destination (Join-Path $nodeDir "node.exe") -Force
+  Write-Host "Node local embutido em: $nodeDir"
+} else {
+  Write-Warning "node.exe nao encontrado no PC de build. O WhatsApp exigira Node instalado no computador de destino."
+}
+
 Write-Host "Publicado em: $resolvedOut"

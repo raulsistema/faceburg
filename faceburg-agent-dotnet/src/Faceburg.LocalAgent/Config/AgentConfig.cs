@@ -13,10 +13,11 @@ public sealed class AgentConfig
     public string CodePage { get; set; } = "CP860";
     public bool CutPaper { get; set; } = true;
     public bool PulseDrawer { get; set; } = false;
+    public bool StartWithWindows { get; set; } = true;
     public bool RequireLocalToken { get; set; } = false;
     public string LocalToken { get; set; } = Guid.NewGuid().ToString("N");
     public bool WhatsAppEnabled { get; set; } = false;
-    public bool WhatsAppHeadless { get; set; } = false;
+    public bool WhatsAppHeadless { get; set; } = true;
     public string WhatsAppChromePath { get; set; } = "";
     public string[] AllowedOrigins { get; set; } =
     [

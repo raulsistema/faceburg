@@ -49,6 +49,7 @@ public static class AdminPage
         <label>Colunas</label><select id="columns"><option>32</option><option>48</option></select>
         <label>Codepage</label><select id="codePage"><option>CP860</option><option>CP850</option><option>CP858</option><option>CP437</option></select>
         <label class="checkline"><input type="checkbox" id="cutPaper"> Cortar papel ao final</label>
+        <label class="checkline"><input type="checkbox" id="startWithWindows"> Iniciar junto com o Windows</label>
         <div class="actions">
           <button onclick="saveConfig()">Salvar</button>
           <button class="ghost" onclick="loadAll()">Atualizar</button>
@@ -69,6 +70,7 @@ R$ 10,00</textarea>
       <section>
         <h2>WhatsApp</h2>
         <label>Status</label><input id="whatsStatus" readonly>
+        <label class="checkline"><input type="checkbox" id="whatsAppHeadless"> Rodar WhatsApp oculto</label>
         <label>Telefone</label><input id="phone" placeholder="11999999999">
         <label>Mensagem</label><textarea id="message">Teste Faceburg Local Agent</textarea>
         <div class="actions">
@@ -94,6 +96,8 @@ R$ 10,00</textarea>
       serverUrl.value = cfg.serverUrl || ''; tenantSlug.value = cfg.tenantSlug || ''; tenantId.value = cfg.tenantId || '';
       columns.value = String(cfg.columns || 32); codePage.value = cfg.codePage || 'CP860'; whatsStatus.value = `${whats.status || ''} ${whats.phoneNumber || ''}`;
       cutPaper.checked = Boolean(cfg.cutPaper);
+      startWithWindows.checked = cfg.startWithWindows !== false;
+      whatsAppHeadless.checked = cfg.whatsAppHeadless !== false;
       printer.innerHTML = printers.map(p=>`<option ${p.name===cfg.defaultPrinter?'selected':''}>${p.name}</option>`).join('');
       log(health);
     }
@@ -101,6 +105,8 @@ R$ 10,00</textarea>
       config.serverUrl = serverUrl.value; config.tenantSlug = tenantSlug.value; config.tenantId = tenantId.value;
       config.defaultPrinter = printer.value; config.columns = Number(columns.value); config.codePage = codePage.value;
       config.cutPaper = cutPaper.checked;
+      config.startWithWindows = startWithWindows.checked;
+      config.whatsAppHeadless = whatsAppHeadless.checked;
       log(await json('/api/config',{method:'PUT',headers:{'content-type':'application/json'},body:JSON.stringify(config)}));
     }
     async function printTest(){ log(await json('/api/print/test',{method:'POST'})); }

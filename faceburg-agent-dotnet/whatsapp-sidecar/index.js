@@ -3,6 +3,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const readline = require('node:readline');
+const { execFileSync } = require('node:child_process');
 const QRCode = require('qrcode');
 const { Client, LocalAuth } = require('whatsapp-web.js');
 
@@ -61,6 +62,10 @@ function clientId() {
     .slice(0, 40) || 'faceburg';
 }
 
+function sessionPath() {
+  return path.join(dataPath(), `session-${clientId()}`);
+}
+
 function browserPath() {
   const configured = String(process.env.FACEBURG_WHATS_CHROME_PATH || '').trim();
   if (configured && fs.existsSync(configured)) return configured;
@@ -101,6 +106,34 @@ function puppeteerArgs() {
   return args;
 }
 
+function cleanupBrowserProfileLocks(profilePath) {
+  const resolved = path.resolve(profilePath);
+
+  if (process.platform === 'win32') {
+    const command = `
+$target = [System.IO.Path]::GetFullPath($args[0]).ToLowerInvariant()
+Get-CimInstance Win32_Process -Filter "name='chrome.exe' OR name='msedge.exe'" |
+  Where-Object { $_.CommandLine -and $_.CommandLine.ToLowerInvariant().Contains($target) } |
+  ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+`;
+    try {
+      execFileSync('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', command, resolved], {
+        stdio: 'ignore',
+        timeout: 6000,
+        windowsHide: true,
+      });
+    } catch (error) {
+      log(`profile cleanup skipped: ${error instanceof Error ? error.message : error}`);
+    }
+  }
+
+  for (const fileName of ['SingletonCookie', 'SingletonLock', 'SingletonSocket']) {
+    try {
+      fs.rmSync(path.join(resolved, fileName), { force: true });
+    } catch {}
+  }
+}
+
 function normalizeTarget(target) {
   if (!target) return '';
   const raw = String(target);
@@ -138,6 +171,8 @@ async function startClient() {
 
   const executablePath = browserPath();
   const visible = !parseBool(process.env.FACEBURG_WHATS_HEADLESS, false);
+  const authSessionPath = sessionPath();
+  cleanupBrowserProfileLocks(authSessionPath);
   log(`starting WhatsApp ${visible ? 'visible' : 'headless'}${executablePath ? ` with ${path.basename(executablePath)}` : ''}`);
 
   const next = new Client({
