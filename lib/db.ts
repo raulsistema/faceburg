@@ -1191,7 +1191,7 @@ export async function ensureDbInitialized() {
 }
 
 export async function query<T extends QueryResultRow = QueryResultRow>(text: string, values?: unknown[]) {
-  await initializeDb();
+  await ensureDbInitialized();
   try {
     return await pool.query<T>(text, values);
   } catch (error) {
