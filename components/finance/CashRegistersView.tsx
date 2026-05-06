@@ -11,6 +11,35 @@ type CashSession = {
   status: string;
 };
 
+type CashSummary = {
+  openingAmount: number;
+  cashSales: number;
+  supplies: number;
+  withdrawals: number;
+  refunds: number;
+  adjustments: number;
+  expectedDrawer: number;
+  accountGross: number;
+  accountFees: number;
+  expectedAccount: number;
+  accountToday: number;
+  accountFuture: number;
+  accountPix: number;
+  accountCard: number;
+  accountOther: number;
+  salesCount: number;
+  accountByMethod: Record<string, number>;
+  receivables: Array<{
+    dueDate: string;
+    status: 'overdue' | 'today' | 'future';
+    methodType: string;
+    methodName: string;
+    grossAmount: number;
+    feeAmount: number;
+    netAmount: number;
+  }>;
+};
+
 type CashMovement = {
   id: string;
   movementType: string;
@@ -29,6 +58,27 @@ type CashSessionHistory = {
   closingAmountExpected: number | null;
   differenceAmount: number | null;
   notes: string | null;
+};
+
+const emptyCashSummary: CashSummary = {
+  openingAmount: 0,
+  cashSales: 0,
+  supplies: 0,
+  withdrawals: 0,
+  refunds: 0,
+  adjustments: 0,
+  expectedDrawer: 0,
+  accountGross: 0,
+  accountFees: 0,
+  expectedAccount: 0,
+  accountToday: 0,
+  accountFuture: 0,
+  accountPix: 0,
+  accountCard: 0,
+  accountOther: 0,
+  salesCount: 0,
+  accountByMethod: {},
+  receivables: [],
 };
 
 function movementTypeLabel(value: string) {
@@ -61,6 +111,7 @@ export default function CashRegistersView() {
   const [current, setCurrent] = useState<CashSession | null>(null);
   const [movements, setMovements] = useState<CashMovement[]>([]);
   const [expectedAmount, setExpectedAmount] = useState(0);
+  const [summary, setSummary] = useState<CashSummary>(emptyCashSummary);
   const [sessions, setSessions] = useState<CashSessionHistory[]>([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -88,6 +139,7 @@ export default function CashRegistersView() {
       setCurrent(data.current || null);
       setMovements(Array.isArray(data.movements) ? data.movements : []);
       setExpectedAmount(Number(data.expectedAmount || 0));
+      setSummary({ ...emptyCashSummary, ...(data.summary || {}) });
       if (data.current) {
         setClosingAmount(String(Number(data.expectedAmount || 0).toFixed(2)));
       }
@@ -266,9 +318,70 @@ export default function CashRegistersView() {
               <p className="mt-2 text-sm text-slate-500">Valor informado na abertura do caixa atual.</p>
             </div>
             <div className="bg-white border border-slate-200 rounded-2xl p-5 shadow-sm">
-              <p className="text-xs font-bold uppercase tracking-[0.2em] text-slate-400">Saldo esperado</p>
+              <p className="text-xs font-bold uppercase tracking-[0.2em] text-slate-400">Dinheiro na gaveta</p>
               <p className="mt-3 text-2xl font-black text-slate-900">{formatBrl(expectedAmount)}</p>
-              <p className="mt-2 text-sm text-slate-500">Soma do valor de abertura com todos os lancamentos do caixa atual.</p>
+              <p className="mt-2 text-sm text-slate-500">Valor fisico esperado para contar no fechamento.</p>
+            </div>
+          </div>
+
+          <div className="grid gap-4 lg:grid-cols-2">
+            <div className="bg-white border border-slate-200 rounded-2xl p-6 shadow-sm">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <p className="text-xs font-bold uppercase tracking-[0.2em] text-slate-400">Gaveta</p>
+                  <h3 className="mt-2 text-lg font-black text-slate-900">{formatBrl(summary.expectedDrawer)}</h3>
+                </div>
+                <span className="rounded-full bg-emerald-50 px-3 py-1 text-xs font-bold text-emerald-700">dinheiro fisico</span>
+              </div>
+              <div className="mt-4 grid grid-cols-2 gap-3 text-sm">
+                <div className="rounded-lg bg-slate-50 p-3">
+                  <p className="text-slate-500">Vendas dinheiro</p>
+                  <p className="font-bold text-slate-900">{formatBrl(summary.cashSales)}</p>
+                </div>
+                <div className="rounded-lg bg-slate-50 p-3">
+                  <p className="text-slate-500">Suprimentos</p>
+                  <p className="font-bold text-emerald-700">{formatBrl(summary.supplies)}</p>
+                </div>
+                <div className="rounded-lg bg-slate-50 p-3">
+                  <p className="text-slate-500">Sangrias</p>
+                  <p className="font-bold text-rose-700">{formatBrl(summary.withdrawals)}</p>
+                </div>
+                <div className="rounded-lg bg-slate-50 p-3">
+                  <p className="text-slate-500">Ajustes/estornos</p>
+                  <p className="font-bold text-slate-900">{formatBrl(summary.adjustments - summary.refunds)}</p>
+                </div>
+              </div>
+            </div>
+
+            <div className="bg-white border border-slate-200 rounded-2xl p-6 shadow-sm">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <p className="text-xs font-bold uppercase tracking-[0.2em] text-slate-400">Conta e recebiveis</p>
+                  <h3 className="mt-2 text-lg font-black text-slate-900">{formatBrl(summary.expectedAccount)}</h3>
+                </div>
+                <span className="rounded-full bg-sky-50 px-3 py-1 text-xs font-bold text-sky-700">nao entra na gaveta</span>
+              </div>
+              <div className="mt-4 grid grid-cols-2 gap-3 text-sm">
+                <div className="rounded-lg bg-slate-50 p-3">
+                  <p className="text-slate-500">Pix</p>
+                  <p className="font-bold text-slate-900">{formatBrl(summary.accountPix)}</p>
+                </div>
+                <div className="rounded-lg bg-slate-50 p-3">
+                  <p className="text-slate-500">Cartao</p>
+                  <p className="font-bold text-slate-900">{formatBrl(summary.accountCard)}</p>
+                </div>
+                <div className="rounded-lg bg-slate-50 p-3">
+                  <p className="text-slate-500">Recebe hoje</p>
+                  <p className="font-bold text-emerald-700">{formatBrl(summary.accountToday)}</p>
+                </div>
+                <div className="rounded-lg bg-slate-50 p-3">
+                  <p className="text-slate-500">Recebe depois</p>
+                  <p className="font-bold text-amber-700">{formatBrl(summary.accountFuture)}</p>
+                </div>
+              </div>
+              <p className="mt-3 text-xs text-slate-500">
+                Bruto {formatBrl(summary.accountGross)} - taxas {formatBrl(summary.accountFees)}.
+              </p>
             </div>
           </div>
 

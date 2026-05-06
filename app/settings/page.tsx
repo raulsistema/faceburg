@@ -2,8 +2,7 @@ import DashboardShell from '@/components/layout/DashboardShell';
 import { query } from '@/lib/db';
 import { normalizePrintCopies, normalizePrintEvents, normalizeReceiptOptions, normalizeReceiptText, normalizeReceiptWidth } from '@/lib/print-settings';
 import { getValidatedTenantSession } from '@/lib/tenant-auth';
-import PrintAgentSettings from './PrintAgentSettings';
-import WhatsAppAgentSettings from './WhatsAppAgentSettings';
+import LocalAgentSettings from './LocalAgentSettings';
 import EmitenteSettings from './EmitenteSettings';
 
 type TenantRow = {
@@ -219,8 +218,12 @@ export default async function SettingsPage() {
         </div>
 
         <EmitenteSettings initialData={emitenteInitialData} />
-        <PrintAgentSettings initialData={printInitialData} />
-        <WhatsAppAgentSettings initialData={whatsappInitialData} />
+        <LocalAgentSettings
+          tenantId={tenant?.id || ''}
+          tenantSlug={tenant?.slug || ''}
+          initialPrintData={printInitialData}
+          initialWhatsAppData={whatsappInitialData}
+        />
       </div>
     </DashboardShell>
   );

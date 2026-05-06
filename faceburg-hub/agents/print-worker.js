@@ -101,6 +101,43 @@ function markWsConnected() {
   wsConnectedOnce = true;
 }
 
+async function printPayload(job, options = {}) {
+  const payloadText = String(job?.payloadText || '');
+  const printerName = String(job?.printerName || PRINTER_NAME || '');
+  const jobId = String(job?.id || job?.jobId || 'local');
+  if (!payloadText.trim()) throw new Error('Conteudo de impressao vazio.');
+
+  if (process.platform === 'win32') {
+    const printResult = await printTextWindows(payloadText, printerName);
+    sendLog(`Job ${jobId} enviado via ${printResult.strategy.toUpperCase()}${printResult.printerName ? ` (${printResult.printerName})` : ''}.`);
+    if (printResult.fallbackUsed && printResult.previousFailures?.length) {
+      sendLog(`Fallback de impressao acionado no job ${jobId}: ${printResult.previousFailures.join(' | ')}`);
+    }
+    lastErrorMessage = '';
+    updateState({ status: 'ready', lastError: '', lastJobAt: new Date().toLocaleString('pt-BR') });
+    return {
+      strategy: printResult.strategy,
+      printerName: printResult.printerName || printerName || '',
+      fallbackUsed: Boolean(printResult.fallbackUsed),
+      local: Boolean(options.local),
+    };
+  }
+
+  sendLog(`[simulacao] ${payloadText}`);
+  lastErrorMessage = '';
+  updateState({ status: 'ready', lastError: '', lastJobAt: new Date().toLocaleString('pt-BR') });
+  return { strategy: 'simulation', printerName, local: Boolean(options.local) };
+}
+
+function sendLocalResponse(requestId, ok, dataOrError) {
+  if (!process.send || !requestId) return;
+  if (ok) {
+    process.send({ type: 'local-response', requestId, ok: true, data: dataOrError || {} });
+    return;
+  }
+  process.send({ type: 'local-response', requestId, ok: false, error: String(dataOrError?.message || dataOrError || 'Falha no agente local.') });
+}
+
 /* ─── printing ───────────────────────────────────────────────────── */
 
 /* ─── server communication ───────────────────────────────────────── */
@@ -130,23 +167,13 @@ async function pollOnce() {
 
   const job = pollData.job;
   try {
-    if (process.platform === 'win32') {
-      const printResult = await printTextWindows(String(job.payloadText || ''), PRINTER_NAME);
-      sendLog(`Job ${job.id} enviado via ${printResult.strategy.toUpperCase()}${printResult.printerName ? ` (${printResult.printerName})` : ''}.`);
-      if (printResult.fallbackUsed && printResult.previousFailures?.length) {
-        sendLog(`Fallback de impressao acionado no job ${job.id}: ${printResult.previousFailures.join(' | ')}`);
-      }
-    } else {
-      sendLog(`[simulacao] ${job.payloadText}`);
-    }
+    await printPayload(job);
     await fetchJson(`${SERVER_URL}/api/print/ack`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', 'x-agent-key': AGENT_KEY },
       body: JSON.stringify({ jobId: job.id, success: true }),
     });
     sendLog(`Job ${job.id} impresso com sucesso.`);
-    lastErrorMessage = '';
-    updateState({ status: 'ready', lastError: '', lastJobAt: new Date().toLocaleString('pt-BR') });
   } catch (err) {
     const msg = err instanceof Error ? err.message : 'Falha impressao';
     lastErrorMessage = msg;
@@ -277,7 +304,21 @@ function shutdown() {
   process.exit(0);
 }
 
-process.on('message', (msg) => { if (msg?.type === 'shutdown') shutdown(); });
+process.on('message', (msg) => {
+  if (msg?.type === 'shutdown') {
+    shutdown();
+    return;
+  }
+  if (msg?.type === 'print-direct') {
+    void printPayload(msg.payload, { local: true })
+      .then((result) => sendLocalResponse(msg.requestId, true, result))
+      .catch((error) => {
+        lastErrorMessage = error instanceof Error ? error.message : String(error || 'Falha impressao');
+        updateState({ status: 'ready', lastError: lastErrorMessage });
+        sendLocalResponse(msg.requestId, false, error);
+      });
+  }
+});
 process.on('SIGTERM', shutdown);
 process.on('SIGINT', shutdown);
 process.on('uncaughtException', (err) => {

@@ -9,6 +9,10 @@ type TenantRow = {
   status: string;
 };
 
+const PUBLIC_TENANT_CACHE_HEADERS = {
+  'Cache-Control': 'public, max-age=60, stale-while-revalidate=300',
+};
+
 export async function GET(_: Request, { params }: { params: Promise<{ slug: string }> }) {
   const { slug } = await params;
   const result = await query<TenantRow>(
@@ -28,11 +32,14 @@ export async function GET(_: Request, { params }: { params: Promise<{ slug: stri
     return NextResponse.json({ error: 'Tenant inactive' }, { status: 403 });
   }
 
-  return NextResponse.json({
-    tenant: {
-      name: tenant.name,
-      slug: tenant.slug,
-      primaryColor: tenant.primary_color,
+  return NextResponse.json(
+    {
+      tenant: {
+        name: tenant.name,
+        slug: tenant.slug,
+        primaryColor: tenant.primary_color,
+      },
     },
-  });
+    { headers: PUBLIC_TENANT_CACHE_HEADERS },
+  );
 }

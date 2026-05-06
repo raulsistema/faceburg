@@ -60,10 +60,11 @@ async function getTenantBySlug(slug: string) {
   return tenantResult.rows[0];
 }
 
-async function loadCustomerAndAddresses(tenantId: string, phone: string) {
+async function loadCustomerAndAddresses(tenantId: string, phone: string, options?: { includeOrders?: boolean }) {
   if (phone.length < 10) {
     return { found: false, customer: null, addresses: [], orders: [] };
   }
+  const includeOrders = options?.includeOrders !== false;
   const customerResult = await query<CustomerRow>(
     `SELECT id, name, phone, email, is_company, company_name, document_number
      FROM customers
@@ -89,38 +90,42 @@ async function loadCustomerAndAddresses(tenantId: string, phone: string) {
     [tenantId, customer.id],
   );
 
-  const ordersResult = await query<OrderRow>(
-    `SELECT
-      o.id,
-      o.delivery_address,
-      o.total::text,
-      o.status,
-      o.type,
-      o.payment_method,
-      o.created_at,
-      COALESCE(
-        STRING_AGG(
-          (oi.quantity::text || 'x ' || COALESCE(p.name, 'Produto removido')),
-          ', '
-          ORDER BY COALESCE(p.name, 'Produto removido')
-        ),
-        ''
-      ) AS items_summary
-    FROM orders o
-    LEFT JOIN order_items oi
-      ON oi.order_id = o.id
-    LEFT JOIN products p
-      ON p.id = oi.product_id
-     AND p.tenant_id = o.tenant_id
-    WHERE o.tenant_id = $1
-      AND regexp_replace(o.customer_phone, '\D', '', 'g') = $2
-    GROUP BY o.id
-    ORDER BY o.created_at DESC
-    LIMIT 10`,
-    [tenantId, phone],
-  );
+  const orders = includeOrders
+    ? (
+        await query<OrderRow>(
+          `SELECT
+            o.id,
+            o.delivery_address,
+            o.total::text,
+            o.status,
+            o.type,
+            o.payment_method,
+            o.created_at,
+            COALESCE(
+              STRING_AGG(
+                (oi.quantity::text || 'x ' || COALESCE(p.name, 'Produto removido')),
+                ', '
+                ORDER BY COALESCE(p.name, 'Produto removido')
+              ),
+              ''
+            ) AS items_summary
+          FROM orders o
+          LEFT JOIN order_items oi
+            ON oi.order_id = o.id
+          LEFT JOIN products p
+            ON p.id = oi.product_id
+           AND p.tenant_id = o.tenant_id
+          WHERE o.tenant_id = $1
+            AND regexp_replace(o.customer_phone, '\D', '', 'g') = $2
+          GROUP BY o.id
+          ORDER BY o.created_at DESC
+          LIMIT 10`,
+          [tenantId, phone],
+        )
+      ).rows
+    : [];
 
-  return {
+  const response = {
     found: true,
     customer: {
       id: customer.id,
@@ -144,7 +149,15 @@ async function loadCustomerAndAddresses(tenantId: string, phone: string) {
       reference: address.reference,
       isDefault: address.is_default,
     })),
-    orders: ordersResult.rows.map((order) => ({
+  };
+
+  if (!includeOrders) {
+    return response;
+  }
+
+  return {
+    ...response,
+    orders: orders.map((order) => ({
       id: order.id,
       deliveryAddress: order.delivery_address || '',
       total: Number(order.total || 0),
@@ -162,6 +175,7 @@ export async function GET(request: Request, { params }: { params: Promise<{ slug
     const { slug } = await params;
     const { searchParams } = new URL(request.url);
     const phone = normalizePhone(String(searchParams.get('phone') || '').trim());
+    const includeOrders = searchParams.get('includeOrders') !== 'false';
 
     const tenant = await getTenantBySlug(slug);
     if (!tenant) {
@@ -171,7 +185,7 @@ export async function GET(request: Request, { params }: { params: Promise<{ slug
       return NextResponse.json({ error: 'Empresa inativa.' }, { status: 403 });
     }
 
-    const result = await loadCustomerAndAddresses(tenant.id, phone);
+    const result = await loadCustomerAndAddresses(tenant.id, phone, { includeOrders });
     return NextResponse.json(result);
   } catch (error) {
     console.error('[public-customer] failed to load customer', error);
@@ -235,7 +249,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ slu
       );
     }
 
-    const result = await loadCustomerAndAddresses(tenant.id, phone);
+    const result = await loadCustomerAndAddresses(tenant.id, phone, { includeOrders: true });
     return NextResponse.json(result, { status: 201 });
   } catch (error) {
     console.error('[public-customer] failed to save customer', error);

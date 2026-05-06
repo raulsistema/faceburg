@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { ArrowDownUp, CalendarDays, Filter, RotateCcw } from 'lucide-react';
+import { AlertTriangle, ArrowDownUp, CalendarDays, Filter, RotateCcw } from 'lucide-react';
 
 type Summary = {
   totalFees: number;
@@ -9,9 +9,16 @@ type Summary = {
   netAmount: number;
   cashImpact: number;
   receivablePending: number;
+  accountAmount: number;
+  accountToday: number;
+  accountFuture: number;
   totalDiscount: number;
   totalSurcharge: number;
   totalDeliveryFee: number;
+  salesCount: number;
+  salesWithoutItemsCount: number;
+  salesWithoutItemsAmount: number;
+  salesWithoutItemsFees: number;
 };
 
 type Movement = {
@@ -53,9 +60,16 @@ const defaultSummary: Summary = {
   netAmount: 0,
   cashImpact: 0,
   receivablePending: 0,
+  accountAmount: 0,
+  accountToday: 0,
+  accountFuture: 0,
   totalDiscount: 0,
   totalSurcharge: 0,
   totalDeliveryFee: 0,
+  salesCount: 0,
+  salesWithoutItemsCount: 0,
+  salesWithoutItemsAmount: 0,
+  salesWithoutItemsFees: 0,
 };
 
 const defaultFilters: Filters = {
@@ -85,6 +99,22 @@ function formatCurrency(value: number) {
     style: 'currency',
     currency: 'BRL',
   });
+}
+
+function formatDateTime(value: string) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '-';
+  return date.toLocaleString('pt-BR');
+}
+
+function formatDateOnly(value: string) {
+  if (/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    const [year, month, day] = value.split('-');
+    return `${day}/${month}/${year}`;
+  }
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '-';
+  return date.toLocaleDateString('pt-BR');
 }
 
 function moneyClass(value: number, positiveClass = 'text-emerald-600') {
@@ -163,7 +193,7 @@ export default function FinancialMovementsView() {
           <div>
             <h2 className="text-xl font-bold text-slate-900">Movimentacoes</h2>
             <p className="text-sm text-slate-500">
-              Livro financeiro com vendas concluidas, caixa, recebiveis, taxas e prazos de recebimento.
+              Livro financeiro sem mistura: venda, gaveta, conta, recebiveis, taxas e prazos.
             </p>
           </div>
           <div className="flex items-center gap-2 rounded-xl bg-slate-50 px-3 py-2 text-xs font-bold uppercase tracking-[0.14em] text-slate-500">
@@ -175,28 +205,57 @@ export default function FinancialMovementsView() {
 
       {error ? <p className="text-sm text-red-500">{error}</p> : null}
 
+      {summary.salesWithoutItemsCount > 0 ? (
+        <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4 shadow-sm">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-start">
+            <span className="inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-amber-100 text-amber-700">
+              <AlertTriangle className="h-5 w-5" aria-hidden="true" />
+            </span>
+            <div>
+              <p className="text-sm font-black uppercase tracking-[0.12em] text-amber-900">Conferencia financeira</p>
+              <p className="mt-1 text-sm leading-6 text-amber-900">
+                {summary.salesWithoutItemsCount} venda(s) concluida(s) sem itens entram neste filtro. Elas somam{' '}
+                <strong>{formatCurrency(summary.salesWithoutItemsAmount)}</strong> e geram{' '}
+                <strong>{formatCurrency(summary.salesWithoutItemsFees)}</strong> em taxas.
+              </p>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
       <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-6">
         <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm xl:col-span-2">
           <p className="text-xs font-bold uppercase tracking-[0.18em] text-slate-400">Bruto vendido</p>
           <p className="mt-3 text-2xl font-black text-slate-900">{formatCurrency(summary.grossAmount)}</p>
-          <p className="mt-1 text-xs text-slate-500">Subtotal das vendas filtradas.</p>
+          <p className="mt-1 text-xs text-slate-500">{summary.salesCount} venda(s) concluidas no filtro.</p>
         </div>
         <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm xl:col-span-2">
           <p className="text-xs font-bold uppercase tracking-[0.18em] text-slate-400">Liquido vendido</p>
           <p className="mt-3 text-2xl font-black text-emerald-600">{formatCurrency(summary.netAmount)}</p>
-          <p className="mt-1 text-xs text-slate-500">Total menos taxas de pagamento.</p>
+          <p className="mt-1 text-xs text-slate-500">Vendas menos taxas, sem duplicar recebiveis.</p>
         </div>
         <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
           <p className="text-xs font-bold uppercase tracking-[0.18em] text-slate-400">Taxas</p>
           <p className="mt-3 text-2xl font-black text-rose-600">{formatCurrency(summary.totalFees)}</p>
+          {summary.salesWithoutItemsFees > 0 ? (
+            <p className="mt-1 text-xs text-amber-700">{formatCurrency(summary.salesWithoutItemsFees)} sem itens.</p>
+          ) : null}
         </div>
         <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
-          <p className="text-xs font-bold uppercase tracking-[0.18em] text-slate-400">Recebiveis</p>
+          <p className="text-xs font-bold uppercase tracking-[0.18em] text-slate-400">Pendentes</p>
           <p className="mt-3 text-2xl font-black text-amber-600">{formatCurrency(summary.receivablePending)}</p>
         </div>
-        <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
-          <p className="text-xs font-bold uppercase tracking-[0.18em] text-slate-400">Caixa</p>
+        <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm xl:col-span-2">
+          <p className="text-xs font-bold uppercase tracking-[0.18em] text-slate-400">Gaveta</p>
           <p className={`mt-3 text-2xl font-black ${moneyClass(summary.cashImpact)}`}>{formatCurrency(summary.cashImpact)}</p>
+          <p className="mt-1 text-xs text-slate-500">Dinheiro fisico: vendas em dinheiro, sangrias e ajustes.</p>
+        </div>
+        <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm xl:col-span-2">
+          <p className="text-xs font-bold uppercase tracking-[0.18em] text-slate-400">Conta</p>
+          <p className="mt-3 text-2xl font-black text-sky-600">{formatCurrency(summary.accountAmount)}</p>
+          <p className="mt-1 text-xs text-slate-500">
+            Hoje {formatCurrency(summary.accountToday)} - futuro {formatCurrency(summary.accountFuture)}
+          </p>
         </div>
         <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
           <p className="text-xs font-bold uppercase tracking-[0.18em] text-slate-400">Descontos</p>
@@ -305,8 +364,8 @@ export default function FinancialMovementsView() {
                       <p className="mt-1 text-sm text-slate-500">{details}</p>
                       <p className="mt-1 inline-flex items-center gap-1 text-xs text-slate-400">
                         <CalendarDays className="h-3 w-3" aria-hidden="true" />
-                        {new Date(movement.createdAt).toLocaleString('pt-BR')}
-                        {movement.dueDate ? ` - Vencimento ${new Date(movement.dueDate).toLocaleDateString('pt-BR')}` : ''}
+                        {formatDateTime(movement.createdAt)}
+                        {movement.dueDate ? ` - Vencimento ${formatDateOnly(movement.dueDate)}` : ''}
                       </p>
                     </div>
 

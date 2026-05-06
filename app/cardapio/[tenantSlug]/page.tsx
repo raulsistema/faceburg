@@ -249,8 +249,14 @@ type CustomerLookupResponse = {
 type CustomerLookupCacheEntry = {
   tenantSlug: string;
   phone: string;
+  includeOrders: boolean;
   loadedAt: number;
   data: CustomerLookupResponse | null;
+};
+
+type DeliveryFeeQuoteCacheEntry = {
+  loadedAt: number;
+  quote: DeliveryFeeQuoteResponse;
 };
 
 type MenuStory = {
@@ -276,12 +282,13 @@ const EMPTY_ADDRESS_FORM: AddressFormState = {
   reference: '',
 };
 
-const CUSTOMER_LOOKUP_CACHE_MS = 5_000;
+const CUSTOMER_LOOKUP_CACHE_MS = 30_000;
+const DELIVERY_FEE_QUOTE_CACHE_MS = 5 * 60_000;
 const NETWORK_TIMEOUT_MS = 8_000;
 const CHECKOUT_TIMEOUT_MS = 20_000;
 const NETWORK_RETRY_DELAY_MS = 450;
-const INITIAL_PRODUCT_RENDER_LIMIT = 72;
-const PRODUCT_RENDER_INCREMENT = 72;
+const INITIAL_PRODUCT_RENDER_LIMIT = 36;
+const PRODUCT_RENDER_INCREMENT = 36;
 
 type RequestJsonOptions = RequestInit & {
   timeoutMs?: number;
@@ -290,6 +297,42 @@ type RequestJsonOptions = RequestInit & {
 
 function hasManualAddressDraft(form: AddressFormState) {
   return Object.values(form).some((value) => String(value || '').trim().length > 0);
+}
+
+function isAddressReadyForDeliveryQuote(address: {
+  street?: string | null;
+  number?: string | null;
+  city?: string | null;
+  state?: string | null;
+  zipCode?: string | null;
+}) {
+  const street = String(address.street || '').trim();
+  const number = String(address.number || '').trim();
+  const city = String(address.city || '').trim();
+  const state = String(address.state || '').trim();
+  const zipCodeDigits = String(address.zipCode || '').replace(/\D/g, '');
+  if (!street || !number) return false;
+  return zipCodeDigits.length >= 8 || (city.length >= 2 && state.length === 2);
+}
+
+function buildDeliveryFeeQuoteKey(input: {
+  tenantSlug: string;
+  mode: Tenant['deliveryFeeMode'];
+  base: number;
+  perKm: number;
+  table: DeliveryFeeTier[];
+  address: Record<string, unknown> | null;
+  freeform: string;
+}) {
+  return JSON.stringify({
+    tenantSlug: input.tenantSlug,
+    mode: input.mode,
+    base: input.base,
+    perKm: input.perKm,
+    table: input.table,
+    address: input.address,
+    freeform: input.freeform.trim().toLowerCase(),
+  });
 }
 
 function brl(value: number) {
@@ -617,12 +660,15 @@ export default function PublicMenuPage() {
   const addressStreetBoxRef = useRef<HTMLDivElement | null>(null);
   const tenantSlugRef = useRef(tenantSlug || '');
   const addressEntryModeRef = useRef<AddressEntryMode>('new');
+  const selectedSavedAddressIdRef = useRef('');
   const addressFormRef = useRef<AddressFormState>({ ...EMPTY_ADDRESS_FORM });
   const savedAddressesRef = useRef<SavedAddress[]>([]);
   const customerLookupCacheRef = useRef<CustomerLookupCacheEntry | null>(null);
+  const deliveryFeeQuoteCacheRef = useRef<Map<string, DeliveryFeeQuoteCacheEntry>>(new Map());
   const customerLookupPromiseRef = useRef<{
     tenantSlug: string;
     phone: string;
+    includeOrders: boolean;
     promise: Promise<CustomerLookupResponse | null>;
   } | null>(null);
   const checkoutKeyRef = useRef('');
@@ -649,6 +695,10 @@ export default function PublicMenuPage() {
   useEffect(() => {
     addressEntryModeRef.current = addressEntryMode;
   }, [addressEntryMode]);
+
+  useEffect(() => {
+    selectedSavedAddressIdRef.current = selectedSavedAddressId;
+  }, [selectedSavedAddressId]);
 
   useEffect(() => {
     addressFormRef.current = addressForm;
@@ -689,10 +739,13 @@ export default function PublicMenuPage() {
     setCustomerDocumentNumber(String(data.customer.documentNumber || ''));
 
     const incomingAddresses = Array.isArray(data.addresses) ? data.addresses : [];
-    const incomingOrders = Array.isArray(data.orders) ? data.orders : [];
     setSavedAddresses(incomingAddresses);
-    setPortalOrders(incomingOrders);
+    if (Array.isArray(data.orders)) {
+      setPortalOrders(data.orders);
+    }
     if (keepManualAddressDraft) {
+      addressEntryModeRef.current = 'new';
+      selectedSavedAddressIdRef.current = '';
       setAddressEntryMode('new');
       setSelectedSavedAddressId('');
       return;
@@ -704,9 +757,14 @@ export default function PublicMenuPage() {
     setAddressForm({ ...EMPTY_ADDRESS_FORM });
     const defaultAddress = incomingAddresses.find((address) => address.isDefault);
     if (incomingAddresses.length > 0) {
+      const nextAddressId = defaultAddress?.id || incomingAddresses[0]?.id || '';
+      addressEntryModeRef.current = 'saved';
+      selectedSavedAddressIdRef.current = nextAddressId;
       setAddressEntryMode('saved');
-      setSelectedSavedAddressId(defaultAddress?.id || incomingAddresses[0]?.id || '');
+      setSelectedSavedAddressId(nextAddressId);
     } else {
+      addressEntryModeRef.current = 'new';
+      selectedSavedAddressIdRef.current = '';
       setAddressEntryMode('new');
       setSelectedSavedAddressId('');
     }
@@ -733,34 +791,47 @@ export default function PublicMenuPage() {
       phone: String(data.customer.phone || ''),
       email: data.customer.email || null,
     });
-    setPortalOrders(Array.isArray(data.orders) ? data.orders : []);
+    if (Array.isArray(data.orders)) {
+      setPortalOrders(data.orders);
+    }
     setSavedAddresses(Array.isArray(data.addresses) ? data.addresses : []);
 
-    if (addressEntryMode === 'saved') {
+    if (addressEntryModeRef.current === 'saved') {
       const availableAddresses = Array.isArray(data.addresses) ? data.addresses : [];
       if (availableAddresses.length === 0) {
+        addressEntryModeRef.current = 'new';
+        selectedSavedAddressIdRef.current = '';
         setSelectedSavedAddressId('');
         setAddressEntryMode('new');
         return;
       }
 
-      if (!selectedSavedAddressId || !availableAddresses.some((address) => address.id === selectedSavedAddressId)) {
+      const selectedAddressId = selectedSavedAddressIdRef.current;
+      if (!selectedAddressId || !availableAddresses.some((address) => address.id === selectedAddressId)) {
         const defaultAddress = availableAddresses.find((address) => address.isDefault);
-        setSelectedSavedAddressId(defaultAddress?.id || availableAddresses[0].id);
+        const nextAddressId = defaultAddress?.id || availableAddresses[0].id;
+        selectedSavedAddressIdRef.current = nextAddressId;
+        setSelectedSavedAddressId(nextAddressId);
       }
     }
-  }, [addressEntryMode, selectedSavedAddressId]);
+  }, []);
 
-  const syncPortalByPhone = useCallback(async (rawPhone: string, preserveAddressState = false) => {
+  const syncPortalByPhone = useCallback(async (
+    rawPhone: string,
+    preserveAddressState = false,
+    options: { includeOrders?: boolean } = {},
+  ) => {
     if (!tenantSlug) return null;
     const requestTenantSlug = tenantSlug;
     const digits = normalizePhone(rawPhone);
     if (digits.length < 10) return null;
+    const includeOrders = Boolean(options.includeOrders);
     const cached = customerLookupCacheRef.current;
     if (
       cached
       && cached.tenantSlug === requestTenantSlug
       && cached.phone === digits
+      && (!includeOrders || cached.includeOrders || !cached.data?.found)
       && Date.now() - cached.loadedAt < CUSTOMER_LOOKUP_CACHE_MS
     ) {
       const data = cached.data;
@@ -777,13 +848,18 @@ export default function PublicMenuPage() {
 
     const inflight = customerLookupPromiseRef.current;
     const lookupPromise =
-      inflight && inflight.tenantSlug === requestTenantSlug && inflight.phone === digits
+      inflight
+      && inflight.tenantSlug === requestTenantSlug
+      && inflight.phone === digits
+      && (!includeOrders || inflight.includeOrders)
         ? inflight.promise
         : (() => {
             const promise = (async () => {
               try {
+                const params = new URLSearchParams({ phone: digits });
+                if (!includeOrders) params.set('includeOrders', 'false');
                 const { response, data } = await requestJson<CustomerLookupResponse>(
-                  `/api/public/customer/${requestTenantSlug}?phone=${encodeURIComponent(digits)}`,
+                  `/api/public/customer/${requestTenantSlug}?${params.toString()}`,
                   { cache: 'no-store', retries: 1 },
                 );
                 if (!response.ok) {
@@ -793,6 +869,7 @@ export default function PublicMenuPage() {
                 customerLookupCacheRef.current = {
                   tenantSlug: requestTenantSlug,
                   phone: digits,
+                  includeOrders,
                   loadedAt: Date.now(),
                   data: result,
                 };
@@ -802,6 +879,7 @@ export default function PublicMenuPage() {
                   customerLookupPromiseRef.current
                   && customerLookupPromiseRef.current.tenantSlug === requestTenantSlug
                   && customerLookupPromiseRef.current.phone === digits
+                  && customerLookupPromiseRef.current.includeOrders === includeOrders
                 ) {
                   customerLookupPromiseRef.current = null;
                 }
@@ -810,6 +888,7 @@ export default function PublicMenuPage() {
             customerLookupPromiseRef.current = {
               tenantSlug: requestTenantSlug,
               phone: digits,
+              includeOrders,
               promise,
             };
             return promise;
@@ -877,6 +956,7 @@ export default function PublicMenuPage() {
       customerLookupCacheRef.current = {
         tenantSlug,
         phone: phoneDigits,
+        includeOrders: true,
         loadedAt: Date.now(),
         data: {
           ...data,
@@ -903,7 +983,7 @@ export default function PublicMenuPage() {
 
     try {
       if (!portalNameInput.trim()) {
-        const existingPortal = await syncPortalByPhone(phoneDigits);
+        const existingPortal = await syncPortalByPhone(phoneDigits, false, { includeOrders: true });
         if (!existingPortal) {
           setPortalError('Cadastro nao encontrado. Informe seu nome para criar o portal agora.');
           return;
@@ -927,18 +1007,13 @@ export default function PublicMenuPage() {
       if (!tenantSlug) return;
       setLoading(true);
       try {
-        const [menuResult, paymentMethodsResult] = await Promise.all([
-          requestJson<{
-            tenant?: Tenant | null;
-            stories?: MenuStory[];
-            categories?: Category[];
-            products?: Product[];
-          }>(`/api/public/menu/${tenantSlug}`, { cache: 'default', retries: 1 }),
-          requestJson<{ paymentMethods?: Array<Record<string, unknown>> }>(
-            `/api/public/payment-methods/${tenantSlug}`,
-            { cache: 'no-store', retries: 1 },
-          ).catch(() => null),
-        ]);
+        const menuResult = await requestJson<{
+          tenant?: Tenant | null;
+          stories?: MenuStory[];
+          categories?: Category[];
+          products?: Product[];
+          paymentMethods?: Array<Record<string, unknown>>;
+        }>(`/api/public/menu/${tenantSlug}`, { cache: 'default', retries: 1 });
         const { response: menuResponse, data } = menuResult;
         if (!menuResponse.ok) {
           if (mounted) {
@@ -952,7 +1027,6 @@ export default function PublicMenuPage() {
           setLoading(false);
           return;
         }
-        const paymentMethodsData = paymentMethodsResult?.response.ok ? paymentMethodsResult.data : null;
         if (!data?.tenant) {
           if (mounted) {
             setTenant(null);
@@ -965,8 +1039,8 @@ export default function PublicMenuPage() {
           setLoading(false);
           return;
         }
-        const rawPaymentMethods = Array.isArray(paymentMethodsData?.paymentMethods)
-          ? paymentMethodsData.paymentMethods
+        const rawPaymentMethods = Array.isArray(data.paymentMethods)
+          ? data.paymentMethods
           : [];
         const nextPaymentMethods: PaymentMethodOption[] = rawPaymentMethods
               .map((method: Record<string, unknown>) => {
@@ -1037,6 +1111,8 @@ export default function PublicMenuPage() {
     setCustomerLookupDone(false);
     setCustomerLookupFound(false);
     setSavedAddresses(emptyState.savedAddresses);
+    addressEntryModeRef.current = emptyState.addressEntryMode;
+    selectedSavedAddressIdRef.current = emptyState.selectedSavedAddressId;
     setAddressEntryMode(emptyState.addressEntryMode);
     setSelectedSavedAddressId(emptyState.selectedSavedAddressId);
     setAddressForm(emptyState.addressForm);
@@ -1090,7 +1166,7 @@ export default function PublicMenuPage() {
       if (typeof document !== 'undefined' && document.hidden) return;
       setPortalSyncing(true);
       try {
-        await syncPortalByPhone(portalPhone, true);
+        await syncPortalByPhone(portalPhone, true, { includeOrders: true });
       } catch {
         // Mantem a sessao local do portal mesmo se a atualizacao falhar.
       } finally {
@@ -1125,6 +1201,8 @@ export default function PublicMenuPage() {
       setCustomerLookupFound(false);
       setCustomerLookupLoading(false);
       setSavedAddresses([]);
+      addressEntryModeRef.current = 'new';
+      selectedSavedAddressIdRef.current = '';
       setAddressEntryMode('new');
       setSelectedSavedAddressId('');
       if (!keepManualAddressDraft) {
@@ -1156,6 +1234,8 @@ export default function PublicMenuPage() {
           setCustomerLookupDone(true);
           setCustomerLookupFound(false);
           setSavedAddresses([]);
+          addressEntryModeRef.current = 'new';
+          selectedSavedAddressIdRef.current = '';
           setAddressEntryMode('new');
           setSelectedSavedAddressId('');
           if (!keepManualAddressDraft) {
@@ -1216,7 +1296,9 @@ export default function PublicMenuPage() {
     if (addressEntryMode === 'new') return;
     if (selectedSavedAddressId) return;
     const defaultAddress = savedAddresses.find((address) => address.isDefault);
-    setSelectedSavedAddressId(defaultAddress?.id || savedAddresses[0].id);
+    const nextAddressId = defaultAddress?.id || savedAddresses[0].id;
+    selectedSavedAddressIdRef.current = nextAddressId;
+    setSelectedSavedAddressId(nextAddressId);
   }, [addressEntryMode, savedAddresses, selectedSavedAddressId]);
 
   const applyManualAddressZipLookup = useCallback((fields: { street?: string; neighborhood?: string; city?: string; state?: string; complement?: string }) => {
@@ -1377,6 +1459,16 @@ export default function PublicMenuPage() {
       };
     }
 
+    const baseQuote: DeliveryFeeQuoteResponse = {
+      deliveryFeeAmount: Number(tenant.deliveryFeeBase || 0),
+      distanceKm: null,
+      distanceMeters: null,
+      deliveryFeeMode: tenant.deliveryFeeMode,
+      deliveryFeePerKm: Number(tenant.deliveryFeePerKm || 0),
+      matchedTier: null,
+      usedFallback: false,
+    };
+
     if (tenant.deliveryFeeMode === 'fixed') {
       setDeliveryFeeQuote({
         deliveryFeeAmount: Number(tenant.deliveryFeeBase || 0),
@@ -1414,7 +1506,42 @@ export default function PublicMenuPage() {
               zipCode: addressForm.zipCode,
               reference: addressForm.reference,
             }
-          : null;
+        : null;
+
+    const addressReady =
+      !usingNewAddress && selectedSavedAddress
+        ? isAddressReadyForDeliveryQuote(selectedSavedAddress)
+        : usingNewAddress
+          ? isAddressReadyForDeliveryQuote(addressForm)
+          : false;
+
+    if (!addressReady) {
+      setDeliveryFeeQuote(baseQuote);
+      setDeliveryFeeLoading(false);
+      return () => {
+        active = false;
+      };
+    }
+
+    const quoteKey = buildDeliveryFeeQuoteKey({
+      tenantSlug,
+      mode: tenant.deliveryFeeMode,
+      base: Number(tenant.deliveryFeeBase || 0),
+      perKm: Number(tenant.deliveryFeePerKm || 0),
+      table: tenant.deliveryFeeTable,
+      address: addressPayload,
+      freeform: effectiveDeliveryAddress,
+    });
+    const cachedQuote = deliveryFeeQuoteCacheRef.current.get(quoteKey);
+    if (cachedQuote && Date.now() - cachedQuote.loadedAt < DELIVERY_FEE_QUOTE_CACHE_MS) {
+      setDeliveryFeeQuote(cachedQuote.quote);
+      setDeliveryFeeLoading(false);
+      return () => {
+        active = false;
+      };
+    }
+
+    setDeliveryFeeQuote(baseQuote);
 
     const timer = setTimeout(async () => {
       setDeliveryFeeLoading(true);
@@ -1423,8 +1550,8 @@ export default function PublicMenuPage() {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
           cache: 'no-store',
-          timeoutMs: 9_000,
-          retries: 1,
+          timeoutMs: 6_000,
+          retries: 0,
           body: JSON.stringify({
             orderType,
             deliveryAddress: effectiveDeliveryAddress,
@@ -1434,17 +1561,13 @@ export default function PublicMenuPage() {
         if (!active) return;
         if (!response.ok || !data) {
           setDeliveryFeeQuote({
-            deliveryFeeAmount: Number(tenant.deliveryFeeBase || 0),
-            distanceKm: null,
-            distanceMeters: null,
-            deliveryFeeMode: tenant.deliveryFeeMode,
-            deliveryFeePerKm: Number(tenant.deliveryFeePerKm || 0),
+            ...baseQuote,
             matchedTier: null,
             usedFallback: true,
           });
           return;
         }
-        setDeliveryFeeQuote({
+        const nextQuote: DeliveryFeeQuoteResponse = {
           deliveryFeeAmount: Number(data.deliveryFeeAmount ?? tenant.deliveryFeeBase ?? 0),
           distanceKm: data.distanceKm ?? null,
           distanceMeters: data.distanceMeters ?? null,
@@ -1452,15 +1575,20 @@ export default function PublicMenuPage() {
           deliveryFeePerKm: Number(data.deliveryFeePerKm ?? tenant.deliveryFeePerKm ?? 0),
           matchedTier: data.matchedTier ?? null,
           usedFallback: Boolean(data.usedFallback),
+        };
+        deliveryFeeQuoteCacheRef.current.set(quoteKey, {
+          loadedAt: Date.now(),
+          quote: nextQuote,
         });
+        if (deliveryFeeQuoteCacheRef.current.size > 80) {
+          const oldestKey = deliveryFeeQuoteCacheRef.current.keys().next().value;
+          if (oldestKey) deliveryFeeQuoteCacheRef.current.delete(oldestKey);
+        }
+        setDeliveryFeeQuote(nextQuote);
       } catch {
         if (!active) return;
         setDeliveryFeeQuote({
-          deliveryFeeAmount: Number(tenant.deliveryFeeBase || 0),
-          distanceKm: null,
-          distanceMeters: null,
-          deliveryFeeMode: tenant.deliveryFeeMode,
-          deliveryFeePerKm: Number(tenant.deliveryFeePerKm || 0),
+          ...baseQuote,
           matchedTier: null,
           usedFallback: true,
         });
@@ -1476,6 +1604,7 @@ export default function PublicMenuPage() {
       clearTimeout(timer);
     };
   }, [
+    addressForm,
     addressForm.city,
     addressForm.neighborhood,
     addressForm.number,
@@ -1495,6 +1624,14 @@ export default function PublicMenuPage() {
     orderType === 'delivery'
       ? Number(deliveryFeeQuote?.deliveryFeeAmount ?? tenant?.deliveryFeeBase ?? 0)
       : 0;
+  const deliveryAddressReadyForQuote =
+    orderType !== 'delivery' ||
+    tenant?.deliveryFeeMode === 'fixed' ||
+    (!usingNewAddress && selectedSavedAddress
+      ? isAddressReadyForDeliveryQuote(selectedSavedAddress)
+      : usingNewAddress
+        ? isAddressReadyForDeliveryQuote(addressForm)
+        : false);
   const baseTotal = subtotal + deliveryFee;
   const total = baseTotal;
   const parsedChangeForAmount = useMemo(() => parseMoneyInput(changeFor), [changeFor]);
@@ -1969,6 +2106,13 @@ export default function PublicMenuPage() {
       if (!usingNewAddress && selectedSavedAddress && !String(selectedSavedAddress.number || '').trim()) {
         return setFormError('O endereco salvo selecionado precisa ter numero. Cadastre um novo endereco ou escolha outro.');
       }
+      if (tenant.deliveryFeeMode !== 'fixed' && !deliveryAddressReadyForQuote) {
+        return setFormError(
+          usingNewAddress
+            ? 'Para calcular a entrega, informe rua, numero e cidade/UF ou CEP.'
+            : 'O endereco salvo precisa de cidade/UF ou CEP para calcular a entrega. Cadastre um novo endereco completo.',
+        );
+      }
       if (availablePaymentMethods.length === 0) {
         return setFormError('A loja ainda nao configurou formas de pagamento para este cardapio.');
       }
@@ -2019,6 +2163,14 @@ export default function PublicMenuPage() {
       }
       if (!usingNewAddress && selectedSavedAddress && !String(selectedSavedAddress.number || '').trim()) {
         setFormError('O endereco salvo selecionado precisa ter numero. Cadastre um novo endereco ou escolha outro.');
+        return;
+      }
+      if (tenant.deliveryFeeMode !== 'fixed' && !deliveryAddressReadyForQuote) {
+        setFormError(
+          usingNewAddress
+            ? 'Para calcular a entrega, informe rua, numero e cidade/UF ou CEP.'
+            : 'O endereco salvo precisa de cidade/UF ou CEP para calcular a entrega. Cadastre um novo endereco completo.',
+        );
         return;
       }
       if (
@@ -2133,7 +2285,7 @@ export default function PublicMenuPage() {
       });
 
       try {
-        const refreshedPortal = await syncPortalByPhone(customerPhone);
+        const refreshedPortal = await syncPortalByPhone(customerPhone, true, { includeOrders: true });
         if (!refreshedPortal && !portalCustomer) {
           setPortalCustomer({
             id: normalizePhone(customerPhone),
@@ -2277,9 +2429,9 @@ export default function PublicMenuPage() {
           <div className="flex flex-col md:flex-row md:items-start gap-4 md:gap-6">
             <div className="w-28 h-28 md:w-36 md:h-36 rounded-xl bg-slate-100 overflow-hidden shrink-0 border border-slate-200">
               {tenant.logoUrl ? (
-                <AppImage src={tenant.logoUrl} alt={`${tenant.name} logo`} width={144} height={144} sizes="144px" className="h-full w-full object-cover" />
+                <AppImage src={tenant.logoUrl} alt={`${tenant.name} logo`} width={144} height={144} sizes="144px" priority className="h-full w-full object-cover" />
               ) : products[0]?.image_url ? (
-                <AppImage src={products[0].image_url} alt={tenant.name} width={144} height={144} sizes="144px" className="h-full w-full object-cover" />
+                <AppImage src={products[0].image_url} alt={tenant.name} width={144} height={144} sizes="144px" priority className="h-full w-full object-cover" />
               ) : (
                 <div className="w-full h-full grid place-items-center text-slate-400 text-xs">LOGO</div>
               )}
@@ -2401,10 +2553,10 @@ export default function PublicMenuPage() {
                     ) : null}
                   </div>
                   <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
-                    {items.map((product) => (
+                    {items.map((product, productIndex) => (
                       <article key={product.id} className="bg-white border border-slate-200 rounded-xl overflow-hidden flex">
                         <div className="w-28 h-28 bg-slate-100 shrink-0">
-                          {product.image_url ? <AppImage src={product.image_url} alt={product.name} width={112} height={112} sizes="112px" className="h-full w-full object-cover" /> : <div className="w-full h-full grid place-items-center text-slate-400 text-xs">Sem imagem</div>}
+                          {product.image_url ? <AppImage src={product.image_url} alt={product.name} width={112} height={112} sizes="112px" priority={productIndex === 0} className="h-full w-full object-cover" /> : <div className="w-full h-full grid place-items-center text-slate-400 text-xs">Sem imagem</div>}
                         </div>
                         <div className="flex-1 p-3 flex flex-col">
                           <h3 className="font-bold text-slate-900 text-2xl leading-none">{product.name}</h3>
@@ -3245,8 +3397,11 @@ export default function PublicMenuPage() {
                             <button
                               key={address.id}
                               onClick={() => {
+                                addressEntryModeRef.current = 'saved';
+                                selectedSavedAddressIdRef.current = address.id;
                                 setAddressEntryMode('saved');
                                 setSelectedSavedAddressId(address.id);
+                                setDeliveryAddress(formatSavedAddress(address));
                               }}
                               className={cn(
                                 'w-full rounded-lg border px-3 py-2 text-left',
@@ -3260,6 +3415,8 @@ export default function PublicMenuPage() {
                         )}
                         <button
                           onClick={() => {
+                            addressEntryModeRef.current = 'new';
+                            selectedSavedAddressIdRef.current = '';
                             setAddressEntryMode('new');
                             setSelectedSavedAddressId('');
                             setDeliveryAddress('');
@@ -3446,6 +3603,11 @@ export default function PublicMenuPage() {
                 {tenant?.deliveryFeeMode !== 'fixed' && deliveryFeeQuote?.usedFallback ? (
                   <p className="text-xs text-amber-700">
                     Nao foi possivel calcular o trajeto agora. O sistema usou a taxa reserva da loja.
+                  </p>
+                ) : null}
+                {tenant?.deliveryFeeMode !== 'fixed' && orderType === 'delivery' && checkoutStep === 'address' && !deliveryAddressReadyForQuote ? (
+                  <p className="text-xs text-sky-700">
+                    Complete rua, numero e cidade/UF ou CEP para calcular a taxa exata.
                   </p>
                 ) : null}
                 {formError ? <p className="text-sm text-rose-600">{formError}</p> : null}

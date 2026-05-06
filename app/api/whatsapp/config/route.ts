@@ -33,6 +33,7 @@ type WhatsappConfigResponse = {
   lastSeenAt: string | null;
   activationPending?: boolean;
   requiresHubSetup?: boolean;
+  requiresLocalAgentSetup?: boolean;
   message?: string;
 };
 
@@ -88,6 +89,7 @@ export async function GET() {
     ...serializeConfig(row),
     activationPending,
     requiresHubSetup: activationPending,
+    requiresLocalAgentSetup: activationPending,
   });
 }
 
@@ -166,7 +168,7 @@ export async function PATCH(request: Request) {
   const message = !enabled
     ? 'WhatsApp automatico desativado.'
     : activationPending
-      ? 'WhatsApp ativado. No Faceburg App deste computador, abra o WhatsApp e conecte a conta da empresa para concluir.'
+      ? 'WhatsApp ativado. No agente local deste computador, abra o WhatsApp e conecte a conta da empresa para concluir.'
       : 'WhatsApp ativado e conectado.';
 
   return NextResponse.json({
@@ -174,6 +176,7 @@ export async function PATCH(request: Request) {
     ...serializeConfig(savedRow, enabled, nextKey),
     activationPending,
     requiresHubSetup: activationPending,
+    requiresLocalAgentSetup: activationPending,
     message,
   });
 }

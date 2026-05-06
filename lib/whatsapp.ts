@@ -31,6 +31,14 @@ type AgentConfigRow = {
   last_seen_at: string | null;
 };
 
+export type PreparedOrderWhatsappJob = {
+  id: string;
+  orderId: string;
+  eventType: 'new_order' | 'status_update';
+  targetPhone: string;
+  payloadText: string;
+};
+
 const HUB_HEARTBEAT_GRACE_MS = 2 * 60 * 1000;
 
 function isHubActive(sessionStatus: string, lastSeenAt: string | null) {
@@ -152,6 +160,31 @@ export async function enqueueOrderWhatsappJob(
   eventType: 'new_order' | 'status_update',
   executor: DbExecutor = { query },
 ) {
+  const prepared = await prepareOrderWhatsappJob(tenantId, orderId, eventType, executor, {
+    requireActiveHub: true,
+    disableWhenOffline: false,
+  });
+  if (!prepared) return false;
+
+  await executor.query(
+    `INSERT INTO whatsapp_jobs
+      (id, tenant_id, order_id, target_phone, event_type, payload_text, status, attempt_count, created_at, updated_at)
+     VALUES
+      ($1, $2, $3, $4, $5, $6, 'queued', 0, NOW(), NOW())`,
+    [prepared.id, tenantId, orderId, prepared.targetPhone, eventType, prepared.payloadText],
+  );
+  await notifyAgentJobAvailable(tenantId, 'whatsapp', executor);
+
+  return true;
+}
+
+export async function prepareOrderWhatsappJob(
+  tenantId: string,
+  orderId: string,
+  eventType: 'new_order' | 'status_update',
+  executor: DbExecutor = { query },
+  options: { requireActiveHub?: boolean; disableWhenOffline?: boolean } = {},
+) {
   const configResult = await executor.query<AgentConfigRow>(
     `SELECT tenant_id, enabled, agent_key, session_status, last_seen_at
      FROM whatsapp_agents
@@ -162,31 +195,30 @@ export async function enqueueOrderWhatsappJob(
 
   const config = configResult.rows[0];
   if (!config || !config.enabled || !config.agent_key) {
-    return false;
+    return null;
   }
-  if (!isHubActive(String(config.session_status || ''), config.last_seen_at || null)) {
-    await executor.query(
-      `UPDATE whatsapp_agents
-       SET enabled = FALSE,
-           updated_at = NOW()
-       WHERE tenant_id = $1
-         AND enabled = TRUE`,
-      [tenantId],
-    );
-    return false;
+  if (options.requireActiveHub && !isHubActive(String(config.session_status || ''), config.last_seen_at || null)) {
+    if (options.disableWhenOffline) {
+      await executor.query(
+        `UPDATE whatsapp_agents
+         SET enabled = FALSE,
+             updated_at = NOW()
+         WHERE tenant_id = $1
+           AND enabled = TRUE`,
+        [tenantId],
+      );
+    }
+    return null;
   }
 
   const payload = await buildOrderWhatsappText(tenantId, orderId, eventType, executor);
-  if (!payload) return false;
+  if (!payload) return null;
 
-  await executor.query(
-    `INSERT INTO whatsapp_jobs
-      (id, tenant_id, order_id, target_phone, event_type, payload_text, status, attempt_count, created_at, updated_at)
-     VALUES
-      ($1, $2, $3, $4, $5, $6, 'queued', 0, NOW(), NOW())`,
-    [randomUUID(), tenantId, orderId, payload.targetPhone, eventType, payload.payloadText],
-  );
-  await notifyAgentJobAvailable(tenantId, 'whatsapp', executor);
-
-  return true;
+  return {
+    id: randomUUID(),
+    orderId,
+    eventType,
+    targetPhone: payload.targetPhone,
+    payloadText: payload.payloadText,
+  } satisfies PreparedOrderWhatsappJob;
 }

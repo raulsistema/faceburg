@@ -93,8 +93,9 @@ if (!globalThis.__faceburgRouteDistanceInflight) {
 }
 
 const DEFAULT_OSRM_ROUTE_URL = 'https://router.project-osrm.org';
-const GEOCODE_TIMEOUT_MS = 5_000;
-const ROUTE_TIMEOUT_MS = 6_500;
+const GEOCODE_TIMEOUT_MS = 3_500;
+const ROUTE_TIMEOUT_MS = 3_500;
+const MAX_DELIVERY_LOOKUP_CACHE_ENTRIES = 800;
 
 export const DEFAULT_DELIVERY_FEE_TABLE: DeliveryFeeTier[] = [
   { upToMeters: 1500, fee: 3 },
@@ -242,6 +243,13 @@ function toCoordinates(item: GeocodeResponseItem | null | undefined) {
   return { lat, lon };
 }
 
+function rememberCacheValue<T>(cache: Map<string, T>, key: string, value: T) {
+  cache.set(key, value);
+  if (cache.size <= MAX_DELIVERY_LOOKUP_CACHE_ENTRIES) return;
+  const oldestKey = cache.keys().next().value;
+  if (oldestKey) cache.delete(oldestKey);
+}
+
 async function geocodeAddress(address: DeliveryAddressInput) {
   const cacheKey = makeCacheKey(address);
   if (!cacheKey) return null;
@@ -303,9 +311,7 @@ async function geocodeAddress(address: DeliveryAddressInput) {
     }
 
     const coordinates = Array.isArray(data) ? toCoordinates((data[0] as GeocodeResponseItem | undefined) ?? null) : null;
-    if (coordinates) {
-      geocodeCache.set(cacheKey, coordinates);
-    }
+    rememberCacheValue(geocodeCache, cacheKey, coordinates);
     return coordinates;
   } catch {
     return null;
@@ -359,11 +365,12 @@ async function routeDistanceKmBetween(origin: Coordinates, destination: Coordina
 
     const distanceMeters = Number(data?.code === 'Ok' ? data.routes?.[0]?.distance : 0);
     if (!Number.isFinite(distanceMeters) || distanceMeters <= 0) {
+      rememberCacheValue(routeDistanceCache, cacheKey, null);
       return null;
     }
 
     const distanceKm = Number((distanceMeters / 1000).toFixed(2));
-    routeDistanceCache.set(cacheKey, distanceKm);
+    rememberCacheValue(routeDistanceCache, cacheKey, distanceKm);
     return distanceKm;
   } catch {
     return null;

@@ -54,6 +54,8 @@ let whatsState = { status: 'stopped', qrCode: '', phoneNumber: '', lastError: ''
 let printState = { status: 'stopped', lastError: '', lastJobAt: '' };
 let logs = [];
 let systemSessionSyncPromise = null;
+let workerRequestSeq = 0;
+const pendingWorkerRequests = new Map();
 
 const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) app.quit();
@@ -256,6 +258,52 @@ function pushLog(source, message) {
   logs.push(entry);
   if (logs.length > LOG_MAX) logs = logs.slice(-LOG_MAX);
   emit('agent:log', entry);
+}
+
+function handleWorkerResponse(msg) {
+  if (!msg || msg.type !== 'local-response' || !msg.requestId) return false;
+  const pending = pendingWorkerRequests.get(msg.requestId);
+  if (!pending) return true;
+  clearTimeout(pending.timer);
+  pendingWorkerRequests.delete(msg.requestId);
+  if (msg.ok) {
+    pending.resolve(msg.data || {});
+    return true;
+  }
+  pending.reject(new Error(String(msg.error || 'Falha no agente local.')));
+  return true;
+}
+
+function rejectWorkerRequestsFor(worker, error) {
+  for (const [requestId, pending] of pendingWorkerRequests.entries()) {
+    if (pending.worker !== worker) continue;
+    clearTimeout(pending.timer);
+    pendingWorkerRequests.delete(requestId);
+    pending.reject(error);
+  }
+}
+
+function sendWorkerRequest(worker, type, payload = {}, timeoutMs = 30000) {
+  if (!worker || worker.killed) {
+    return Promise.reject(new Error('Agente local nao esta em execucao.'));
+  }
+
+  const requestId = `local-${Date.now()}-${++workerRequestSeq}`;
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      pendingWorkerRequests.delete(requestId);
+      reject(new Error('Tempo esgotado aguardando o agente local.'));
+    }, timeoutMs);
+
+    pendingWorkerRequests.set(requestId, { worker, resolve, reject, timer });
+    try {
+      worker.send({ type, requestId, payload });
+    } catch (error) {
+      clearTimeout(timer);
+      pendingWorkerRequests.delete(requestId);
+      reject(error);
+    }
+  });
 }
 
 function normalizeServerUrl(value) {
@@ -647,6 +695,7 @@ async function startWhatsAppWorker() {
   whatsWorker.stderr?.on('data', (d) => pushLog('whatsapp', `[ERR] ${d.toString().trim()}`));
 
   whatsWorker.on('message', (msg) => {
+    if (handleWorkerResponse(msg)) return;
     if (whatsStopRequested) return;
     if (msg.type === 'state') {
       whatsState = { ...whatsState, ...msg.data };
@@ -672,6 +721,7 @@ async function startWhatsAppWorker() {
     if (whatsWorker === workerRef) {
       whatsWorker = null;
     }
+    rejectWorkerRequestsFor(workerRef, new Error('Agente WhatsApp encerrou antes de responder.'));
     whatsStopRequested = false;
     whatsRestartRequested = false;
     whatsState.status = 'stopped';
@@ -759,6 +809,7 @@ async function startPrintWorker() {
   printWorker.stderr?.on('data', (d) => pushLog('print', `[ERR] ${d.toString().trim()}`));
 
   printWorker.on('message', (msg) => {
+    if (handleWorkerResponse(msg)) return;
     if (printStopRequested) return;
     if (msg.type === 'state') {
       printState = { ...printState, ...msg.data };
@@ -784,6 +835,7 @@ async function startPrintWorker() {
     if (printWorker === workerRef) {
       printWorker = null;
     }
+    rejectWorkerRequestsFor(workerRef, new Error('Agente de impressao encerrou antes de responder.'));
     printStopRequested = false;
     printRestartRequested = false;
     printState.status = 'stopped';
@@ -838,6 +890,25 @@ function stopPrintWorker(options = {}) {
 function stopAllAgents() {
   stopWhatsAppWorker();
   stopPrintWorker();
+}
+
+async function printDirectFromHub(payload) {
+  if (!printWorker) {
+    await startPrintWorker();
+  }
+  if (!printWorker) throw new Error('Agente de impressao nao iniciou.');
+  return sendWorkerRequest(printWorker, 'print-direct', payload, 30000);
+}
+
+async function sendWhatsAppDirectFromHub(payload) {
+  if (!whatsWorker) {
+    await startWhatsAppWorker();
+  }
+  if (!whatsWorker) throw new Error('Agente WhatsApp nao iniciou.');
+  if (whatsState.status !== 'ready') {
+    throw new Error('WhatsApp ainda nao esta conectado neste computador.');
+  }
+  return sendWorkerRequest(whatsWorker, 'whatsapp-send-direct', payload, 30000);
 }
 
 /* ─── system tray ────────────────────────────────────────────── */
@@ -1064,6 +1135,16 @@ ipcMain.handle('hub:restart-print', async () => {
 ipcMain.handle('hub:stop-print', () => {
   stopPrintWorker();
   return { ok: true };
+});
+
+ipcMain.handle('hub:print-direct', async (_ev, payload) => {
+  const result = await printDirectFromHub(payload);
+  return { ok: true, ...result };
+});
+
+ipcMain.handle('hub:whatsapp-send-direct', async (_ev, payload) => {
+  const result = await sendWhatsAppDirectFromHub(payload);
+  return { ok: true, ...result };
 });
 
 ipcMain.handle('hub:open-system', async (_ev, payload) => {

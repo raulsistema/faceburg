@@ -45,7 +45,28 @@ export async function GET(request: Request) {
          cm.created_at,
          NULL::date AS due_date
        FROM cash_movements cm
+       LEFT JOIN orders o
+         ON o.id = cm.reference_order_id
+        AND o.tenant_id = cm.tenant_id
+       LEFT JOIN payment_methods pm
+         ON pm.id = o.payment_method_id
+        AND pm.tenant_id = o.tenant_id
+       LEFT JOIN LATERAL (
+         SELECT op.method_type
+         FROM order_payments op
+         WHERE op.tenant_id = cm.tenant_id
+           AND op.order_id = cm.reference_order_id
+         ORDER BY
+           CASE WHEN ABS(op.net_amount - ABS(cm.amount)) <= 0.02 THEN 0 ELSE 1 END,
+           CASE WHEN lower(op.method_type) IN ('cash', 'money', 'dinheiro') THEN 0 ELSE 1 END,
+           op.created_at ASC
+         LIMIT 1
+       ) matched_payment ON TRUE
        WHERE cm.tenant_id = $1
+         AND (
+           cm.movement_type <> 'sale'
+           OR lower(COALESCE(pm.method_type, matched_payment.method_type, o.payment_method, '')) IN ('', 'cash', 'money', 'dinheiro')
+         )
 
        UNION ALL
 

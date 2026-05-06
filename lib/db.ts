@@ -28,6 +28,9 @@ if (!globalThis.__faceburgPool) {
 }
 
 let initPromise: Promise<void> | null = globalThis.__faceburgDbInitPromise ?? null;
+const autoInitializeDb =
+  process.env.FACEBURG_AUTO_INIT_DB === 'true' ||
+  (process.env.FACEBURG_AUTO_INIT_DB !== 'false' && process.env.NODE_ENV !== 'production');
 
 export type DbExecutor = {
   query: <T extends QueryResultRow = QueryResultRow>(text: string, values?: unknown[]) => Promise<QueryResult<T>>;
@@ -1172,6 +1175,10 @@ async function initializeDb() {
 }
 
 export async function ensureDbInitialized() {
+  if (!autoInitializeDb) {
+    return;
+  }
+
   await initializeDb();
 }
 

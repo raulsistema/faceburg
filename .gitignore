@@ -23,3 +23,13 @@ faceburg-hub/dist/
 faceburg-hub/.wwebjs_cache/
 faceburg-hub/*.log
 faceburg-hub/*.tmp
+faceburg-agent-dotnet/bin/
+faceburg-agent-dotnet/obj/
+faceburg-agent-dotnet/dist/
+faceburg-agent-dotnet/**/bin/
+faceburg-agent-dotnet/**/obj/
+faceburg-agent-dotnet/**/node_modules/
+faceburg-agent-dotnet/**/.wwebjs_cache/
+faceburg-agent-dotnet/**/*.log
+faceburg-agent-dotnet/**/*.err
+faceburg-agent-dotnet/**/*.out

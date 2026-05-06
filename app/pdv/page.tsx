@@ -20,6 +20,7 @@ interface Product {
 interface Category {
   id: string;
   name: string;
+  productCount?: number;
 }
 
 interface CartItem extends Product {
@@ -149,6 +150,9 @@ const EMPTY_QUICK_CUSTOMER_FORM: QuickCustomerForm = {
   reference: '',
 };
 
+const INITIAL_PDV_PRODUCT_RENDER_LIMIT = 80;
+const PDV_PRODUCT_RENDER_INCREMENT = 80;
+
 function maskPhone(raw: string) {
   const numbers = raw.replace(/\D/g, '').slice(0, 11);
   if (numbers.length <= 2) return numbers;
@@ -170,6 +174,14 @@ function formatMoneyInput(value: number) {
   return roundMoney(Math.max(0, value)).toFixed(2).replace('.', ',');
 }
 
+function normalizeFilterText(value: string) {
+  return value
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .trim()
+    .toLowerCase();
+}
+
 function makeLocalId() {
   if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
     return crypto.randomUUID();
@@ -184,6 +196,7 @@ export default function PDVPage() {
   const [tabs, setTabs] = useState<OpenTab[]>([]);
   const [searchTerm, setSearchTerm] = useState('');
   const [activeCategory, setActiveCategory] = useState<string>('all');
+  const [visibleProductLimit, setVisibleProductLimit] = useState(INITIAL_PDV_PRODUCT_RENDER_LIMIT);
   const [saleMode, setSaleMode] = useState<SaleMode>('tab');
   const [paymentMethods, setPaymentMethods] = useState<PaymentMethodOption[]>([]);
   const [checkoutPayments, setCheckoutPayments] = useState<CheckoutPaymentLine[]>([]);
@@ -511,13 +524,41 @@ export default function PDVPage() {
     return () => document.removeEventListener('mousedown', onClickOutside);
   }, []);
 
-  const categoryOptions = useMemo(() => [{ id: 'all', name: 'Todos' }, ...categories], [categories]);
+  const totalAvailableProducts = products.length;
 
-  const filteredProducts = products.filter((product) => {
-    const matchesSearch = product.name.toLowerCase().includes(searchTerm.toLowerCase());
-    const matchesCategory = activeCategory === 'all' || product.categoryId === activeCategory;
-    return matchesSearch && matchesCategory;
-  });
+  const categoryOptions = useMemo(
+    () => [{ id: 'all', name: 'Todos', productCount: totalAvailableProducts }, ...categories],
+    [categories, totalAvailableProducts],
+  );
+
+  useEffect(() => {
+    if (activeCategory === 'all') return;
+    if (!categoryOptions.some((category) => category.id === activeCategory)) {
+      setActiveCategory('all');
+    }
+  }, [activeCategory, categoryOptions]);
+
+  const normalizedSearchTerm = useMemo(() => normalizeFilterText(searchTerm), [searchTerm]);
+
+  const filteredProducts = useMemo(
+    () =>
+      products.filter((product) => {
+        const matchesSearch = !normalizedSearchTerm || normalizeFilterText(product.name).includes(normalizedSearchTerm);
+        const matchesCategory = activeCategory === 'all' || product.categoryId === activeCategory;
+        return matchesSearch && matchesCategory;
+      }),
+    [activeCategory, normalizedSearchTerm, products],
+  );
+
+  const renderedProducts = useMemo(
+    () => filteredProducts.slice(0, visibleProductLimit),
+    [filteredProducts, visibleProductLimit],
+  );
+  const hiddenProductsCount = Math.max(0, filteredProducts.length - renderedProducts.length);
+
+  useEffect(() => {
+    setVisibleProductLimit(INITIAL_PDV_PRODUCT_RENDER_LIMIT);
+  }, [activeCategory, normalizedSearchTerm]);
 
   const selectedTab = useMemo(() => tabs.find((tab) => tab.id === selectedTabId) || null, [tabs, selectedTabId]);
 
@@ -1264,7 +1305,12 @@ export default function PDVPage() {
                     : 'bg-white border border-slate-200 text-slate-600 hover:border-brand-primary hover:text-brand-primary',
                 )}
               >
-                {category.name}
+                <span>{category.name}</span>
+                {typeof category.productCount === 'number' ? (
+                  <span className={cn('ml-1 rounded-full px-1.5 py-0.5 text-[10px]', activeCategory === category.id ? 'bg-white/20 text-white' : 'bg-slate-100 text-slate-500')}>
+                    {category.productCount}
+                  </span>
+                ) : null}
               </button>
             ))}
           </div>
@@ -1273,7 +1319,7 @@ export default function PDVPage() {
             <div className="bg-white border border-slate-200 rounded-2xl p-8 text-sm text-slate-500">Carregando produtos do banco...</div>
           ) : (
             <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4 lg:overflow-y-auto pr-2 lg:flex-1 lg:min-h-0">
-              {filteredProducts.map((product) => (
+              {renderedProducts.map((product) => (
                 <button
                   key={product.id}
                   onClick={() => addToCart(product)}
@@ -1297,6 +1343,15 @@ export default function PDVPage() {
                   <p className="text-sm font-bold text-brand-primary">{formatBrl(product.price)}</p>
                 </button>
               ))}
+              {hiddenProductsCount > 0 ? (
+                <button
+                  type="button"
+                  onClick={() => setVisibleProductLimit((current) => current + PDV_PRODUCT_RENDER_INCREMENT)}
+                  className="col-span-2 md:col-span-3 lg:col-span-4 rounded-2xl border border-dashed border-slate-300 bg-white px-4 py-3 text-sm font-bold text-slate-700 transition hover:border-brand-primary hover:text-brand-primary"
+                >
+                  Mostrar mais produtos ({hiddenProductsCount})
+                </button>
+              ) : null}
               {filteredProducts.length === 0 ? <p className="text-sm text-slate-500">Nenhum produto disponivel.</p> : null}
             </div>
           )}

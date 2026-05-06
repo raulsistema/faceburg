@@ -2,9 +2,10 @@ import { after, NextResponse } from 'next/server';
 import pool from '@/lib/db';
 import { ensureFinanceSchema } from '@/lib/finance-schema';
 import { getValidatedTenantSession } from '@/lib/tenant-auth';
-import { enqueueOrderPrintJob } from '@/lib/printing';
+import { enqueueOrderPrintJob, prepareOrderPrintJobs } from '@/lib/printing';
 import { notifyOrderEvent } from '@/lib/realtime';
-import { enqueueOrderWhatsappJob } from '@/lib/whatsapp';
+import { enqueueOrderWhatsappJob, prepareOrderWhatsappJob } from '@/lib/whatsapp';
+import { isCashPaymentType } from '@/lib/cash-summary';
 import { randomUUID } from 'node:crypto';
 
 const allowedStatus = new Set(['pending', 'processing', 'delivering', 'completed', 'cancelled']);
@@ -78,6 +79,7 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
   const body = await request.json();
   const status = String(body.status || '').trim();
   const cancelReason = String(body.cancelReason || '').trim();
+  const preferLocalDispatch = Boolean(body.preferLocalDispatch || body.localDispatch);
 
   if (!allowedStatus.has(status)) {
     return NextResponse.json({ error: 'Status invalido.' }, { status: 400 });
@@ -168,9 +170,26 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
          JOIN cash_register_sessions crs
            ON crs.id = cm.session_id
           AND crs.tenant_id = cm.tenant_id
+         LEFT JOIN orders o
+           ON o.id = cm.reference_order_id
+          AND o.tenant_id = cm.tenant_id
+         LEFT JOIN payment_methods pm
+           ON pm.id = o.payment_method_id
+          AND pm.tenant_id = o.tenant_id
          WHERE cm.tenant_id = $1
            AND cm.reference_order_id = $2
            AND cm.movement_type = 'sale'
+           AND (
+             lower(COALESCE(pm.method_type, o.payment_method, '')) IN ('cash', 'money', 'dinheiro')
+             OR EXISTS (
+               SELECT 1
+               FROM order_payments op
+               WHERE op.tenant_id = cm.tenant_id
+                 AND op.order_id = cm.reference_order_id
+                 AND lower(op.method_type) IN ('cash', 'money', 'dinheiro')
+                 AND ABS(op.net_amount - ABS(cm.amount)) <= 0.02
+             )
+           )
          ORDER BY cm.created_at ASC`,
         [session.tenantId, id],
       );
@@ -290,9 +309,10 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
         const storedFeeAmount = Number(currentOrder.payment_fee_amount || 0);
         const storedNetAmount = Number(currentOrder.payment_net_amount || 0);
         const hasStoredFinance = currentOrder.payment_method_id === selectedMethod.id && storedNetAmount > 0;
-        const requiresCashSession = selectedMethod.settlement_days === 0 && !wasAlreadyCompleted;
+        const isCashPayment = isCashPaymentType(selectedMethod.method_type);
+        const requiresCashSession = isCashPayment && !wasAlreadyCompleted;
 
-        if (requiresCashSession) {
+        if (!wasAlreadyCompleted) {
           const openCashSession = await client.query<{ id: string }>(
             `SELECT id
              FROM cash_register_sessions
@@ -303,11 +323,11 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
              FOR UPDATE`,
             [session.tenantId],
           );
-          if (!openCashSession.rowCount) {
+          if (requiresCashSession && !openCashSession.rowCount) {
             await client.query('ROLLBACK');
             return NextResponse.json({ error: 'Nenhum caixa aberto. Abra o caixa no financeiro para concluir o pedido.' }, { status: 409 });
           }
-          completionCashSessionId = openCashSession.rows[0].id;
+          completionCashSessionId = openCashSession.rows[0]?.id || null;
         }
 
         const feePercent = Number(selectedMethod.fee_percent || 0);
@@ -331,7 +351,7 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
           [id, session.tenantId, selectedMethod.name, selectedMethod.id, feeAmount, netAmount, completionCashSessionId],
         );
 
-        if (selectedMethod.settlement_days === 0) {
+        if (isCashPayment) {
           await client.query(
             `DELETE FROM receivables
              WHERE tenant_id = $1 AND order_id = $2`,
@@ -377,6 +397,14 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
             }
           }
         } else {
+          await client.query(
+            `DELETE FROM cash_movements
+             WHERE tenant_id = $1
+               AND reference_order_id = $2
+               AND movement_type = 'sale'`,
+            [session.tenantId, id],
+          );
+
           const receivable = await client.query<ReceivableRow>(
             `SELECT id
              FROM receivables
@@ -419,20 +447,61 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
     const eventKind = orderEventKind;
     const queuePrint = shouldQueuePrint;
     const queueWhatsapp = shouldQueueWhatsapp;
+    const useLocalDispatch = preferLocalDispatch && (queuePrint || queueWhatsapp);
 
     after(() => {
       const sideEffects: Array<Promise<unknown>> = [];
-      if (queuePrint) {
+      if (queuePrint && !useLocalDispatch) {
         sideEffects.push(enqueueOrderPrintJob(tenantId, orderId, 'status_update'));
       }
-      if (queueWhatsapp) {
+      if (queueWhatsapp && !useLocalDispatch) {
         sideEffects.push(enqueueOrderWhatsappJob(tenantId, orderId, 'status_update'));
       }
       sideEffects.push(notifyOrderEvent(tenantId, eventKind, orderId));
       return Promise.allSettled(sideEffects).then(() => undefined);
     });
 
-    return NextResponse.json({ ok: true });
+    if (!useLocalDispatch) {
+      return NextResponse.json({ ok: true });
+    }
+
+    const localDispatch: {
+      printJobs?: Awaited<ReturnType<typeof prepareOrderPrintJobs>>;
+      whatsappJobs?: Array<NonNullable<Awaited<ReturnType<typeof prepareOrderWhatsappJob>>>>;
+      errors?: string[];
+    } = {};
+    const localDispatchErrors: string[] = [];
+
+    if (queuePrint) {
+      try {
+        localDispatch.printJobs = await prepareOrderPrintJobs(tenantId, orderId, 'status_update', undefined, {
+          ignoreAgentEnabled: true,
+        });
+      } catch (error) {
+        console.error('prepare local print dispatch failed', error);
+        localDispatchErrors.push('print');
+        localDispatch.printJobs = [];
+      }
+    }
+
+    if (queueWhatsapp) {
+      try {
+        const whatsappJob = await prepareOrderWhatsappJob(tenantId, orderId, 'status_update', undefined, {
+          requireActiveHub: false,
+        });
+        localDispatch.whatsappJobs = whatsappJob ? [whatsappJob] : [];
+      } catch (error) {
+        console.error('prepare local whatsapp dispatch failed', error);
+        localDispatchErrors.push('whatsapp');
+        localDispatch.whatsappJobs = [];
+      }
+    }
+
+    if (localDispatchErrors.length) {
+      localDispatch.errors = localDispatchErrors;
+    }
+
+    return NextResponse.json({ ok: true, localDispatch });
   } catch (error) {
     await client.query('ROLLBACK');
     console.error('PATCH /api/orders/[id]/status failed', error);

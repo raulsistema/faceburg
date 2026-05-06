@@ -78,11 +78,24 @@ type AgentConfigRow = {
   receipt_footer: string | null;
 };
 
+type PrepareOrderPrintJobsOptions = {
+  ignoreAgentEnabled?: boolean;
+};
+
 type OrderStatusRow = {
   status: string;
 };
 
 const RECEIPT_WIDTH = DEFAULT_PRINT_WIDTH;
+
+export type PreparedOrderPrintJob = {
+  id: string;
+  orderId: string;
+  eventType: PrintJobEventType;
+  payloadText: string;
+  copyIndex: number;
+  copies: number;
+};
 
 function formatBrl(value: number) {
   return value
@@ -591,11 +604,12 @@ export async function buildOrderPrintText(
   return lines.filter((line, index, source) => line || (index > 0 && source[index - 1] !== '')).join('\n');
 }
 
-export async function enqueueOrderPrintJob(
+export async function prepareOrderPrintJobs(
   tenantId: string,
   orderId: string,
   eventType: PrintJobEventType,
   executor: DbExecutor = { query },
+  options: PrepareOrderPrintJobsOptions = {},
 ) {
   const configResult = await executor.query<AgentConfigRow>(
     `SELECT tenant_id,
@@ -613,9 +627,26 @@ export async function enqueueOrderPrintJob(
     [tenantId],
   );
 
-  const config = configResult.rows[0];
-  if (!config || !config.enabled || !config.agent_key) {
-    return false;
+  const config = configResult.rows[0] ?? (
+    options.ignoreAgentEnabled
+      ? {
+          tenant_id: tenantId,
+          enabled: true,
+          agent_key: 'local-http-agent',
+          receipt_width: null,
+          print_copies: null,
+          print_events: null,
+          receipt_options: null,
+          receipt_header: null,
+          receipt_footer: null,
+        }
+      : undefined
+  );
+  if (!config) {
+    return [];
+  }
+  if (!options.ignoreAgentEnabled && (!config.enabled || !config.agent_key)) {
+    return [];
   }
 
   const statusResult = await executor.query<OrderStatusRow>(
@@ -630,22 +661,46 @@ export async function enqueueOrderPrintJob(
   const eventKey = printEventKeyFor(eventType, orderStatus);
   const printEvents = normalizePrintEvents(config.print_events);
   if (!eventKey || !printEvents[eventKey]) {
-    return false;
+    return [];
   }
 
   const payloadText = await buildOrderPrintText(tenantId, orderId, eventType, executor, config);
-  if (!payloadText) return false;
+  if (!payloadText) return [];
 
   const copies = normalizePrintCopies(config.print_copies);
   const receiptWidth = normalizeReceiptWidth(config.receipt_width);
+  const jobs: PreparedOrderPrintJob[] = [];
   for (let copyIndex = 1; copyIndex <= copies; copyIndex += 1) {
     const copyLabel = copies > 1 ? `\n${centerLine(`VIA ${copyIndex}/${copies}`, receiptWidth)}\n\n` : '';
+    jobs.push({
+      id: randomUUID(),
+      orderId,
+      eventType,
+      payloadText: `${payloadText}${copyLabel}`,
+      copyIndex,
+      copies,
+    });
+  }
+
+  return jobs;
+}
+
+export async function enqueueOrderPrintJob(
+  tenantId: string,
+  orderId: string,
+  eventType: PrintJobEventType,
+  executor: DbExecutor = { query },
+) {
+  const jobs = await prepareOrderPrintJobs(tenantId, orderId, eventType, executor);
+  if (!jobs.length) return false;
+
+  for (const job of jobs) {
     await executor.query(
       `INSERT INTO print_jobs
         (id, tenant_id, order_id, event_type, payload_text, status, attempt_count, created_at, updated_at)
        VALUES
         ($1, $2, $3, $4, $5, 'queued', 0, NOW(), NOW())`,
-      [randomUUID(), tenantId, orderId, eventType, `${payloadText}${copyLabel}`],
+      [job.id, tenantId, orderId, eventType, job.payloadText],
     );
   }
   await notifyAgentJobAvailable(tenantId, 'print', executor);

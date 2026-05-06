@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import pool from '@/lib/db';
+import { getCashSessionFinanceSummary } from '@/lib/cash-summary';
 import { ensureFinanceSchema } from '@/lib/finance-schema';
 import { parseMoneyInput } from '@/lib/finance-utils';
 import { getValidatedTenantSession } from '@/lib/tenant-auth';
@@ -22,8 +23,8 @@ export async function POST(request: Request) {
     await client.query('BEGIN');
     await client.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [`cash-register:${session.tenantId}`]);
 
-    const currentResult = await client.query<{ id: string; opening_amount: string }>(
-      `SELECT id, opening_amount::text
+    const currentResult = await client.query<{ id: string; opened_at: string; opening_amount: string }>(
+      `SELECT id, opened_at, opening_amount::text
        FROM cash_register_sessions
        WHERE tenant_id = $1
          AND status = 'open'
@@ -39,12 +40,13 @@ export async function POST(request: Request) {
     }
 
     const current = currentResult.rows[0];
-    const expectedResult = await client.query<{ total: string }>(
-      `SELECT COALESCE(SUM(amount), 0)::text AS total
-       FROM cash_movements
-       WHERE tenant_id = $1 AND session_id = $2`,
-      [session.tenantId, current.id],
-    );
+    const summary = await getCashSessionFinanceSummary({
+      tenantId: session.tenantId,
+      sessionId: current.id,
+      openedAt: current.opened_at,
+      openingAmount: Number(current.opening_amount || 0),
+      executor: client,
+    });
 
     const userResult = await client.query<{ id: string }>(
       `SELECT id FROM tenant_users WHERE id = $1 AND tenant_id = $2 LIMIT 1`,
@@ -52,9 +54,7 @@ export async function POST(request: Request) {
     );
     const safeUserId = userResult.rowCount ? session.userId : null;
 
-    const openingAmount = Number(current.opening_amount || 0);
-    const movementsTotal = Number(expectedResult.rows[0]?.total || 0);
-    const expected = Number((openingAmount + movementsTotal).toFixed(2));
+    const expected = summary.expectedDrawer;
     const difference = Number((closingAmountReported - expected).toFixed(2));
 
     const result = await client.query(

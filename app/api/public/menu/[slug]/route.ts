@@ -51,6 +51,12 @@ type MenuStoryRow = {
   expires_at: string | null;
 };
 
+type PaymentMethodRow = {
+  id: string;
+  name: string;
+  method_type: string;
+};
+
 const PUBLIC_MENU_CACHE_HEADERS = {
   'Cache-Control': 'public, max-age=15, stale-while-revalidate=60',
 };
@@ -81,7 +87,7 @@ export async function GET(_: Request, { params }: { params: Promise<{ slug: stri
       return NextResponse.json({ error: 'Tenant inactive' }, { status: 403 });
     }
 
-    const [categoriesResult, productsResult, storiesResult] = await Promise.all([
+    const [categoriesResult, productsResult, storiesResult, paymentMethodsResult] = await Promise.all([
       query<CategoryRow>(
         `SELECT id, name, icon, display_order
          FROM categories
@@ -129,6 +135,13 @@ export async function GET(_: Request, { params }: { params: Promise<{ slug: stri
           ORDER BY display_order ASC, created_at ASC`,
         [tenant.id],
       ),
+      query<PaymentMethodRow>(
+        `SELECT id, name, method_type
+         FROM payment_methods
+         WHERE tenant_id = $1 AND active = TRUE
+         ORDER BY name ASC`,
+        [tenant.id],
+      ),
     ]);
 
     return NextResponse.json({
@@ -163,6 +176,11 @@ export async function GET(_: Request, { params }: { params: Promise<{ slug: stri
         ...product,
         optionGroupCount,
         optionGroups: [],
+      })),
+      paymentMethods: paymentMethodsResult.rows.map((row) => ({
+        id: row.id,
+        name: row.name,
+        methodType: row.method_type,
       })),
     }, { headers: PUBLIC_MENU_CACHE_HEADERS });
   } catch (error) {

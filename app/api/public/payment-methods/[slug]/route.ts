@@ -7,6 +7,10 @@ type PaymentMethodRow = {
   method_type: string;
 };
 
+const PUBLIC_PAYMENT_METHODS_CACHE_HEADERS = {
+  'Cache-Control': 'public, max-age=15, stale-while-revalidate=60',
+};
+
 export async function GET(_request: Request, { params }: { params: Promise<{ slug: string }> }) {
   const { slug } = await params;
 
@@ -37,5 +41,5 @@ export async function GET(_request: Request, { params }: { params: Promise<{ slu
       name: row.name,
       methodType: row.method_type,
     })),
-  });
+  }, { headers: PUBLIC_PAYMENT_METHODS_CACHE_HEADERS });
 }

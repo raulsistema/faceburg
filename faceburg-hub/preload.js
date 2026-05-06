@@ -38,6 +38,8 @@ contextBridge.exposeInMainWorld('hub', {
   startPrint: () => ipcRenderer.invoke('hub:start-print'),
   restartPrint: () => ipcRenderer.invoke('hub:restart-print'),
   stopPrint: () => ipcRenderer.invoke('hub:stop-print'),
+  printDirect: (payload) => ipcRenderer.invoke('hub:print-direct', payload),
+  sendWhatsAppDirect: (payload) => ipcRenderer.invoke('hub:whatsapp-send-direct', payload),
   openSystem: (payload) => ipcRenderer.invoke('hub:open-system', payload),
   syncSystemSession,
   getSystemUrl: () => ipcRenderer.invoke('hub:get-system-url'),
@@ -73,6 +75,8 @@ contextBridge.exposeInMainWorld('faceburgDesktop', {
   startPrint: () => ipcRenderer.invoke('hub:start-print'),
   restartPrint: () => ipcRenderer.invoke('hub:restart-print'),
   stopPrint: () => ipcRenderer.invoke('hub:stop-print'),
+  printDirect: (payload) => ipcRenderer.invoke('hub:print-direct', payload),
+  sendWhatsAppDirect: (payload) => ipcRenderer.invoke('hub:whatsapp-send-direct', payload),
   onWhatsAppState: (cb) => subscribe('whatsapp:state', cb),
   onPrintState: (cb) => subscribe('print:state', cb),
 });

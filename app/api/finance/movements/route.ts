@@ -9,9 +9,16 @@ type SummaryRow = {
   net_amount: string;
   cash_impact: string;
   receivable_pending: string;
+  account_amount: string;
+  account_today: string;
+  account_future: string;
   total_discount: string;
   total_surcharge: string;
   total_delivery_fee: string;
+  sales_count: string;
+  sales_without_items_count: string;
+  sales_without_items_amount: string;
+  sales_without_items_fees: string;
 };
 
 type MovementRow = {
@@ -75,8 +82,14 @@ const ledgerCte = `
       o.payment_method,
       o.id AS order_id,
       o.created_at,
-      NULL::date AS due_date
+      NULL::date AS due_date,
+      COALESCE(order_items.item_count, 0)::int AS item_count
     FROM orders o
+    LEFT JOIN LATERAL (
+      SELECT COUNT(*) AS item_count
+      FROM order_items oi
+      WHERE oi.order_id = o.id
+    ) order_items ON TRUE
     WHERE o.tenant_id = $1
       AND o.status = 'completed'
 
@@ -103,7 +116,8 @@ const ledgerCte = `
       NULL::text AS payment_method,
       cm.reference_order_id AS order_id,
       cm.created_at,
-      NULL::date AS due_date
+      NULL::date AS due_date,
+      0::int AS item_count
     FROM cash_movements cm
     WHERE cm.tenant_id = $1
       AND cm.movement_type <> 'sale'
@@ -125,7 +139,8 @@ const ledgerCte = `
       pm.name AS payment_method,
       r.order_id,
       r.created_at,
-      r.due_date
+      r.due_date,
+      0::int AS item_count
     FROM receivables r
     LEFT JOIN payment_methods pm
       ON pm.id = r.payment_method_id
@@ -135,6 +150,48 @@ const ledgerCte = `
   filtered AS (
     SELECT *
     FROM ledger
+    WHERE ($2::text IS NULL OR source = $2)
+      AND ($3::text IS NULL OR status = $3)
+      AND ($4::date IS NULL OR created_at >= $4::date)
+      AND ($5::date IS NULL OR created_at < ($5::date + INTERVAL '1 day'))
+  ),
+  cash_scope AS (
+    SELECT
+      cm.id,
+      cm.movement_type,
+      CASE WHEN cm.movement_type = 'sale' THEN 'sale'::text ELSE 'cash_movement'::text END AS source,
+      CASE WHEN cm.movement_type = 'sale' THEN 'completed'::text ELSE 'posted'::text END AS status,
+      cm.amount AS amount,
+      cm.created_at,
+      lower(COALESCE(
+        pm.method_type,
+        matched_payment.method_type,
+        NULLIF(o.payment_method, ''),
+        ''
+      )) AS payment_type
+    FROM cash_movements cm
+    LEFT JOIN orders o
+      ON o.id = cm.reference_order_id
+     AND o.tenant_id = cm.tenant_id
+    LEFT JOIN payment_methods pm
+      ON pm.id = o.payment_method_id
+     AND pm.tenant_id = o.tenant_id
+    LEFT JOIN LATERAL (
+      SELECT op.method_type
+      FROM order_payments op
+      WHERE op.tenant_id = cm.tenant_id
+        AND op.order_id = cm.reference_order_id
+      ORDER BY
+        CASE WHEN ABS(op.net_amount - ABS(cm.amount)) <= 0.02 THEN 0 ELSE 1 END,
+        CASE WHEN lower(op.method_type) IN ('cash', 'money', 'dinheiro') THEN 0 ELSE 1 END,
+        op.created_at ASC
+      LIMIT 1
+    ) matched_payment ON TRUE
+    WHERE cm.tenant_id = $1
+  ),
+  cash_filtered AS (
+    SELECT *
+    FROM cash_scope
     WHERE ($2::text IS NULL OR source = $2)
       AND ($3::text IS NULL OR status = $3)
       AND ($4::date IS NULL OR created_at >= $4::date)
@@ -167,15 +224,102 @@ export async function GET(request: Request) {
     query<SummaryRow>(
       `${ledgerCte}
        SELECT
-         COALESCE(SUM(CASE WHEN source = 'sale' OR ($2::text = 'receivable' AND source = 'receivable') THEN fee_amount ELSE 0 END), 0)::text AS total_fees,
-         COALESCE(SUM(CASE WHEN source = 'sale' THEN gross_amount ELSE 0 END), 0)::text AS gross_amount,
-         COALESCE(SUM(CASE WHEN source = 'sale' THEN amount - fee_amount WHEN source = 'receivable' THEN amount ELSE 0 END), 0)::text AS net_amount,
-         COALESCE(SUM(CASE WHEN source = 'cash_movement' THEN amount ELSE 0 END), 0)::text AS cash_impact,
-         COALESCE(SUM(CASE WHEN source = 'receivable' AND status = 'pending' THEN amount ELSE 0 END), 0)::text AS receivable_pending,
-         COALESCE(SUM(CASE WHEN source = 'sale' THEN discount_amount ELSE 0 END), 0)::text AS total_discount,
-         COALESCE(SUM(CASE WHEN source = 'sale' THEN surcharge_amount ELSE 0 END), 0)::text AS total_surcharge,
-         COALESCE(SUM(CASE WHEN source = 'sale' THEN delivery_fee_amount ELSE 0 END), 0)::text AS total_delivery_fee
-       FROM filtered`,
+         (
+           SELECT COALESCE(SUM(CASE
+             WHEN source = 'sale' THEN fee_amount
+             WHEN $2::text = 'receivable' AND source = 'receivable' THEN fee_amount
+             ELSE 0
+           END), 0)::text
+           FROM filtered
+         ) AS total_fees,
+         (
+           SELECT COALESCE(SUM(CASE
+             WHEN $2::text = 'receivable' AND source = 'receivable' THEN gross_amount
+             WHEN source = 'sale' THEN gross_amount
+             ELSE 0
+           END), 0)::text
+           FROM filtered
+         ) AS gross_amount,
+         (
+           SELECT COALESCE(SUM(CASE
+             WHEN $2::text = 'receivable' AND source = 'receivable' THEN amount
+             WHEN $2::text = 'cash_movement' AND source = 'cash_movement' THEN amount
+             WHEN source = 'sale' THEN amount - fee_amount
+             ELSE 0
+           END), 0)::text
+           FROM filtered
+         ) AS net_amount,
+         (
+           SELECT COALESCE(SUM(CASE
+             WHEN movement_type IN ('sale', 'refund') AND payment_type NOT IN ('', 'cash', 'money', 'dinheiro') THEN 0
+             ELSE amount
+           END), 0)::text
+           FROM cash_filtered
+         ) AS cash_impact,
+         (
+           SELECT COALESCE(SUM(CASE WHEN source = 'receivable' AND status = 'pending' THEN amount ELSE 0 END), 0)::text
+           FROM filtered
+         ) AS receivable_pending,
+         (
+           SELECT (
+             COALESCE(SUM(CASE WHEN source = 'receivable' THEN amount ELSE 0 END), 0)
+             +
+             COALESCE((
+               SELECT SUM(CASE
+                 WHEN movement_type IN ('sale', 'refund') AND payment_type NOT IN ('', 'cash', 'money', 'dinheiro') THEN amount
+                 ELSE 0
+               END)
+               FROM cash_filtered
+             ), 0)
+           )::text
+           FROM filtered
+         ) AS account_amount,
+         (
+           SELECT (
+             COALESCE(SUM(CASE WHEN source = 'receivable' AND (due_date IS NULL OR due_date <= CURRENT_DATE) THEN amount ELSE 0 END), 0)
+             +
+             COALESCE((
+               SELECT SUM(CASE
+                 WHEN movement_type IN ('sale', 'refund') AND payment_type NOT IN ('', 'cash', 'money', 'dinheiro') THEN amount
+                 ELSE 0
+               END)
+               FROM cash_filtered
+             ), 0)
+           )::text
+           FROM filtered
+         ) AS account_today,
+         (
+           SELECT COALESCE(SUM(CASE WHEN source = 'receivable' AND due_date > CURRENT_DATE THEN amount ELSE 0 END), 0)::text
+           FROM filtered
+         ) AS account_future,
+         (
+           SELECT COALESCE(SUM(CASE WHEN source = 'sale' THEN discount_amount ELSE 0 END), 0)::text
+           FROM filtered
+         ) AS total_discount,
+         (
+           SELECT COALESCE(SUM(CASE WHEN source = 'sale' THEN surcharge_amount ELSE 0 END), 0)::text
+           FROM filtered
+         ) AS total_surcharge,
+         (
+           SELECT COALESCE(SUM(CASE WHEN source = 'sale' THEN delivery_fee_amount ELSE 0 END), 0)::text
+           FROM filtered
+         ) AS total_delivery_fee,
+         (
+           SELECT COALESCE(COUNT(*) FILTER (WHERE source = 'sale'), 0)::text
+           FROM filtered
+         ) AS sales_count,
+         (
+           SELECT COALESCE(COUNT(*) FILTER (WHERE source = 'sale' AND item_count = 0), 0)::text
+           FROM filtered
+         ) AS sales_without_items_count,
+         (
+           SELECT COALESCE(SUM(CASE WHEN source = 'sale' AND item_count = 0 THEN amount ELSE 0 END), 0)::text
+           FROM filtered
+         ) AS sales_without_items_amount,
+         (
+           SELECT COALESCE(SUM(CASE WHEN source = 'sale' AND item_count = 0 THEN fee_amount ELSE 0 END), 0)::text
+           FROM filtered
+         ) AS sales_without_items_fees`,
       params,
     ),
     query<MovementRow>(
@@ -215,6 +359,13 @@ export async function GET(request: Request) {
     total_discount: '0',
     total_surcharge: '0',
     total_delivery_fee: '0',
+    account_amount: '0',
+    account_today: '0',
+    account_future: '0',
+    sales_count: '0',
+    sales_without_items_count: '0',
+    sales_without_items_amount: '0',
+    sales_without_items_fees: '0',
   };
 
   return NextResponse.json({
@@ -224,9 +375,16 @@ export async function GET(request: Request) {
       netAmount: Number(summary.net_amount || 0),
       cashImpact: Number(summary.cash_impact || 0),
       receivablePending: Number(summary.receivable_pending || 0),
+      accountAmount: Number(summary.account_amount || 0),
+      accountToday: Number(summary.account_today || 0),
+      accountFuture: Number(summary.account_future || 0),
       totalDiscount: Number(summary.total_discount || 0),
       totalSurcharge: Number(summary.total_surcharge || 0),
       totalDeliveryFee: Number(summary.total_delivery_fee || 0),
+      salesCount: Number(summary.sales_count || 0),
+      salesWithoutItemsCount: Number(summary.sales_without_items_count || 0),
+      salesWithoutItemsAmount: Number(summary.sales_without_items_amount || 0),
+      salesWithoutItemsFees: Number(summary.sales_without_items_fees || 0),
     },
     movements: rows.map((row) => ({
       id: row.id,

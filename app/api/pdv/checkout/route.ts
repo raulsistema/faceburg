@@ -5,6 +5,7 @@ import { ensureFinanceSchema } from '@/lib/finance-schema';
 import { getValidatedTenantSession } from '@/lib/tenant-auth';
 import { enqueueOrderPrintJob } from '@/lib/printing';
 import { getOpenCashSession } from '@/lib/cash-register';
+import { isCashPaymentType } from '@/lib/cash-summary';
 import { parseMoneyInput } from '@/lib/finance-utils';
 
 type ProductPriceRow = {
@@ -238,13 +239,10 @@ export async function POST(request: Request) {
     const totalNetAmount = roundMoney(total - totalFeeAmount);
     const orderId = randomUUID();
     const singlePayment = resolvedPayments.length === 1 ? resolvedPayments[0] : null;
-    const requiresCashSession = resolvedPayments.some((payment) => payment.method.settlement_days === 0);
-    if (requiresCashSession) {
-      await client.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [`cash-register:${session.tenantId}`]);
-    }
-    const openCashSession = requiresCashSession ? await getOpenCashSession(session.tenantId, client) : null;
+    await client.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [`cash-register:${session.tenantId}`]);
+    const openCashSession = await getOpenCashSession(session.tenantId, client);
 
-    if (requiresCashSession && !openCashSession) {
+    if (!openCashSession) {
       await client.query('ROLLBACK');
       return NextResponse.json({ error: 'Nenhum caixa aberto. Abra o caixa no financeiro para concluir a venda.' }, { status: 409 });
     }
@@ -285,7 +283,7 @@ export async function POST(request: Request) {
         deliveryFeeAmount,
         total,
         type === 'delivery' ? 'delivery' : type === 'table' ? 'table' : 'pickup',
-        openCashSession?.id || null,
+        openCashSession.id,
       ],
     );
 
@@ -324,7 +322,7 @@ export async function POST(request: Request) {
     const movementUserId = movementUser.rowCount ? session.userId : null;
 
     for (const payment of resolvedPayments) {
-      if (payment.method.settlement_days === 0) {
+      if (isCashPaymentType(payment.method.method_type)) {
         await client.query(
           `INSERT INTO cash_movements
            (id, tenant_id, session_id, movement_type, amount, description, reference_order_id, created_by_user_id)
@@ -332,30 +330,31 @@ export async function POST(request: Request) {
           [
             randomUUID(),
             session.tenantId,
-            openCashSession!.id,
+            openCashSession.id,
             payment.netAmount,
             `Venda PDV ${orderId.slice(0, 8)} (${payment.method.name})`,
             orderId,
             movementUserId,
           ],
         );
-      } else {
-        await client.query(
-          `INSERT INTO receivables
-           (id, tenant_id, order_id, payment_method_id, gross_amount, fee_amount, net_amount, due_date, status)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, (NOW()::date + $8::int), 'pending')`,
-          [
-            randomUUID(),
-            session.tenantId,
-            orderId,
-            payment.method.id,
-            payment.amount,
-            payment.feeAmount,
-            payment.netAmount,
-            payment.method.settlement_days,
-          ],
-        );
+        continue;
       }
+
+      await client.query(
+        `INSERT INTO receivables
+         (id, tenant_id, order_id, payment_method_id, gross_amount, fee_amount, net_amount, due_date, status)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, (NOW()::date + $8::int), 'pending')`,
+        [
+          randomUUID(),
+          session.tenantId,
+          orderId,
+          payment.method.id,
+          payment.amount,
+          payment.feeAmount,
+          payment.netAmount,
+          payment.method.settlement_days,
+        ],
+      );
     }
 
     await client.query('COMMIT');

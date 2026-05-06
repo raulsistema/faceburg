@@ -45,13 +45,15 @@ async function hasDuplicatePaymentMethodName(tenantId: string, name: string, id?
 }
 
 function readPaymentMethodInput(body: Record<string, unknown>) {
+  const methodType = normalizePaymentMethodType(body.methodType);
+  const cashOnly = methodType === 'cash';
   return {
     id: String(body.id || '').trim(),
     name: String(body.name || '').trim(),
-    methodType: normalizePaymentMethodType(body.methodType),
-    feePercent: parseMoneyInput(body.feePercent),
-    feeFixed: parseMoneyInput(body.feeFixed),
-    settlementDays: parseIntegerInput(body.settlementDays),
+    methodType,
+    feePercent: cashOnly ? 0 : parseMoneyInput(body.feePercent),
+    feeFixed: cashOnly ? 0 : parseMoneyInput(body.feeFixed),
+    settlementDays: cashOnly ? 0 : parseIntegerInput(body.settlementDays),
     active: body.active !== false,
   };
 }

@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { query } from '@/lib/db';
+import { getCashSessionFinanceSummary } from '@/lib/cash-summary';
 import { ensureFinanceSchema } from '@/lib/finance-schema';
 import { getValidatedTenantSession } from '@/lib/tenant-auth';
 
@@ -37,23 +38,57 @@ export async function GET() {
   }
 
   const current = currentResult.rows[0];
-  const movementsResult = await query<MovementRow>(
-    `SELECT id, movement_type, amount::text, description, created_at
-     FROM cash_movements
-     WHERE tenant_id = $1 AND session_id = $2
-     ORDER BY created_at DESC
-     LIMIT 200`,
-    [session.tenantId, current.id],
-  );
-
-  const sumResult = await query<{ total: string }>(
-    `SELECT COALESCE(SUM(amount), 0)::text AS total
-     FROM cash_movements
-     WHERE tenant_id = $1 AND session_id = $2`,
-    [session.tenantId, current.id],
-  );
-
-  const expectedAmount = Number(current.opening_amount || 0) + Number(sumResult.rows[0]?.total || 0);
+  const [movementsResult, summary] = await Promise.all([
+    query<MovementRow>(
+      `SELECT id, movement_type, amount::text, description, created_at
+       FROM (
+         SELECT
+           cm.id,
+           cm.movement_type,
+           cm.amount,
+           cm.description,
+           cm.created_at,
+           COALESCE(
+             pm.method_type,
+             matched_payment.method_type,
+             NULLIF(o.payment_method, ''),
+             ''
+           ) AS payment_type
+         FROM cash_movements cm
+         LEFT JOIN orders o
+           ON o.id = cm.reference_order_id
+          AND o.tenant_id = cm.tenant_id
+         LEFT JOIN payment_methods pm
+           ON pm.id = o.payment_method_id
+          AND pm.tenant_id = o.tenant_id
+         LEFT JOIN LATERAL (
+           SELECT op.method_type
+           FROM order_payments op
+           WHERE op.tenant_id = cm.tenant_id
+             AND op.order_id = cm.reference_order_id
+           ORDER BY
+             CASE WHEN ABS(op.net_amount - ABS(cm.amount)) <= 0.02 THEN 0 ELSE 1 END,
+             CASE WHEN lower(op.method_type) IN ('cash', 'money', 'dinheiro') THEN 0 ELSE 1 END,
+             op.created_at ASC
+           LIMIT 1
+         ) matched_payment ON TRUE
+         WHERE cm.tenant_id = $1
+           AND cm.session_id = $2
+       ) movements
+       WHERE movement_type <> 'sale'
+          OR lower(COALESCE(payment_type, '')) IN ('', 'cash', 'money', 'dinheiro')
+       ORDER BY created_at DESC
+       LIMIT 200`,
+      [session.tenantId, current.id],
+    ),
+    getCashSessionFinanceSummary({
+      tenantId: session.tenantId,
+      sessionId: current.id,
+      openedAt: current.opened_at,
+      openingAmount: Number(current.opening_amount || 0),
+      executor: { query },
+    }),
+  ]);
 
   return NextResponse.json({
     current: {
@@ -69,6 +104,7 @@ export async function GET() {
       description: row.description,
       createdAt: row.created_at,
     })),
-    expectedAmount: Number(expectedAmount.toFixed(2)),
+    expectedAmount: summary.expectedDrawer,
+    summary,
   });
 }

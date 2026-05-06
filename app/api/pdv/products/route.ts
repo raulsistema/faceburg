@@ -5,6 +5,7 @@ import { getValidatedTenantSession } from '@/lib/tenant-auth';
 type CategoryRow = {
   id: string;
   name: string;
+  product_count: string;
 };
 
 type ProductRow = {
@@ -25,10 +26,20 @@ export async function GET() {
 
   const [categoriesResult, productsResult] = await Promise.all([
     query<CategoryRow>(
-      `SELECT id, name
-       FROM categories
-       WHERE tenant_id = $1 AND active = TRUE
-       ORDER BY display_order ASC, name ASC`,
+      `SELECT
+         c.id,
+         c.name,
+         COUNT(p.id)::text AS product_count
+       FROM categories c
+       INNER JOIN products p
+         ON p.category_id = c.id
+        AND p.tenant_id = c.tenant_id
+        AND p.available = TRUE
+        AND p.product_type <> 'ingredient'
+       WHERE c.tenant_id = $1
+         AND c.active = TRUE
+       GROUP BY c.id, c.name, c.display_order
+       ORDER BY c.display_order ASC, c.name ASC`,
       [session.tenantId],
     ),
     query<ProductRow>(
@@ -41,17 +52,22 @@ export async function GET() {
          p.available,
          p.product_type
        FROM products p
+       INNER JOIN categories c ON c.id = p.category_id
        WHERE p.tenant_id = $1
          AND p.available = TRUE
          AND p.product_type <> 'ingredient'
-       ORDER BY p.display_order ASC, p.name ASC
-       LIMIT 200`,
+         AND c.active = TRUE
+       ORDER BY c.display_order ASC, p.display_order ASC, p.name ASC`,
       [session.tenantId],
     ),
   ]);
 
   return NextResponse.json({
-    categories: categoriesResult.rows,
+    categories: categoriesResult.rows.map((category) => ({
+      id: category.id,
+      name: category.name,
+      productCount: Number(category.product_count || 0),
+    })),
     products: productsResult.rows.map((product) => ({
       id: product.id,
       name: product.name,

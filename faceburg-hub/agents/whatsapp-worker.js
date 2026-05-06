@@ -184,6 +184,26 @@ function getCurrentPhoneNumber() {
   return String(client?.info?.wid?.user || '');
 }
 
+function sendLocalResponse(requestId, ok, dataOrError) {
+  if (!process.send || !requestId) return;
+  if (ok) {
+    process.send({ type: 'local-response', requestId, ok: true, data: dataOrError || {} });
+    return;
+  }
+  process.send({ type: 'local-response', requestId, ok: false, error: String(dataOrError?.message || dataOrError || 'Falha no agente local.') });
+}
+
+async function sendDirectWhatsappMessage(job) {
+  if (!ready || !client) throw new Error('WhatsApp nao esta conectado neste computador.');
+  const target = normalizeTarget(String(job?.targetPhone || ''));
+  if (!target) throw new Error('Numero invalido.');
+  const payloadText = String(job?.payloadText || '');
+  if (!payloadText.trim()) throw new Error('Mensagem vazia.');
+  await client.sendMessage(target, payloadText);
+  sendLog(`Mensagem local enviada para ${target}${job?.id ? ` (job ${job.id})` : ''}.`);
+  return { targetPhone: target, local: true };
+}
+
 function isVisibleWhatsAppMode() {
   return !parseBooleanEnv(process.env.HUB_WHATS_HEADLESS || process.env.WHATS_HEADLESS, false);
 }
@@ -293,15 +313,13 @@ async function pollOnce() {
 
   const job = pollData.job;
   try {
-    const target = normalizeTarget(job.targetPhone);
-    if (!target) throw new Error('Numero invalido.');
-    await client.sendMessage(target, String(job.payloadText || ''));
+    await sendDirectWhatsappMessage(job);
     await fetchJson(`${SERVER_URL}/api/whatsapp/ack`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', 'x-agent-key': AGENT_KEY },
       body: JSON.stringify({ jobId: job.id, success: true }),
     });
-    sendLog(`Mensagem enviada para ${target} (job ${job.id}).`);
+    sendLog(`Job ${job.id} enviado com sucesso.`);
   } catch (err) {
     const msg = err instanceof Error ? err.message : 'Falha';
     await fetchJson(`${SERVER_URL}/api/whatsapp/ack`, {
@@ -615,7 +633,15 @@ async function shutdown() {
 
 // Listen for shutdown command from main process
 process.on('message', (msg) => {
-  if (msg?.type === 'shutdown') void shutdown();
+  if (msg?.type === 'shutdown') {
+    void shutdown();
+    return;
+  }
+  if (msg?.type === 'whatsapp-send-direct') {
+    void sendDirectWhatsappMessage(msg.payload)
+      .then((result) => sendLocalResponse(msg.requestId, true, result))
+      .catch((error) => sendLocalResponse(msg.requestId, false, error));
+  }
 });
 
 process.on('SIGTERM', () => void shutdown());

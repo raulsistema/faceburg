@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import { query } from '@/lib/db';
 import { getValidatedTenantSession } from '@/lib/tenant-auth';
-import { enqueueOrderPrintJob } from '@/lib/printing';
+import { enqueueOrderPrintJob, prepareOrderPrintJobs } from '@/lib/printing';
 
 type OrderRow = {
   id: string;
@@ -24,13 +24,15 @@ function isHubActive(connectionStatus: string, lastSeenAt: string | null) {
   return Date.now() - parsed <= HUB_HEARTBEAT_GRACE_MS;
 }
 
-export async function POST(_: Request, { params }: { params: Promise<{ id: string }> }) {
+export async function POST(request: Request, { params }: { params: Promise<{ id: string }> }) {
   const session = await getValidatedTenantSession();
   if (!session) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   }
 
   const { id } = await params;
+  const body = await request.json().catch(() => ({})) as { preferLocalAgent?: boolean };
+  const preferLocalAgent = Boolean(body.preferLocalAgent);
 
   const orderResult = await query<OrderRow>(
     `SELECT id
@@ -43,6 +45,16 @@ export async function POST(_: Request, { params }: { params: Promise<{ id: strin
 
   if (!orderResult.rowCount) {
     return NextResponse.json({ error: 'Pedido nao encontrado.' }, { status: 404 });
+  }
+
+  if (preferLocalAgent) {
+    const printJobs = await prepareOrderPrintJobs(session.tenantId, id, 'manual_receipt', undefined, {
+      ignoreAgentEnabled: true,
+    });
+    if (!printJobs.length) {
+      return NextResponse.json({ error: 'Recibo manual desativado nas configuracoes de impressao.' }, { status: 409 });
+    }
+    return NextResponse.json({ ok: true, delivery: 'local', printJobs });
   }
 
   const agentResult = await query<AgentRow>(
@@ -59,7 +71,7 @@ export async function POST(_: Request, { params }: { params: Promise<{ id: strin
   }
 
   if (!isHubActive(String(agent.connection_status || ''), agent.last_seen_at || null)) {
-    return NextResponse.json({ error: 'Hub de impressao offline. Verifique o agente local antes de imprimir.' }, { status: 409 });
+    return NextResponse.json({ error: 'Agente local de impressao offline. Verifique o agente local antes de imprimir.' }, { status: 409 });
   }
 
   const queued = await enqueueOrderPrintJob(session.tenantId, id, 'manual_receipt');

@@ -86,6 +86,12 @@ function settlementLabel(days: number) {
   return `${days} dias`;
 }
 
+function settlementAreaLabel(method: PaymentMethod) {
+  if (method.methodType === 'cash') return 'Gaveta';
+  if (Number(method.settlementDays || 0) <= 0) return 'Conta hoje';
+  return 'Recebivel';
+}
+
 function methodIcon(value: string) {
   if (value === 'cash' || value === 'pix') return Wallet;
   if (value === 'bank_slip') return ReceiptText;
@@ -125,7 +131,8 @@ export default function PaymentMethodsSettings() {
 
   const summary = useMemo(() => {
     const active = paymentMethods.filter((method) => method.active);
-    const instant = active.filter((method) => Number(method.settlementDays || 0) === 0);
+    const cash = active.filter((method) => method.methodType === 'cash');
+    const instant = active.filter((method) => method.methodType !== 'cash' && Number(method.settlementDays || 0) === 0);
     const mostExpensive = [...active].sort((a, b) => {
       const aFee = Number(a.feePercent || 0) + Number(a.feeFixed || 0);
       const bFee = Number(b.feePercent || 0) + Number(b.feeFixed || 0);
@@ -134,6 +141,7 @@ export default function PaymentMethodsSettings() {
 
     return {
       activeCount: active.length,
+      cashCount: cash.length,
       instantCount: instant.length,
       mostExpensive,
     };
@@ -156,13 +164,14 @@ export default function PaymentMethodsSettings() {
   }
 
   function openEdit(method: PaymentMethod) {
+    const isCash = method.methodType === 'cash';
     setForm({
       id: method.id,
       name: method.name,
       methodType: method.methodType || 'other',
-      feePercent: String(Number(method.feePercent || 0)),
-      feeFixed: String(Number(method.feeFixed || 0)),
-      settlementDays: String(Number(method.settlementDays || 0)),
+      feePercent: isCash ? '0' : String(Number(method.feePercent || 0)),
+      feeFixed: isCash ? '0' : String(Number(method.feeFixed || 0)),
+      settlementDays: isCash ? '0' : String(Number(method.settlementDays || 0)),
       active: Boolean(method.active),
     });
     setError(null);
@@ -212,6 +221,16 @@ export default function PaymentMethodsSettings() {
     }
   }
 
+  function updateMethodType(methodType: string) {
+    setForm((current) => ({
+      ...current,
+      methodType,
+      feePercent: methodType === 'cash' ? '0' : current.feePercent,
+      feeFixed: methodType === 'cash' ? '0' : current.feeFixed,
+      settlementDays: methodType === 'cash' ? '0' : current.settlementDays,
+    }));
+  }
+
   return (
     <div className="space-y-6">
       {error ? <p className="text-sm font-medium text-red-500">{error}</p> : null}
@@ -236,7 +255,7 @@ export default function PaymentMethodsSettings() {
               <CalendarClock className="h-5 w-5" aria-hidden="true" />
             </span>
             <div>
-              <p className="text-xs font-bold uppercase tracking-[0.18em] text-slate-400">Recebe na hora</p>
+              <p className="text-xs font-bold uppercase tracking-[0.18em] text-slate-400">Conta na hora</p>
               <p className="text-2xl font-black text-slate-900">{summary.instantCount}</p>
             </div>
           </div>
@@ -248,11 +267,9 @@ export default function PaymentMethodsSettings() {
               <BadgePercent className="h-5 w-5" aria-hidden="true" />
             </span>
             <div>
-              <p className="text-xs font-bold uppercase tracking-[0.18em] text-slate-400">Maior custo</p>
+              <p className="text-xs font-bold uppercase tracking-[0.18em] text-slate-400">Gaveta</p>
               <p className="text-sm font-bold text-slate-900">
-                {summary.mostExpensive
-                  ? `${summary.mostExpensive.name}: ${formatPercent(summary.mostExpensive.feePercent)} + ${formatCurrency(summary.mostExpensive.feeFixed)}`
-                  : '-'}
+                {summary.cashCount} forma(s) em dinheiro
               </p>
             </div>
           </div>
@@ -308,7 +325,10 @@ export default function PaymentMethodsSettings() {
                       <td className="px-3 py-4 text-slate-600">
                         {formatPercent(method.feePercent)} + {formatCurrency(method.feeFixed)}
                       </td>
-                      <td className="px-3 py-4 text-slate-600">{settlementLabel(method.settlementDays)}</td>
+                      <td className="px-3 py-4 text-slate-600">
+                        <div className="font-semibold text-slate-800">{settlementAreaLabel(method)}</div>
+                        <div className="text-xs text-slate-500">{method.methodType === 'cash' ? 'Conta no fechamento da gaveta' : settlementLabel(method.settlementDays)}</div>
+                      </td>
                       <td className="px-3 py-4">
                         <span
                           className={`rounded-full px-2.5 py-1 text-xs font-bold ${
@@ -363,7 +383,7 @@ export default function PaymentMethodsSettings() {
                   <select
                     className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm"
                     value={form.methodType}
-                    onChange={(event) => setForm((current) => ({ ...current, methodType: event.target.value }))}
+                    onChange={(event) => updateMethodType(event.target.value)}
                   >
                     {methodTypeOptions.map((option) => (
                       <option key={option.value} value={option.value}>
@@ -380,6 +400,7 @@ export default function PaymentMethodsSettings() {
                       inputMode="decimal"
                       className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm"
                       value={form.feePercent}
+                      disabled={form.methodType === 'cash'}
                       onChange={(event) => setForm((current) => ({ ...current, feePercent: event.target.value }))}
                     />
                   </label>
@@ -389,6 +410,7 @@ export default function PaymentMethodsSettings() {
                       inputMode="decimal"
                       className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm"
                       value={form.feeFixed}
+                      disabled={form.methodType === 'cash'}
                       onChange={(event) => setForm((current) => ({ ...current, feeFixed: event.target.value }))}
                     />
                   </label>
@@ -398,10 +420,16 @@ export default function PaymentMethodsSettings() {
                       inputMode="numeric"
                       className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm"
                       value={form.settlementDays}
+                      disabled={form.methodType === 'cash'}
                       onChange={(event) => setForm((current) => ({ ...current, settlementDays: event.target.value }))}
                     />
                   </label>
                 </div>
+                {form.methodType === 'cash' ? (
+                  <p className="rounded-xl border border-emerald-100 bg-emerald-50 px-3 py-2 text-xs font-semibold text-emerald-800">
+                    Dinheiro e sempre contado na gaveta. Taxa e prazo ficam zerados automaticamente.
+                  </p>
+                ) : null}
 
                 <label className="flex items-center gap-3 rounded-xl border border-slate-200 px-3 py-3 text-sm font-semibold text-slate-700">
                   <input
