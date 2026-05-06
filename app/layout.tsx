@@ -8,8 +8,12 @@ const inter = Inter({
 });
 
 export const metadata: Metadata = {
-  title: 'GastroSaaS - Gestão de Lanchonete & PDV',
-  description: 'Sistema completo para gestão de lanchonetes, pizzarias e restaurantes.',
+  title: 'RBS Gestor - Gestao de Lanchonete & PDV',
+  description: 'Sistema completo para gestao de lanchonetes, pizzarias e restaurantes.',
+  icons: {
+    icon: '/rbs/logorbs.ico',
+    shortcut: '/rbs/logorbs.ico',
+  },
 };
 
 export default function RootLayout({children}: {children: React.ReactNode}) {

@@ -222,10 +222,10 @@ export default function EmpresasCrud({ initialTenants, baseUrl }: Props) {
             <input
               required
               type={showNewAdminPassword ? 'text' : 'password'}
-              minLength={8}
+              minLength={6}
               value={newAdminPassword}
               onChange={(e) => setNewAdminPassword(e.target.value)}
-              placeholder="Senha do admin (min 8)"
+              placeholder="Senha do admin (min 6)"
               className="border border-slate-200 rounded-lg px-3 py-2 pr-10 text-sm w-full"
             />
             <button
@@ -317,7 +317,7 @@ export default function EmpresasCrud({ initialTenants, baseUrl }: Props) {
                         <div className="relative">
                           <input
                             type={showEditAdminPassword ? 'text' : 'password'}
-                            minLength={8}
+                            minLength={6}
                             value={editing.adminPassword}
                             onChange={(e) =>
                               setEditing((prev) => (prev ? { ...prev, adminPassword: e.target.value } : prev))

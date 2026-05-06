@@ -60,8 +60,8 @@ export async function POST(request: Request) {
   if (!['admin', 'staff', 'kitchen'].includes(role)) {
     return NextResponse.json({ error: 'Role inválida.' }, { status: 400 });
   }
-  if (password.length < 8) {
-    return NextResponse.json({ error: 'Senha deve ter no mínimo 8 caracteres.' }, { status: 400 });
+  if (password.length < 6) {
+    return NextResponse.json({ error: 'Senha deve ter no minimo 6 caracteres.' }, { status: 400 });
   }
 
   try {
@@ -79,4 +79,3 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: 'Falha ao criar usuário.' }, { status: 500 });
   }
 }
-

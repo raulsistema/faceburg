@@ -22,8 +22,8 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
   if (!['admin', 'staff', 'kitchen'].includes(role)) {
     return NextResponse.json({ error: 'Role inválida.' }, { status: 400 });
   }
-  if (password && password.length < 8) {
-    return NextResponse.json({ error: 'Nova senha deve ter no mínimo 8 caracteres.' }, { status: 400 });
+  if (password && password.length < 6) {
+    return NextResponse.json({ error: 'Nova senha deve ter no minimo 6 caracteres.' }, { status: 400 });
   }
 
   try {
@@ -80,4 +80,3 @@ export async function DELETE(_: Request, { params }: { params: Promise<{ id: str
   await query(`DELETE FROM tenant_users WHERE id = $1`, [id]);
   return NextResponse.json({ ok: true });
 }
-

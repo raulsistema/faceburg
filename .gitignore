@@ -33,3 +33,7 @@ faceburg-agent-dotnet/**/.wwebjs_cache/
 faceburg-agent-dotnet/**/*.log
 faceburg-agent-dotnet/**/*.err
 faceburg-agent-dotnet/**/*.out
+faceburg-agent-dotnet/installer/**/bin/
+faceburg-agent-dotnet/installer/**/obj/
+faceburg-agent-dotnet/installer/**/Payload/*.zip
+faceburg-agent-dotnet/installer/dist/

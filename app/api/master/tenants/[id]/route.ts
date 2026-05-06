@@ -37,8 +37,8 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
   if (!/^[a-z0-9-]+$/.test(slug)) {
     return NextResponse.json({ error: 'Slug invalido. Use apenas letras minusculas, numeros e hifen.' }, { status: 400 });
   }
-  if (adminPassword && adminPassword.length < 8) {
-    return NextResponse.json({ error: 'Nova senha do admin deve ter no minimo 8 caracteres.' }, { status: 400 });
+  if (adminPassword && adminPassword.length < 6) {
+    return NextResponse.json({ error: 'Nova senha do admin deve ter no minimo 6 caracteres.' }, { status: 400 });
   }
 
   const safePlan = ['starter', 'pro', 'enterprise'].includes(plan) ? plan : 'starter';

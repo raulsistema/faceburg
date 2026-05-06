@@ -119,7 +119,7 @@ export default function EmpresasUsuariosPage() {
               <option value="staff">staff</option>
               <option value="kitchen">kitchen</option>
             </select>
-            <input className="border border-slate-200 rounded-lg px-3 py-2 text-sm" type="password" minLength={8} placeholder="Senha (min 8)" value={password} onChange={(e) => setPassword(e.target.value)} required />
+            <input className="border border-slate-200 rounded-lg px-3 py-2 text-sm" type="password" minLength={6} placeholder="Senha (min 6)" value={password} onChange={(e) => setPassword(e.target.value)} required />
             <button className="md:col-span-4 w-fit px-4 py-2 rounded-lg bg-emerald-600 text-white text-sm font-semibold" type="submit">
               Criar usuario
             </button>

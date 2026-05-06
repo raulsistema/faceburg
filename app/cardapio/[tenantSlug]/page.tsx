@@ -289,6 +289,7 @@ const CHECKOUT_TIMEOUT_MS = 20_000;
 const NETWORK_RETRY_DELAY_MS = 450;
 const INITIAL_PRODUCT_RENDER_LIMIT = 36;
 const PRODUCT_RENDER_INCREMENT = 36;
+const BRAND_NAME = 'RBS Gestor';
 
 type RequestJsonOptions = RequestInit & {
   timeoutMs?: number;
@@ -678,6 +679,7 @@ export default function PublicMenuPage() {
   const [menuActionError, setMenuActionError] = useState<string | null>(null);
   const [selectedByGroup, setSelectedByGroup] = useState<Record<string, string[]>>({});
   const [customNotes, setCustomNotes] = useState('');
+  const [customQuantity, setCustomQuantity] = useState(1);
   const [selectedPizzaSize, setSelectedPizzaSize] = useState('');
   const [selectedPizzaFlavorIds, setSelectedPizzaFlavorIds] = useState<string[]>([]);
   const [selectedPizzaBorderLabel, setSelectedPizzaBorderLabel] = useState('');
@@ -691,6 +693,14 @@ export default function PublicMenuPage() {
   useEffect(() => {
     tenantSlugRef.current = tenantSlug || '';
   }, [tenantSlug]);
+
+  useEffect(() => {
+    if (!tenant?.name) return;
+    document.title = `Pedido online - ${tenant.name} | ${BRAND_NAME}`;
+    return () => {
+      document.title = `${BRAND_NAME} - Gestao de Lanchonete & PDV`;
+    };
+  }, [tenant?.name]);
 
   useEffect(() => {
     addressEntryModeRef.current = addressEntryMode;
@@ -1678,12 +1688,8 @@ export default function PublicMenuPage() {
 
   const latestPortalOrder = useMemo(() => portalOrders[0] || null, [portalOrders]);
 
-  function productRequiresCustomization(product: Product) {
-    return (
-      product.product_type === 'size_based' ||
-      product.optionGroups.length > 0 ||
-      Number(product.optionGroupCount || 0) > 0
-    );
+  function hasRequiredOptionGroups(product: Product) {
+    return product.optionGroups.some((group) => group.required || Number(group.minSelect || 0) > 0);
   }
 
   async function loadProductOptionGroups(product: Product) {
@@ -1734,6 +1740,7 @@ export default function PublicMenuPage() {
     setPizzaFlavorSearch('');
     setSelectedByGroup({});
     setCustomNotes('');
+    setCustomQuantity(1);
     if (readyProduct.product_type === 'size_based') {
       const sizes = getSizeOptions(readyProduct);
       const firstSize = sizes[0]?.label || '';
@@ -1753,12 +1760,25 @@ export default function PublicMenuPage() {
 
   async function addProductButtonAction(product: Product) {
     setMenuActionError(null);
-    if (productRequiresCustomization(product)) {
+    if (product.product_type === 'size_based') {
       await openCustomize(product);
       return;
     }
 
-    addProductToCart(product, [], '');
+    let readyProduct = product;
+    try {
+      readyProduct = await loadProductOptionGroups(product);
+    } catch (error) {
+      setMenuActionError(error instanceof Error ? error.message : 'Falha ao carregar complementos.');
+      return;
+    }
+
+    if (hasRequiredOptionGroups(readyProduct)) {
+      await openCustomize(readyProduct);
+      return;
+    }
+
+    addProductToCart(readyProduct, [], '');
   }
 
   function getPizzaFlavorCandidates(product: Product) {
@@ -1979,6 +1999,19 @@ export default function PublicMenuPage() {
     });
   }
 
+  function getCustomProductUnitTotal(product: Product) {
+    return (
+      (product.product_type === 'size_based' ? getPizzaUnitPrice(product) : Number(product.price)) +
+      (product.product_type === 'size_based' ? getSelectedPizzaDough(product)?.price || 0 : 0) +
+      (product.product_type === 'size_based' ? getSelectedPizzaBorder(product)?.price || 0 : 0) +
+      getChosenOptions(product).reduce((sum, option) => sum + option.priceAddition, 0)
+    );
+  }
+
+  function getCustomProductTotal(product: Product) {
+    return getCustomProductUnitTotal(product) * customQuantity + getExtraDrinksSubtotal();
+  }
+
   function addCustomProductToCart() {
     if (!customizeProduct || !isSelectionValid(customizeProduct)) return;
     const activeGiftRule = getActivePizzaGiftRule(customizeProduct);
@@ -1997,7 +2030,7 @@ export default function PublicMenuPage() {
             giftQuantity: activeGiftRule ? activeGiftRule.quantity : 0,
           }
         : null;
-    addProductToCart(customizeProduct, getChosenOptions(customizeProduct), customNotes, pizzaSelection);
+    addProductToCart(customizeProduct, getChosenOptions(customizeProduct), customNotes, pizzaSelection, customQuantity);
 
     const extraDrinkEntries = Object.entries(extraDrinkQtyById).filter(([, qty]) => qty > 0);
     for (const [drinkId, quantity] of extraDrinkEntries) {
@@ -2010,6 +2043,7 @@ export default function PublicMenuPage() {
     setCustomizeProduct(null);
     setSelectedByGroup({});
     setCustomNotes('');
+    setCustomQuantity(1);
     setSelectedPizzaSize('');
     setSelectedPizzaFlavorIds([]);
     setSelectedPizzaBorderLabel('');
@@ -2554,7 +2588,19 @@ export default function PublicMenuPage() {
                   </div>
                   <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
                     {items.map((product, productIndex) => (
-                      <article key={product.id} className="bg-white border border-slate-200 rounded-xl overflow-hidden flex">
+                      <div
+                        key={product.id}
+                        role="button"
+                        tabIndex={0}
+                        onClick={() => void openCustomize(product)}
+                        onKeyDown={(event) => {
+                          if (event.key === 'Enter' || event.key === ' ') {
+                            event.preventDefault();
+                            void openCustomize(product);
+                          }
+                        }}
+                        className="flex cursor-pointer overflow-hidden rounded-xl border border-slate-200 bg-white transition hover:-translate-y-0.5 hover:border-rose-200 hover:shadow-sm focus:outline-none focus:ring-2 focus:ring-rose-200"
+                      >
                         <div className="w-28 h-28 bg-slate-100 shrink-0">
                           {product.image_url ? <AppImage src={product.image_url} alt={product.name} width={112} height={112} sizes="112px" priority={productIndex === 0} className="h-full w-full object-cover" /> : <div className="w-full h-full grid place-items-center text-slate-400 text-xs">Sem imagem</div>}
                         </div>
@@ -2570,7 +2616,11 @@ export default function PublicMenuPage() {
                             <strong className="text-slate-900 text-xl">{getProductCardPrice(product)}</strong>
                             <button
                               type="button"
-                              onClick={() => void addProductButtonAction(product)}
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                void addProductButtonAction(product);
+                              }}
+                              onKeyDown={(event) => event.stopPropagation()}
                               disabled={customizeLoadingProductId === product.id}
                               className="w-8 h-8 rounded-lg bg-rose-500 text-white grid place-items-center disabled:cursor-wait disabled:opacity-70"
                               aria-label={`Adicionar ${product.name}`}
@@ -2583,7 +2633,7 @@ export default function PublicMenuPage() {
                             </button>
                           </div>
                         </div>
-                      </article>
+                      </div>
                     ))}
                   </div>
                 </section>
@@ -2815,16 +2865,38 @@ export default function PublicMenuPage() {
 
       {customizeProduct ? (
         <div className="fixed inset-0 z-40 bg-black/50 p-3 overflow-y-auto">
-          <div className="max-w-3xl mx-auto bg-white rounded-2xl">
+          <div className="max-w-4xl mx-auto bg-white rounded-2xl shadow-2xl">
             <div className="p-4 border-b border-slate-200 flex items-center justify-between">
               <div>
+                <p className="text-xs uppercase tracking-[0.16em] text-slate-400">Detalhes do item</p>
                 <h3 className="font-bold text-slate-900">{customizeProduct.name}</h3>
-                <p className="text-xs text-slate-500">Selecione os adicionais do item</p>
               </div>
               <button onClick={() => setCustomizeProduct(null)} className="p-2 rounded-lg hover:bg-slate-100"><X className="w-4 h-4 text-slate-500" /></button>
             </div>
 
             <div className="p-4 space-y-4">
+              <section className="grid gap-4 md:grid-cols-[1fr_240px] md:items-start">
+                <div className="rounded-xl border border-slate-200 border-l-4 border-l-sky-400 bg-white p-4">
+                  <h4 className="text-lg font-black leading-tight text-slate-900">{customizeProduct.name}</h4>
+                  <p className="mt-3 whitespace-pre-line text-sm leading-6 text-slate-700">
+                    {customizeProduct.description || 'Sem descricao cadastrada para este item.'}
+                  </p>
+                </div>
+                <div className="relative h-44 overflow-hidden rounded-xl bg-slate-100 md:h-40">
+                  {customizeProduct.image_url ? (
+                    <AppImage
+                      src={customizeProduct.image_url}
+                      alt={customizeProduct.name}
+                      fill
+                      sizes="(min-width: 768px) 240px, 100vw"
+                      className="absolute inset-0 h-full w-full object-cover"
+                    />
+                  ) : (
+                    <div className="grid h-full w-full place-items-center text-xs font-semibold text-slate-400">Sem imagem</div>
+                  )}
+                </div>
+              </section>
+
               {customizeProduct.product_type === 'size_based' ? (
                 <section className="border border-slate-200 rounded-xl p-3 space-y-4">
                   <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3">
@@ -3009,7 +3081,7 @@ export default function PublicMenuPage() {
                 </section>
               ) : null}
 
-              {customizeProduct.optionGroups.length === 0 ? <p className="text-sm text-slate-500">Este produto nao possui adicionais.</p> : customizeProduct.optionGroups.map((group) => (
+              {customizeProduct.optionGroups.length > 0 ? customizeProduct.optionGroups.map((group) => (
                 <section key={group.id} className="border border-slate-200 rounded-xl p-3">
                   <header className="mb-2">
                     <p className="font-semibold text-slate-900">{group.name}</p>
@@ -3054,7 +3126,7 @@ export default function PublicMenuPage() {
                     })}
                   </div>
                 </section>
-              ))}
+              )) : null}
 
               <div>
                 <label className="text-sm font-semibold text-slate-700">Algum comentario?</label>
@@ -3062,23 +3134,37 @@ export default function PublicMenuPage() {
               </div>
             </div>
 
-            <div className="p-4 border-t border-slate-200 flex items-center justify-between">
-              <strong>
-                Total item: {brl(
-                  (customizeProduct.product_type === 'size_based'
-                    ? getPizzaUnitPrice(customizeProduct)
-                    : Number(customizeProduct.price)) +
-                    (customizeProduct.product_type === 'size_based'
-                      ? getSelectedPizzaDough(customizeProduct)?.price || 0
-                      : 0) +
-                    (customizeProduct.product_type === 'size_based'
-                      ? getSelectedPizzaBorder(customizeProduct)?.price || 0
-                      : 0) +
-                    getChosenOptions(customizeProduct).reduce((sum, option) => sum + option.priceAddition, 0) +
-                    getExtraDrinksSubtotal(),
-                )}
-              </strong>
-              <button onClick={addCustomProductToCart} disabled={!isSelectionValid(customizeProduct)} className="px-4 py-2 rounded-lg bg-rose-500 text-white font-bold disabled:opacity-50">Adicionar</button>
+            <div className="flex flex-col gap-3 border-t border-slate-200 p-4 sm:flex-row sm:items-center sm:justify-between">
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setCustomQuantity((current) => Math.max(1, current - 1))}
+                  className="grid h-10 w-10 place-items-center rounded-lg border border-slate-200 text-rose-500"
+                  aria-label="Diminuir quantidade"
+                >
+                  <Minus className="h-4 w-4" />
+                </button>
+                <span className="grid h-10 min-w-10 place-items-center rounded-lg border border-slate-200 px-3 text-sm font-bold text-slate-900">
+                  {customQuantity}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setCustomQuantity((current) => Math.min(99, current + 1))}
+                  className="grid h-10 w-10 place-items-center rounded-lg border border-slate-200 text-rose-500"
+                  aria-label="Aumentar quantidade"
+                >
+                  <Plus className="h-4 w-4" />
+                </button>
+              </div>
+              <button
+                onClick={addCustomProductToCart}
+                disabled={!isSelectionValid(customizeProduct)}
+                className="inline-flex min-h-12 items-center justify-center gap-3 rounded-lg bg-slate-950 px-5 py-3 text-sm font-black text-white disabled:opacity-50"
+              >
+                <ShoppingCart className="h-4 w-4" />
+                <span>Adicionar</span>
+                <span>{brl(getCustomProductTotal(customizeProduct))}</span>
+              </button>
             </div>
           </div>
         </div>
