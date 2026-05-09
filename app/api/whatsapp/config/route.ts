@@ -105,8 +105,8 @@ export async function PATCH(request: Request) {
   } catch {
     body = {};
   }
-  const desiredEnabled = Boolean(body.enabled);
   const rotateKey = Boolean(body.rotateKey);
+  const hasBodyField = (field: string) => Object.prototype.hasOwnProperty.call(body, field);
 
   const currentResult = await query<ConfigRow>(
     `SELECT tenant_id, enabled, agent_key, session_status, qr_code, phone_number, device_name, app_version, last_error, last_seen_at
@@ -117,7 +117,7 @@ export async function PATCH(request: Request) {
   );
   const current = currentResult.rows[0];
   const nextKey = rotateKey || !current?.agent_key ? buildAgentKey() : current.agent_key;
-  const enabled = desiredEnabled;
+  const enabled = hasBodyField('enabled') ? Boolean(body.enabled) : Boolean(current?.enabled);
   const nextRowSeed: ConfigRow = {
     tenant_id: session.tenantId,
     enabled,

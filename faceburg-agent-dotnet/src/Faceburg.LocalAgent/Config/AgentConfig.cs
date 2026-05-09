@@ -8,8 +8,14 @@ public sealed class AgentConfig
     public string TenantId { get; set; } = "";
     public string TenantSlug { get; set; } = "";
     public string TerminalId { get; set; } = Environment.MachineName;
+    public string PrintAgentKey { get; set; } = "";
+    public string WhatsAppAgentKey { get; set; } = "";
+    public int RealtimeGatewayPort { get; set; } = 3001;
+    public string RealtimeGatewayPath { get; set; } = "/ws/agents";
     public string DefaultPrinter { get; set; } = "";
+    public string PrintEngine { get; set; } = "windows-driver-visual";
     public int Columns { get; set; } = 32;
+    public string PrintTextSize { get; set; } = "12.5";
     public string CodePage { get; set; } = "CP860";
     public bool CutPaper { get; set; } = true;
     public bool PulseDrawer { get; set; } = false;

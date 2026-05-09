@@ -71,8 +71,16 @@ export async function POST(request: Request) {
       [current.id, session.tenantId, safeUserId, closingAmountReported, expected, difference, notes],
     );
 
+    await client.query(
+      `UPDATE tenants
+       SET store_open = FALSE,
+           updated_at = NOW()
+       WHERE id = $1`,
+      [session.tenantId],
+    );
+
     await client.query('COMMIT');
-    return NextResponse.json({ cashSession: result.rows[0] });
+    return NextResponse.json({ cashSession: result.rows[0], storeOpen: false });
   } catch (error) {
     await client.query('ROLLBACK').catch(() => undefined);
     const message = error instanceof Error ? error.message : 'Falha ao fechar caixa.';

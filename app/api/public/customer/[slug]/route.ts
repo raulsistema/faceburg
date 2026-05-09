@@ -43,7 +43,14 @@ type OrderRow = {
 };
 
 function normalizePhone(value: string) {
-  return value.replace(/\D/g, '');
+  let digits = value.replace(/\D/g, '');
+  if (digits.startsWith('00')) {
+    digits = digits.slice(2);
+  }
+  if (digits.startsWith('55') && digits.length >= 12) {
+    digits = digits.slice(2);
+  }
+  return digits.replace(/^0+/, '');
 }
 
 async function getTenantBySlug(slug: string) {
@@ -105,7 +112,7 @@ async function loadCustomerAndAddresses(tenantId: string, phone: string, options
               STRING_AGG(
                 (oi.quantity::text || 'x ' || COALESCE(p.name, 'Produto removido')),
                 ', '
-                ORDER BY COALESCE(p.name, 'Produto removido')
+                ORDER BY oi.ctid
               ),
               ''
             ) AS items_summary
@@ -254,5 +261,87 @@ export async function POST(request: Request, { params }: { params: Promise<{ slu
   } catch (error) {
     console.error('[public-customer] failed to save customer', error);
     return NextResponse.json({ error: 'Falha ao salvar cadastro.' }, { status: 500 });
+  }
+}
+
+export async function DELETE(request: Request, { params }: { params: Promise<{ slug: string }> }) {
+  try {
+    const { slug } = await params;
+    let body: Record<string, unknown> = {};
+
+    try {
+      body = (await request.json()) as Record<string, unknown>;
+    } catch {
+      return NextResponse.json({ error: 'Corpo da requisicao invalido.' }, { status: 400 });
+    }
+
+    const phone = normalizePhone(String(body.phone || '').trim());
+    const addressId = String(body.addressId || '').trim();
+
+    if (phone.length < 10 || !addressId) {
+      return NextResponse.json({ error: 'Celular e endereco validos sao obrigatorios.' }, { status: 400 });
+    }
+
+    const tenant = await getTenantBySlug(slug);
+    if (!tenant) {
+      return NextResponse.json({ error: 'Empresa nao encontrada.' }, { status: 404 });
+    }
+    if (tenant.status !== 'active') {
+      return NextResponse.json({ error: 'Empresa inativa.' }, { status: 403 });
+    }
+
+    const customerResult = await query<{ id: string }>(
+      `SELECT id
+       FROM customers
+       WHERE tenant_id = $1
+         AND regexp_replace(phone, '\D', '', 'g') = $2
+       ORDER BY created_at ASC
+       LIMIT 1`,
+      [tenant.id, phone],
+    );
+
+    if (!customerResult.rowCount) {
+      return NextResponse.json({ error: 'Cliente nao encontrado.' }, { status: 404 });
+    }
+
+    const customerId = customerResult.rows[0].id;
+    const deletedAddressResult = await query<{ id: string; is_default: boolean }>(
+      `UPDATE customer_addresses
+       SET active = FALSE,
+           is_default = FALSE
+       WHERE id = $1
+         AND tenant_id = $2
+         AND customer_id = $3
+         AND active = TRUE
+       RETURNING id, is_default`,
+      [addressId, tenant.id, customerId],
+    );
+
+    if (!deletedAddressResult.rowCount) {
+      return NextResponse.json({ error: 'Endereco nao encontrado.' }, { status: 404 });
+    }
+
+    if (deletedAddressResult.rows[0].is_default) {
+      await query(
+        `UPDATE customer_addresses
+         SET is_default = TRUE
+         WHERE id = (
+           SELECT id
+           FROM customer_addresses
+           WHERE tenant_id = $1
+             AND customer_id = $2
+             AND active = TRUE
+           ORDER BY created_at DESC
+           LIMIT 1
+         )`,
+        [tenant.id, customerId],
+      );
+    }
+
+    const result = await loadCustomerAndAddresses(tenant.id, phone, { includeOrders: true });
+    return NextResponse.json(result);
+  } catch (error) {
+    console.error('[public-customer] failed to delete address', error);
+    return NextResponse.json({ error: 'Falha ao remover endereco.' }, { status: 500 });
   }
 }

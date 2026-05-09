@@ -2,6 +2,8 @@
 
 import React, { useEffect, useState } from 'react';
 import { Menu, X } from 'lucide-react';
+import { usePathname, useRouter } from 'next/navigation';
+import LocalAutomationBridge from '@/components/local-automation/LocalAutomationBridge';
 import Sidebar from './Sidebar';
 
 type MeResponse = {
@@ -29,6 +31,19 @@ type MeCacheEntry = {
 
 let sharedMeCache: MeCacheEntry | undefined;
 let sharedMePromise: Promise<MeResponse | null> | null = null;
+const warmedDashboardRoutes = new Set<string>();
+const DASHBOARD_WARMUP_ROUTES = [
+  '/',
+  '/pedidos',
+  '/pdv',
+  '/cardapio-admin',
+  '/settings',
+  '/financeiro/caixas',
+  '/financeiro/movimentacoes',
+  '/financeiro/formas-pagamento',
+  '/clientes',
+  '/relatorios',
+];
 
 function getCachedMe() {
   if (!sharedMeCache) return undefined;
@@ -75,8 +90,23 @@ export default function DashboardShell({
   initialData?: MeResponse | null;
   overlaySidebar?: boolean;
 }) {
+  const pathname = usePathname();
+  const router = useRouter();
   const [data, setData] = useState<MeResponse | null>(initialData ?? null);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+
+  useEffect(() => {
+    const previousHtmlOverflow = document.documentElement.style.overflow;
+    const previousBodyOverflow = document.body.style.overflow;
+
+    document.documentElement.style.overflow = 'hidden';
+    document.body.style.overflow = 'hidden';
+
+    return () => {
+      document.documentElement.style.overflow = previousHtmlOverflow;
+      document.body.style.overflow = previousBodyOverflow;
+    };
+  }, []);
 
   useEffect(() => {
     if (initialData) {
@@ -119,8 +149,44 @@ export default function DashboardShell({
     };
   }, [initialData]);
 
+  useEffect(() => {
+    if (!data?.authenticated || process.env.NEXT_PUBLIC_DISABLE_ROUTE_WARMUP === 'true') return;
+
+    let cancelled = false;
+    const idleWindow = window as Window & {
+      requestIdleCallback?: (callback: () => void, options?: { timeout: number }) => number;
+      cancelIdleCallback?: (id: number) => void;
+    };
+    const routes = DASHBOARD_WARMUP_ROUTES.filter((route) => route !== pathname && !warmedDashboardRoutes.has(route));
+    if (!routes.length) return;
+
+    async function warmRoutes() {
+      for (const route of routes) {
+        if (cancelled) return;
+        warmedDashboardRoutes.add(route);
+        router.prefetch(route);
+        await new Promise((resolve) => window.setTimeout(resolve, 900));
+      }
+    }
+
+    const useIdleCallback = typeof idleWindow.requestIdleCallback === 'function';
+    const idleId = useIdleCallback
+      ? idleWindow.requestIdleCallback(() => void warmRoutes(), { timeout: 2500 })
+      : window.setTimeout(() => void warmRoutes(), 1500);
+
+    return () => {
+      cancelled = true;
+      if (useIdleCallback && typeof idleWindow.cancelIdleCallback === 'function') {
+        idleWindow.cancelIdleCallback(idleId);
+      } else {
+        window.clearTimeout(idleId);
+      }
+    };
+  }, [data?.authenticated, pathname, router]);
+
   return (
-    <div className="flex min-h-screen bg-slate-50">
+    <div className="flex h-dvh overflow-hidden bg-slate-50">
+      <LocalAutomationBridge enabled={Boolean(data?.authenticated)} tenantId={data?.tenant?.id || ''} />
       <Sidebar mobileOpen={mobileMenuOpen} overlayMode={overlaySidebar} onCloseMobile={() => setMobileMenuOpen(false)} />
       {mobileMenuOpen ? (
         <button
@@ -130,7 +196,7 @@ export default function DashboardShell({
           onClick={() => setMobileMenuOpen(false)}
         />
       ) : null}
-      <main className="flex-1 flex flex-col h-screen bg-slate-50">
+      <main className="flex min-h-0 min-w-0 flex-1 flex-col bg-slate-50">
         <header className="h-16 bg-white border-b border-slate-200 flex items-center justify-between px-6 shrink-0">
           <div className="flex items-center gap-3">
             <button
@@ -155,13 +221,13 @@ export default function DashboardShell({
             </div>
           </div>
         </header>
-        <div className="flex-1 overflow-y-auto p-6">{children}</div>
+        <div className="min-h-0 flex-1 overflow-y-auto p-6">{children}</div>
         <footer className="h-12 bg-white border-t border-slate-200 flex items-center justify-between px-6 text-xs text-slate-400 shrink-0">
           <div>
             Tenant: <strong className="text-slate-700">{data?.tenant?.slug || 'n/a'}</strong>
           </div>
           <div className="flex gap-6">
-            <span>Suporte: 0800 123 456</span>
+            <span>Suporte: (11) 96491-1550</span>
             <span className="font-mono">v1.3.0-SaaS</span>
           </div>
         </footer>

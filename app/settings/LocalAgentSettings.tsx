@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertCircle,
   CheckCircle2,
@@ -19,14 +19,23 @@ import AppImage from '@/components/ui/AppImage';
 import {
   DEFAULT_PRINT_EVENTS,
   DEFAULT_RECEIPT_OPTIONS,
-  PRINT_WIDTH_OPTIONS,
+  PRINT_PAPER_WIDTH_OPTIONS,
+  MAX_PRINT_TEXT_SIZE,
+  MIN_PRINT_TEXT_SIZE,
+  PRINT_TEXT_SIZE_STEP,
+  getEffectiveReceiptWidth,
+  getPrintTextSizeProfile,
+  getReceiptPaperWidthLabel,
+  normalizeAutoAcceptOrders,
   normalizePrintCopies,
-  normalizePrintEvents,
+  normalizePrintEventsForAutomation,
+  normalizePrintTextSize,
   normalizeReceiptOptions,
   normalizeReceiptText,
   normalizeReceiptWidth,
   type PrintEventKey,
   type PrintEvents,
+  type PrintTextSize,
   type ReceiptOptions,
 } from '@/lib/print-settings';
 
@@ -36,7 +45,9 @@ type PrintConfig = {
   agentKey: string;
   printerName: string;
   receiptWidth: number;
+  printTextSize: PrintTextSize;
   printCopies: number;
+  autoAcceptOrders: boolean;
   printEvents: PrintEvents;
   receiptOptions: ReceiptOptions;
   receiptHeader: string;
@@ -61,8 +72,14 @@ type LocalAgentConfig = {
   tenantId?: string;
   tenantSlug?: string;
   terminalId?: string;
+  printAgentKey?: string;
+  whatsAppAgentKey?: string;
+  realtimeGatewayPort?: number;
+  realtimeGatewayPath?: string;
   defaultPrinter?: string;
+  printEngine?: string;
   columns?: number;
+  printTextSize?: string;
   codePage?: string;
   cutPaper?: boolean;
   pulseDrawer?: boolean;
@@ -85,6 +102,10 @@ type LocalAgentHealth = {
   tenantSlug?: string;
   terminalId?: string;
   printerName?: string;
+  realtimeGatewayPort?: number;
+  realtimeGatewayPath?: string;
+  hasPrintAgentKey?: boolean;
+  hasWhatsAppAgentKey?: boolean;
   startWithWindows?: boolean;
   startupRegistered?: boolean;
   configUpdatedAt?: string;
@@ -135,6 +156,7 @@ const RECEIPT_OPTION_LABELS: Array<{ key: keyof ReceiptOptions; label: string }>
   { key: 'showCustomerPhone', label: 'Telefone' },
   { key: 'showDeliveryAddress', label: 'Endereco' },
   { key: 'showPayment', label: 'Pagamento' },
+  { key: 'showItemDescription', label: 'Descricao do produto' },
   { key: 'showItemNotes', label: 'Adicionais' },
   { key: 'showTotals', label: 'Totais' },
 ];
@@ -161,8 +183,10 @@ function normalizePrintState(data?: PrintConfig | null) {
     enabled: Boolean(data?.enabled),
     printerName: String(data?.printerName || ''),
     receiptWidth: normalizeReceiptWidth(data?.receiptWidth),
+    printTextSize: normalizePrintTextSize(data?.printTextSize),
     printCopies: normalizePrintCopies(data?.printCopies),
-    printEvents: normalizePrintEvents(data?.printEvents || DEFAULT_PRINT_EVENTS),
+    autoAcceptOrders: normalizeAutoAcceptOrders(data?.autoAcceptOrders),
+    printEvents: normalizePrintEventsForAutomation(data?.printEvents || DEFAULT_PRINT_EVENTS, data?.autoAcceptOrders),
     receiptOptions: normalizeReceiptOptions(data?.receiptOptions || DEFAULT_RECEIPT_OPTIONS),
     receiptHeader: normalizeReceiptText(data?.receiptHeader),
     receiptFooter: normalizeReceiptText(data?.receiptFooter),
@@ -236,51 +260,62 @@ function centerPreviewLine(value: string, width: number) {
   return `${' '.repeat(Math.floor((width - clean.length) / 2))}${clean}`;
 }
 
-function alignPreviewLine(left: string, right: string, width: number) {
-  const spacing = width - left.length - right.length;
-  if (spacing < 1) return `${left}\n${right}`;
-  return `${left}${' '.repeat(spacing)}${right}`;
-}
-
 function buildPreviewText(config: {
   receiptWidth: number;
+  printTextSize: PrintTextSize;
   receiptOptions: ReceiptOptions;
   receiptHeader: string;
   receiptFooter: string;
   printCopies: number;
   cutPaper: boolean;
 }) {
-  const width = config.receiptWidth;
+  const width = getEffectiveReceiptWidth(config.receiptWidth, config.printTextSize);
   const lines: string[] = [];
   const divider = '-'.repeat(width);
+  const detailWidth = Math.max(8, width - 2);
 
   if (config.receiptHeader) {
     for (const line of wrapPreviewText(config.receiptHeader, width)) lines.push(centerPreviewLine(line, width));
     lines.push(divider);
   }
 
-  lines.push(centerPreviewLine('FACE BURG', width));
-  lines.push(centerPreviewLine('VIA COZINHA', width));
-  lines.push('Pedido: TESTE-001');
+  lines.push(centerPreviewLine('DELIVERY', width));
+  lines.push('');
+  lines.push('Venda:TESTE-001');
   lines.push('Data: 06/05/2026 14:20');
+  lines.push('Entrega Prevista: 15:00');
   lines.push('Cliente: Maria Souza');
   if (config.receiptOptions.showCustomerPhone) lines.push('Tel.: (11) 98222-3966');
   if (config.receiptOptions.showDeliveryAddress) {
     lines.push(...wrapPreviewText('End.: Rua das Palmeiras, 120 - Centro', width));
   }
   lines.push(divider);
-  lines.push(alignPreviewLine('1x Face Burg Classico', 'R$ 29,90', width));
+  lines.push(centerPreviewLine('DOCUMENTO DE VENDA', width));
+  lines.push(divider);
+  lines.push('1un Face Burg Classico x R$ 29,90');
+  if (config.receiptOptions.showItemDescription) {
+    lines.push(...wrapPreviewText('Hamburguer artesanal, queijo, alface, tomate e molho da casa.', detailWidth).map((line) => `  ${line}`));
+  }
   if (config.receiptOptions.showItemNotes) {
-    lines.push('+ Bacon');
+    lines.push('  + Bacon');
     lines.push('Obs.: sem cebola');
   }
-  lines.push(alignPreviewLine('1x Batata Cheddar', 'R$ 16,00', width));
   lines.push(divider);
-  if (config.receiptOptions.showPayment) lines.push('Pagamento: Pix');
+  lines.push('1un Batata Cheddar x R$ 16,00');
+  if (config.receiptOptions.showItemDescription) {
+    lines.push(...wrapPreviewText('Batata crocante com cheddar cremoso e bacon.', detailWidth).map((line) => `  ${line}`));
+  }
+  lines.push(divider);
   if (config.receiptOptions.showTotals) {
-    lines.push(alignPreviewLine('Subtotal', 'R$ 45,90', width));
-    lines.push(alignPreviewLine('Entrega', 'R$ 6,00', width));
-    lines.push(alignPreviewLine('Total', 'R$ 51,90', width));
+    lines.push('Itens Comanda 2 Itens');
+    lines.push('');
+    lines.push('Sub Total: R$ 45,90');
+    lines.push('Entrega: R$ 6,00');
+    lines.push('Total: R$ 51,90');
+  }
+  if (config.receiptOptions.showPayment) {
+    lines.push('');
+    lines.push('Pagar na entrega (Pix)');
   }
   if (config.receiptOptions.showStoreInfo) {
     lines.push('');
@@ -333,7 +368,9 @@ export default function LocalAgentSettings({
   const [whatsappEnabled, setWhatsAppEnabled] = useState(Boolean(initialWhatsAppData?.enabled));
   const [printerName, setPrinterName] = useState(initialPrint.printerName);
   const [receiptWidth, setReceiptWidth] = useState(initialPrint.receiptWidth);
+  const [printTextSize, setPrintTextSize] = useState(initialPrint.printTextSize);
   const [printCopies, setPrintCopies] = useState(initialPrint.printCopies);
+  const [autoAcceptOrders, setAutoAcceptOrders] = useState(initialPrint.autoAcceptOrders);
   const [printEvents, setPrintEvents] = useState<PrintEvents>({
     ...initialPrint.printEvents,
     status_delivering: false,
@@ -362,24 +399,33 @@ export default function LocalAgentSettings({
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [messageTone, setMessageTone] = useState<MessageTone>('success');
+  const printAgentKeyRef = useRef(initialPrintData?.agentKey || '');
+  const whatsappAgentKeyRef = useRef(initialWhatsAppData?.agentKey || '');
 
   const agentOnline = Boolean(agentHealth?.online);
   const whatsappConnected = String(whatsappStatus?.status || agentHealth?.whatsapp?.status || '') === 'ready';
   const selectedPrinter = printerName;
   const displayPrinter = selectedPrinter || agentHealth?.printerName || agentConfig?.defaultPrinter || '';
   const selectedWhatsAppStatus = whatsappStatus || agentHealth?.whatsapp || null;
+  const printTextProfile = getPrintTextSizeProfile(printTextSize);
+  const selectedPaperWidthLabel = getReceiptPaperWidthLabel(receiptWidth);
+  const printTextNumericSize = Number(printTextProfile.value);
+  const previewTextClass = printTextNumericSize >= 18
+    ? 'text-[15px] leading-8'
+    : 'text-[12px] leading-relaxed';
 
   const previewText = useMemo(
     () =>
       buildPreviewText({
         receiptWidth,
+        printTextSize,
         receiptOptions,
         receiptHeader,
         receiptFooter,
         printCopies,
         cutPaper,
       }),
-    [cutPaper, printCopies, receiptFooter, receiptHeader, receiptOptions, receiptWidth],
+    [cutPaper, printCopies, printTextSize, receiptFooter, receiptHeader, receiptOptions, receiptWidth],
   );
 
   useEffect(() => {
@@ -388,11 +434,14 @@ export default function LocalAgentSettings({
 
   useEffect(() => {
     if (!initialPrintData) return;
+    printAgentKeyRef.current = initialPrintData.agentKey || printAgentKeyRef.current;
     const next = normalizePrintState(initialPrintData);
     setPrintEnabled(next.enabled);
     setPrinterName((current) => current || next.printerName);
     setReceiptWidth(next.receiptWidth);
+    setPrintTextSize(next.printTextSize);
     setPrintCopies(next.printCopies);
+    setAutoAcceptOrders(next.autoAcceptOrders);
     setPrintEvents({
       ...next.printEvents,
       status_delivering: false,
@@ -406,6 +455,7 @@ export default function LocalAgentSettings({
 
   useEffect(() => {
     if (!initialWhatsAppData) return;
+    whatsappAgentKeyRef.current = initialWhatsAppData.agentKey || whatsappAgentKeyRef.current;
     setWhatsAppEnabled(Boolean(initialWhatsAppData.enabled));
   }, [initialWhatsAppData]);
 
@@ -413,8 +463,11 @@ export default function LocalAgentSettings({
     setAgentConfig(config);
     setServerUrl(ensureTrailingSlash(String(config.serverUrl || currentServerUrl())));
     setTerminalId(String(config.terminalId || 'ATENDIMENTO'));
-    setPrinterName(String(config.defaultPrinter || ''));
-    setReceiptWidth(normalizeReceiptWidth(config.columns));
+    if (!printAgentKeyRef.current) {
+      setPrinterName(String(config.defaultPrinter || ''));
+      setReceiptWidth(normalizeReceiptWidth(config.columns));
+      setPrintTextSize(normalizePrintTextSize(config.printTextSize));
+    }
     setCodePage(String(config.codePage || DEFAULT_CODE_PAGE));
     setCutPaper(config.cutPaper !== false);
     setPulseDrawer(Boolean(config.pulseDrawer));
@@ -484,12 +537,28 @@ export default function LocalAgentSettings({
   }, [selectedWhatsAppStatus?.qrCode, selectedWhatsAppStatus?.status]);
 
   function buildPrintEvents() {
-    return {
+    const events = {
       ...printEvents,
       status_delivering: false,
       status_completed: false,
       status_cancelled: false,
     };
+    if (autoAcceptOrders) {
+      events.new_order = true;
+      events.status_processing = true;
+    }
+    return events;
+  }
+
+  function updateAutoAcceptOrders(next: boolean) {
+    setAutoAcceptOrders(next);
+    if (next) {
+      setPrintEvents((current) => ({
+        ...current,
+        new_order: true,
+        status_processing: true,
+      }));
+    }
   }
 
   function buildLocalAgentPayload(override?: Partial<LocalAgentConfig>): LocalAgentConfig {
@@ -501,8 +570,14 @@ export default function LocalAgentSettings({
       tenantId: tenantId || agentConfig?.tenantId || '',
       tenantSlug: tenantSlug || agentConfig?.tenantSlug || '',
       terminalId: terminalId.trim() || 'ATENDIMENTO',
+      printAgentKey: printAgentKeyRef.current || agentConfig?.printAgentKey || '',
+      whatsAppAgentKey: whatsappAgentKeyRef.current || agentConfig?.whatsAppAgentKey || '',
+      realtimeGatewayPort: Number(agentConfig?.realtimeGatewayPort || 3001),
+      realtimeGatewayPath: agentConfig?.realtimeGatewayPath || '/ws/agents',
       defaultPrinter: selectedPrinter.trim(),
+      printEngine: agentConfig?.printEngine || 'windows-driver-visual',
       columns: normalizeReceiptWidth(receiptWidth),
+      printTextSize,
       codePage: codePage || DEFAULT_CODE_PAGE,
       cutPaper,
       pulseDrawer,
@@ -525,7 +600,9 @@ export default function LocalAgentSettings({
         enabled: printEnabled,
         printerName: selectedPrinter,
         receiptWidth,
+        printTextSize,
         printCopies,
+        autoAcceptOrders,
         printEvents: nextPrintEvents,
         receiptOptions,
         receiptHeader,
@@ -534,8 +611,17 @@ export default function LocalAgentSettings({
     });
     const json = (await response.json().catch(() => ({}))) as Partial<PrintConfig> & { error?: string };
     if (!response.ok) throw new Error(json.error || 'Falha ao salvar impressao.');
-    setPrintEvents(normalizePrintEvents(json.printEvents || nextPrintEvents));
+    if (json.agentKey) printAgentKeyRef.current = json.agentKey;
+    const savedAutoAcceptOrders = normalizeAutoAcceptOrders(json.autoAcceptOrders ?? autoAcceptOrders);
+    setAutoAcceptOrders(savedAutoAcceptOrders);
+    setPrintEvents(normalizePrintEventsForAutomation(json.printEvents || nextPrintEvents, savedAutoAcceptOrders));
     setPrinterName(String(json.printerName ?? selectedPrinter));
+    setReceiptWidth(normalizeReceiptWidth(json.receiptWidth ?? receiptWidth));
+    setPrintTextSize(normalizePrintTextSize(json.printTextSize ?? printTextSize));
+    setPrintCopies(normalizePrintCopies(json.printCopies ?? printCopies));
+    setReceiptOptions(normalizeReceiptOptions(json.receiptOptions ?? receiptOptions));
+    setReceiptHeader(normalizeReceiptText(json.receiptHeader ?? receiptHeader));
+    setReceiptFooter(normalizeReceiptText(json.receiptFooter ?? receiptFooter));
   }
 
   async function saveServerWhatsAppConfig(nextEnabled = whatsappEnabled) {
@@ -546,6 +632,7 @@ export default function LocalAgentSettings({
     });
     const json = (await response.json().catch(() => ({}))) as Partial<WhatsAppConfig> & { error?: string };
     if (!response.ok) throw new Error(json.error || 'Falha ao salvar WhatsApp.');
+    if (json.agentKey) whatsappAgentKeyRef.current = json.agentKey;
     if (typeof json.enabled === 'boolean') setWhatsAppEnabled(json.enabled);
   }
 
@@ -582,8 +669,8 @@ export default function LocalAgentSettings({
           whatsAppEnabled: whatsappEnabled,
         });
         localSynced = true;
-      } catch (localError) {
-        console.warn('local agent config save failed', localError);
+      } catch {
+        // A configuracao do servidor continua salva mesmo se o agente local estiver fechado.
       }
 
       await refreshAgent();
@@ -680,7 +767,7 @@ export default function LocalAgentSettings({
             <p className="text-xs font-bold uppercase tracking-[0.25em] text-cyan-200">Agente local oficial</p>
             <h3 className="mt-2 text-2xl font-bold">Faceburg Local Agent .NET</h3>
             <p className="mt-1 max-w-2xl text-sm text-slate-300">
-              Impressao ESC/POS e WhatsApp rodam neste computador em tempo real, direto no agente local.
+              Impressao visual pelo driver do Windows e WhatsApp rodam neste computador em tempo real, direto no agente local.
             </p>
           </div>
           <div className="flex flex-wrap gap-2">
@@ -790,7 +877,7 @@ export default function LocalAgentSettings({
                 <Printer className="mt-0.5 h-5 w-5 text-orange-600" />
                 <div>
                   <h4 className="font-bold text-slate-900">Impressora termica</h4>
-                  <p className="text-sm text-slate-500">ESC/POS direto no Windows, com corte e largura salvos no agente local.</p>
+                  <p className="text-sm text-slate-500">Driver visual do Windows, com fonte suave, corte e largura salvos no agente local.</p>
                 </div>
               </div>
               <div className="grid gap-3 md:grid-cols-2">
@@ -814,18 +901,46 @@ export default function LocalAgentSettings({
                 </label>
 
                 <label className="text-sm font-semibold text-slate-700">
-                  Largura
+                  Papel da impressora
                   <select
                     className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none focus:border-orange-500"
                     value={receiptWidth}
                     onChange={(event) => setReceiptWidth(normalizeReceiptWidth(event.target.value))}
                   >
-                    {PRINT_WIDTH_OPTIONS.map((width) => (
-                      <option key={width} value={width}>
-                        {width} colunas
+                    {PRINT_PAPER_WIDTH_OPTIONS.map((option) => (
+                      <option key={option.value} value={option.value}>
+                        {option.label} - {option.detail}
                       </option>
                     ))}
                   </select>
+                </label>
+
+                <label className="text-sm font-semibold text-slate-700">
+                  <span className="flex items-center justify-between gap-3">
+                    <span>Tamanho da letra</span>
+                    <span className="font-mono text-slate-900">{printTextSize}</span>
+                  </span>
+                  <input
+                    className="mt-2 w-full accent-orange-600"
+                    type="range"
+                    min={MIN_PRINT_TEXT_SIZE}
+                    max={MAX_PRINT_TEXT_SIZE}
+                    step={PRINT_TEXT_SIZE_STEP}
+                    value={printTextSize}
+                    onChange={(event) => setPrintTextSize(normalizePrintTextSize(event.target.value))}
+                  />
+                  <input
+                    className="mt-2 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none focus:border-orange-500"
+                    type="number"
+                    min={MIN_PRINT_TEXT_SIZE}
+                    max={MAX_PRINT_TEXT_SIZE}
+                    step={PRINT_TEXT_SIZE_STEP}
+                    value={printTextSize}
+                    onChange={(event) => setPrintTextSize(normalizePrintTextSize(event.target.value))}
+                  />
+                  <span className="mt-1 block text-xs font-normal text-slate-500">
+                    {printTextProfile.detail} O valor salvo aqui vai junto em cada job de impressao.
+                  </span>
                 </label>
 
                 <label className="text-sm font-semibold text-slate-700">
@@ -891,6 +1006,14 @@ export default function LocalAgentSettings({
                 <input type="checkbox" checked={printEnabled} onChange={(event) => setPrintEnabled(event.target.checked)} />
               </label>
 
+              <label className="mb-3 flex items-center justify-between gap-4 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm font-semibold text-slate-800">
+                <span>
+                  <span className="block">Aceitar pedido automaticamente</span>
+                  <span className="block text-xs font-medium text-emerald-700">Entra em Cozinha e imprime pedido + via cozinha</span>
+                </span>
+                <input type="checkbox" checked={autoAcceptOrders} onChange={(event) => updateAutoAcceptOrders(event.target.checked)} />
+              </label>
+
               <div className="space-y-2">
                 {EVENT_OPTIONS.map((item) => (
                   <label key={item.key} className="flex items-center justify-between gap-4 rounded-lg border border-slate-200 px-3 py-2">
@@ -898,7 +1021,12 @@ export default function LocalAgentSettings({
                       <span className="block text-sm font-semibold text-slate-800">{item.label}</span>
                       <span className="block text-xs text-slate-500">{item.detail}</span>
                     </span>
-                    <input type="checkbox" checked={Boolean(printEvents[item.key])} onChange={() => toggleEvent(item.key)} />
+                    <input
+                      type="checkbox"
+                      checked={Boolean(printEvents[item.key])}
+                      disabled={autoAcceptOrders && (item.key === 'new_order' || item.key === 'status_processing')}
+                      onChange={() => toggleEvent(item.key)}
+                    />
                   </label>
                 ))}
               </div>
@@ -985,9 +1113,11 @@ export default function LocalAgentSettings({
           <div className="rounded-lg border border-slate-200 bg-slate-950 p-4 text-slate-100">
             <div className="mb-3 flex items-center justify-between gap-3">
               <h4 className="font-bold">Previa termica</h4>
-              <span className="rounded-full bg-slate-800 px-3 py-1 text-xs text-slate-300">{receiptWidth} colunas</span>
+              <span className="rounded-full bg-slate-800 px-3 py-1 text-xs text-slate-300">
+                {selectedPaperWidthLabel} · fonte {printTextProfile.label}
+              </span>
             </div>
-            <pre className="max-h-[440px] overflow-auto whitespace-pre-wrap rounded-lg bg-black p-4 font-mono text-[12px] leading-relaxed text-green-100">
+            <pre className={`max-h-[440px] overflow-auto whitespace-pre-wrap rounded-lg bg-black p-4 font-mono text-green-100 ${previewTextClass}`}>
               {previewText}
             </pre>
           </div>

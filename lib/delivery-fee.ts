@@ -25,6 +25,7 @@ export type TenantDeliveryFeeConfig = {
   deliveryFeeMode?: string | null;
   deliveryFeePerKm?: number | string | null;
   deliveryFeeTable?: unknown;
+  deliveryMaxDistanceMeters?: number | string | null;
 };
 
 export type DeliveryAddressInput = {
@@ -43,9 +44,12 @@ export type DeliveryFeeQuote = {
   distanceKm: number | null;
   deliveryFeeMode: DeliveryFeeMode;
   deliveryFeePerKm: number;
+  deliveryMaxDistanceMeters: number;
   distanceMeters: number | null;
   matchedTier: DeliveryFeeTier | null;
   usedFallback: boolean;
+  isDeliveryAvailable: boolean;
+  deliveryUnavailableReason: string | null;
 };
 
 type Coordinates = {
@@ -138,6 +142,12 @@ export function normalizeDeliveryFeeMode(value: unknown): DeliveryFeeMode {
   return 'fixed';
 }
 
+export function normalizeDeliveryMaxDistanceMeters(value: unknown) {
+  const parsed = Number(value ?? 0);
+  if (!Number.isFinite(parsed) || parsed <= 0) return 0;
+  return Math.min(200_000, Math.round(parsed));
+}
+
 export function normalizeDeliveryFeeTable(value: unknown): DeliveryFeeTier[] {
   const parsed = typeof value === 'string'
     ? (() => {
@@ -172,6 +182,11 @@ export function findDeliveryFeeTier(distanceMeters: number, table: DeliveryFeeTi
   const normalizedTable = normalizeDeliveryFeeTable(table);
   if (!normalizedTable.length) return null;
   return normalizedTable.find((tier) => normalizedDistance <= tier.upToMeters) ?? normalizedTable[normalizedTable.length - 1];
+}
+
+function formatDeliveryMaxDistance(meters: number) {
+  const kilometers = meters / 1000;
+  return `${kilometers.toLocaleString('pt-BR', { maximumFractionDigits: 1 })} km`;
 }
 
 export function normalizeDeliveryOriginUseIssuer(value: unknown) {
@@ -413,32 +428,25 @@ export async function quoteDeliveryFee(
   const deliveryFeeMode = normalizeDeliveryFeeMode(config.deliveryFeeMode);
   const deliveryFeeBase = toMoney(config.deliveryFeeBase);
   const deliveryFeePerKm = toMoney(config.deliveryFeePerKm);
-
-  if (deliveryFeeMode !== 'per_km' || deliveryFeePerKm <= 0) {
-    const deliveryFeeTable = normalizeDeliveryFeeTable(config.deliveryFeeTable);
-    if (deliveryFeeMode !== 'distance_table' || !deliveryFeeTable.length) {
-      return {
-        deliveryFeeAmount: deliveryFeeBase,
-        distanceKm: null,
-        distanceMeters: null,
-        deliveryFeeMode,
-        deliveryFeePerKm,
-        matchedTier: null,
-        usedFallback: false,
-      };
-    }
-  }
-
+  const deliveryMaxDistanceMeters = normalizeDeliveryMaxDistanceMeters(config.deliveryMaxDistanceMeters);
   const deliveryFeeTable = normalizeDeliveryFeeTable(config.deliveryFeeTable);
-  if (deliveryFeeMode === 'distance_table' && !deliveryFeeTable.length) {
+  const needsDistanceLookup =
+    deliveryMaxDistanceMeters > 0 ||
+    (deliveryFeeMode === 'per_km' && deliveryFeePerKm > 0) ||
+    (deliveryFeeMode === 'distance_table' && deliveryFeeTable.length > 0);
+
+  if (!needsDistanceLookup) {
     return {
       deliveryFeeAmount: deliveryFeeBase,
       distanceKm: null,
       distanceMeters: null,
       deliveryFeeMode,
       deliveryFeePerKm,
+      deliveryMaxDistanceMeters,
       matchedTier: null,
       usedFallback: false,
+      isDeliveryAvailable: true,
+      deliveryUnavailableReason: null,
     };
   }
 
@@ -450,8 +458,11 @@ export async function quoteDeliveryFee(
       distanceMeters: null,
       deliveryFeeMode,
       deliveryFeePerKm,
+      deliveryMaxDistanceMeters,
       matchedTier: null,
       usedFallback: true,
+      isDeliveryAvailable: true,
+      deliveryUnavailableReason: null,
     };
   }
 
@@ -467,8 +478,11 @@ export async function quoteDeliveryFee(
       distanceMeters: null,
       deliveryFeeMode,
       deliveryFeePerKm,
+      deliveryMaxDistanceMeters,
       matchedTier: null,
       usedFallback: true,
+      isDeliveryAvailable: true,
+      deliveryUnavailableReason: null,
     };
   }
 
@@ -480,12 +494,45 @@ export async function quoteDeliveryFee(
       distanceMeters: null,
       deliveryFeeMode,
       deliveryFeePerKm,
+      deliveryMaxDistanceMeters,
       matchedTier: null,
       usedFallback: true,
+      isDeliveryAvailable: true,
+      deliveryUnavailableReason: null,
     };
   }
 
   const distanceMeters = Math.ceil(distanceKm * 1000);
+  if (deliveryMaxDistanceMeters > 0 && distanceMeters > deliveryMaxDistanceMeters) {
+    return {
+      deliveryFeeAmount: 0,
+      distanceKm,
+      distanceMeters,
+      deliveryFeeMode,
+      deliveryFeePerKm,
+      deliveryMaxDistanceMeters,
+      matchedTier: null,
+      usedFallback: false,
+      isDeliveryAvailable: false,
+      deliveryUnavailableReason: `Endereco fora do raio de entrega. Entregamos ate ${formatDeliveryMaxDistance(deliveryMaxDistanceMeters)}.`,
+    };
+  }
+
+  if (deliveryFeeMode === 'fixed') {
+    return {
+      deliveryFeeAmount: deliveryFeeBase,
+      distanceKm,
+      distanceMeters,
+      deliveryFeeMode,
+      deliveryFeePerKm,
+      deliveryMaxDistanceMeters,
+      matchedTier: null,
+      usedFallback: false,
+      isDeliveryAvailable: true,
+      deliveryUnavailableReason: null,
+    };
+  }
+
   if (deliveryFeeMode === 'distance_table') {
     const matchedTier = findDeliveryFeeTier(distanceMeters, deliveryFeeTable);
     if (matchedTier) {
@@ -495,8 +542,11 @@ export async function quoteDeliveryFee(
         distanceMeters,
         deliveryFeeMode,
         deliveryFeePerKm,
+        deliveryMaxDistanceMeters,
         matchedTier,
         usedFallback: false,
+        isDeliveryAvailable: true,
+        deliveryUnavailableReason: null,
       };
     }
   }
@@ -509,7 +559,10 @@ export async function quoteDeliveryFee(
     distanceMeters,
     deliveryFeeMode,
     deliveryFeePerKm,
+    deliveryMaxDistanceMeters,
     matchedTier: null,
     usedFallback: false,
+    isDeliveryAvailable: true,
+    deliveryUnavailableReason: null,
   };
 }

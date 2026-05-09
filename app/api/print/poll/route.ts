@@ -1,9 +1,13 @@
 import { NextResponse } from 'next/server';
 import pool from '@/lib/db';
+import { normalizePrintTextSize, normalizeReceiptWidth } from '@/lib/print-settings';
 
 type AgentRow = {
   tenant_id: string;
   enabled: boolean;
+  printer_name: string | null;
+  receipt_width: number | null;
+  print_text_size: string | null;
 };
 
 type JobRow = {
@@ -26,7 +30,7 @@ export async function GET(request: Request) {
     await client.query('BEGIN');
 
     const agentResult = await client.query<AgentRow>(
-      `SELECT tenant_id, enabled
+      `SELECT tenant_id, enabled, printer_name, receipt_width, print_text_size
        FROM printer_agents
        WHERE agent_key = $1
        LIMIT 1`,
@@ -100,6 +104,9 @@ export async function GET(request: Request) {
         orderId: job.order_id,
         eventType: job.event_type,
         payloadText: job.payload_text,
+        printerName: agent.printer_name || undefined,
+        columns: normalizeReceiptWidth(agent.receipt_width),
+        printTextSize: normalizePrintTextSize(agent.print_text_size),
         attemptCount: job.attempt_count,
       },
     });

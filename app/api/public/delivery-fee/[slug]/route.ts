@@ -24,6 +24,7 @@ type TenantRow = {
   delivery_fee_mode: string;
   delivery_fee_per_km: string;
   delivery_fee_table: unknown;
+  delivery_max_distance_meters: number | string | null;
 };
 
 function text(value: unknown) {
@@ -56,7 +57,8 @@ export async function POST(request: Request, { params }: { params: Promise<{ slu
          delivery_fee_base::text,
          delivery_fee_mode,
          delivery_fee_per_km::text,
-         delivery_fee_table
+         delivery_fee_table,
+         delivery_max_distance_meters
        FROM tenants
        WHERE slug = $1
        LIMIT 1`,
@@ -87,8 +89,11 @@ export async function POST(request: Request, { params }: { params: Promise<{ slu
         distanceMeters: null,
         deliveryFeeMode: 'fixed',
         deliveryFeePerKm: 0,
+        deliveryMaxDistanceMeters: 0,
         matchedTier: null,
         usedFallback: false,
+        isDeliveryAvailable: true,
+        deliveryUnavailableReason: null,
       });
     }
 
@@ -129,6 +134,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ slu
         deliveryFeeMode: tenant.delivery_fee_mode,
         deliveryFeePerKm: tenant.delivery_fee_per_km,
         deliveryFeeTable: tenant.delivery_fee_table,
+        deliveryMaxDistanceMeters: tenant.delivery_max_distance_meters,
       },
       addressInput,
     );

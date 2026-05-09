@@ -20,6 +20,12 @@ type AddressSuggestion = {
   complement: string;
 };
 
+type NominatimSuggestion = {
+  name?: string;
+  display_name?: string;
+  address?: Record<string, unknown>;
+};
+
 type TenantStateRow = {
   id: string;
   status: string;
@@ -27,12 +33,62 @@ type TenantStateRow = {
   issuer_state: string | null;
 };
 
+const STATE_NAME_TO_CODE: Record<string, string> = {
+  acre: 'AC',
+  alagoas: 'AL',
+  amapa: 'AP',
+  amazonas: 'AM',
+  bahia: 'BA',
+  ceara: 'CE',
+  'distrito federal': 'DF',
+  'espirito santo': 'ES',
+  goias: 'GO',
+  maranhao: 'MA',
+  'mato grosso': 'MT',
+  'mato grosso do sul': 'MS',
+  'minas gerais': 'MG',
+  para: 'PA',
+  paraiba: 'PB',
+  parana: 'PR',
+  pernambuco: 'PE',
+  piaui: 'PI',
+  'rio de janeiro': 'RJ',
+  'rio grande do norte': 'RN',
+  'rio grande do sul': 'RS',
+  rondonia: 'RO',
+  roraima: 'RR',
+  'santa catarina': 'SC',
+  'sao paulo': 'SP',
+  sergipe: 'SE',
+  tocantins: 'TO',
+};
+
 function text(value: unknown) {
   return String(value ?? '').trim();
 }
 
+function normalizeSearchText(value: string) {
+  return value.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().trim();
+}
+
 function collapseSpaces(value: string) {
   return value.replace(/\s+/g, ' ').trim();
+}
+
+function applyPortugueseAccentHints(value: string) {
+  return value
+    .replace(/\bsao\b/gi, 'são')
+    .replace(/\bgoias\b/gi, 'goiás')
+    .replace(/\bgoiania\b/gi, 'goiânia')
+    .replace(/\bjose\b/gi, 'josé')
+    .replace(/\bjoao\b/gi, 'joão')
+    .replace(/\bbras\b/gi, 'brás')
+    .replace(/\bagua\b/gi, 'água')
+    .replace(/\bvitoria\b/gi, 'vitória')
+    .replace(/\bparaiso\b/gi, 'paraíso')
+    .replace(/\bconceicao\b/gi, 'conceição')
+    .replace(/\bcoracao\b/gi, 'coração')
+    .replace(/\bniteroi\b/gi, 'niterói');
 }
 
 function buildStreetSearchVariants(rawStreet: string) {
@@ -48,23 +104,58 @@ function buildStreetSearchVariants(rawStreet: string) {
     variants.push(normalized);
   }
 
+  function pushAccentInsensitiveVariants(value: string) {
+    const normalized = collapseSpaces(value);
+    const accentless = collapseSpaces(normalizeSearchText(normalized));
+    const accentedHint = collapseSpaces(applyPortugueseAccentHints(accentless));
+    pushVariant(accentless);
+    pushVariant(accentedHint);
+  }
+
+  function pushLastWordPluralVariant(value: string) {
+    const pluralized = collapseSpaces(value.replace(/(\S{3,})$/u, (word) => (/s$/i.test(word) ? word : `${word}s`)));
+    if (pluralized !== collapseSpaces(value)) {
+      pushVariant(pluralized);
+      pushAccentInsensitiveVariants(pluralized);
+    }
+  }
+
+  function expandLeadingType(value: string) {
+    return collapseSpaces(
+      value
+        .replace(/^av\.?\s+/i, 'Avenida ')
+        .replace(/^r\.?\s+/i, 'Rua ')
+        .replace(/^tv\.?\s+/i, 'Travessa ')
+        .replace(/^rod\.?\s+/i, 'Rodovia '),
+    );
+  }
+
   const street = collapseSpaces(rawStreet.replace(/\b\d{5}-?\d{3}\b/g, ' ').replace(/[;|]+/g, ' '));
   if (!street) return variants;
 
   pushVariant(street);
+  pushAccentInsensitiveVariants(street);
+  const expandedStreet = expandLeadingType(street);
+  pushVariant(expandedStreet);
+  pushAccentInsensitiveVariants(expandedStreet);
+  pushLastWordPluralVariant(street);
+  pushLastWordPluralVariant(expandedStreet);
 
   const beforeComma = collapseSpaces(street.split(',')[0] || '');
   pushVariant(beforeComma);
+  pushAccentInsensitiveVariants(beforeComma);
 
   const withoutTrailingReference = collapseSpaces(
     street.replace(/\s+(?:n(?:[º°o]\.?|umero)?\.?\s*)?\d+[a-z0-9/-]*$/i, ''),
   );
   pushVariant(withoutTrailingReference);
+  pushAccentInsensitiveVariants(withoutTrailingReference);
 
   const withoutLeadingType = collapseSpaces(
     street.replace(/^(rua|r\.?|avenida|av\.?|travessa|tv\.?|alameda|praça|praca|estrada|rodovia|rod\.?|largo)\s+/i, ''),
   );
   pushVariant(withoutLeadingType);
+  pushAccentInsensitiveVariants(withoutLeadingType);
 
   const withoutTypeOrNumber = collapseSpaces(
     withoutTrailingReference.replace(
@@ -73,17 +164,18 @@ function buildStreetSearchVariants(rawStreet: string) {
     ),
   );
   pushVariant(withoutTypeOrNumber);
+  pushAccentInsensitiveVariants(withoutTypeOrNumber);
 
   return variants;
 }
 
 function makeSuggestionKey(item: AddressSuggestion) {
   return [
-    item.street.toLowerCase(),
-    item.neighborhood.toLowerCase(),
-    item.city.toLowerCase(),
-    item.state.toLowerCase(),
-    item.zipCode.toLowerCase(),
+    normalizeSearchText(item.street),
+    normalizeSearchText(item.neighborhood),
+    normalizeSearchText(item.city),
+    normalizeSearchText(item.state),
+    normalizeSearchText(item.zipCode),
   ].join('|');
 }
 
@@ -95,6 +187,51 @@ function dedupeSuggestions(items: AddressSuggestion[]) {
     seen.add(key);
     return true;
   });
+}
+
+function detectRequestedStreetType(rawStreet: string) {
+  const normalized = normalizeSearchText(rawStreet);
+  if (/^(av\.?|avenida)\b/.test(normalized)) return 'avenida';
+  if (/^(r\.?|rua)\b/.test(normalized)) return 'rua';
+  if (/^(tv\.?|travessa)\b/.test(normalized)) return 'travessa';
+  if (/^(rod\.?|rodovia)\b/.test(normalized)) return 'rodovia';
+  return '';
+}
+
+function stripLeadingStreetType(rawStreet: string) {
+  return normalizeSearchText(rawStreet)
+    .replace(/^(av\.?|avenida|r\.?|rua|tv\.?|travessa|rod\.?|rodovia)\s+/, '')
+    .trim();
+}
+
+function sortSuggestionsForStreet(items: AddressSuggestion[], rawStreet: string) {
+  const requestedType = detectRequestedStreetType(rawStreet);
+  const requestedName = stripLeadingStreetType(rawStreet);
+
+  return [...items].sort((a, b) => {
+    const streetA = normalizeSearchText(a.street);
+    const streetB = normalizeSearchText(b.street);
+    const typeScoreA = requestedType && !streetA.startsWith(requestedType) ? 50 : 0;
+    const typeScoreB = requestedType && !streetB.startsWith(requestedType) ? 50 : 0;
+    const nameScoreA = requestedName && !streetA.includes(requestedName) ? 10 : 0;
+    const nameScoreB = requestedName && !streetB.includes(requestedName) ? 10 : 0;
+    return typeScoreA + nameScoreA - (typeScoreB + nameScoreB);
+  });
+}
+
+function getUniqueCityScopes(items: AddressSuggestion[]) {
+  const seen = new Set<string>();
+  const scopes: Array<{ city: string; state: string }> = [];
+  for (const item of items) {
+    const city = text(item.city);
+    const state = text(item.state).toUpperCase();
+    if (city.length < 3 || state.length !== 2) continue;
+    const key = `${normalizeSearchText(city)}|${state}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    scopes.push({ city, state });
+  }
+  return scopes;
 }
 
 async function loadViaCepSuggestions(state: string, city: string, street: string) {
@@ -141,6 +278,8 @@ async function loadViaCepSuggestions(state: string, city: string, street: string
             .filter((item) => item.street)
         : [],
     );
+  } catch {
+    return [];
   } finally {
     clearTimeout(timeout);
   }
@@ -155,6 +294,102 @@ async function loadRemoteSuggestionsWithVariants(state: string, city: string, st
       break;
     }
   }
+  return dedupeSuggestions(items);
+}
+
+function stateCodeFromNominatimAddress(address: Record<string, unknown>) {
+  const isoCode = text(address['ISO3166-2-lvl4']).toUpperCase();
+  const isoMatch = isoCode.match(/^BR-([A-Z]{2})$/);
+  if (isoMatch?.[1]) return isoMatch[1];
+
+  const stateName = normalizeSearchText(text(address.state));
+  return STATE_NAME_TO_CODE[stateName] || '';
+}
+
+function mapNominatimSuggestion(item: NominatimSuggestion): AddressSuggestion | null {
+  const address = item.address || {};
+  const street = text(address.road) || text(address.pedestrian) || text(address.footway) || text(item.name);
+  if (!street) return null;
+
+  const state = stateCodeFromNominatimAddress(address);
+  const city = text(address.city) || text(address.town) || text(address.municipality) || text(address.city_district);
+
+  return {
+    street,
+    neighborhood: text(address.suburb) || text(address.neighbourhood) || text(address.quarter) || text(address.city_district),
+    city,
+    state,
+    zipCode: text(address.postcode),
+    complement: '',
+  };
+}
+
+async function loadNominatimSuggestions(state: string, city: string, streetVariants: string[]) {
+  const items: AddressSuggestion[] = [];
+  const requestedType = detectRequestedStreetType(streetVariants[0] || '');
+  for (const streetVariant of streetVariants.slice(0, 4)) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 5000);
+    try {
+      const params = new URLSearchParams({
+        format: 'jsonv2',
+        addressdetails: '1',
+        limit: '8',
+        countrycodes: 'br',
+        'accept-language': 'pt-BR',
+      });
+
+      if (city) {
+        params.set('street', streetVariant);
+        params.set('city', city);
+        if (state) params.set('state', state);
+        params.set('country', 'Brasil');
+      } else {
+        params.set('q', [streetVariant, state, 'Brasil'].filter(Boolean).join(', '));
+      }
+
+      const response = await fetch(`https://nominatim.openstreetmap.org/search?${params.toString()}`, {
+        cache: 'no-store',
+        headers: {
+          accept: 'application/json',
+          'accept-language': 'pt-BR',
+          'user-agent': 'Faceburg Address Lookup/1.0',
+        },
+        signal: controller.signal,
+      });
+
+      if (!response.ok) continue;
+
+      let data: unknown = [];
+      try {
+        data = await response.json();
+      } catch {
+        data = [];
+      }
+
+      if (Array.isArray(data)) {
+        items.push(
+          ...data
+            .map((entry) => mapNominatimSuggestion(entry as NominatimSuggestion))
+            .filter((entry): entry is AddressSuggestion => Boolean(entry))
+            .filter((entry) => !state || entry.state === state),
+        );
+      }
+
+      const dedupedItems = dedupeSuggestions(items);
+      const hasRequestedTypeMatch = Boolean(
+        requestedType && dedupedItems.some((item) => normalizeSearchText(item.street).startsWith(requestedType)),
+      );
+      if (hasRequestedTypeMatch || (!requestedType && dedupedItems.length >= 8)) {
+        break;
+      }
+    } catch {
+      // Mantem a busca principal por ViaCEP mesmo se a busca ampla falhar.
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
   return dedupeSuggestions(items);
 }
 
@@ -200,8 +435,8 @@ export async function GET(request: NextRequest) {
     const tenantState = text(tenant.issuer_state).toUpperCase();
     const tenantCity = text(tenant.issuer_city);
     const isPublicMenuLookup = !session && Boolean(slug);
-    const effectiveState = isPublicMenuLookup ? tenantState : tenantState || requestedState;
-    const effectiveCity = isPublicMenuLookup ? tenantCity : requestedCity || tenantCity;
+    const effectiveState = isPublicMenuLookup ? tenantState || requestedState : requestedState || tenantState;
+    const effectiveCity = isPublicMenuLookup ? '' : requestedCity || tenantCity;
     const streetVariants = buildStreetSearchVariants(street);
 
     let remoteSuggestions: AddressSuggestion[] = [];
@@ -209,10 +444,23 @@ export async function GET(request: NextRequest) {
       remoteSuggestions = await loadRemoteSuggestionsWithVariants(effectiveState, effectiveCity, streetVariants);
     }
 
+    if (streetVariants.some((streetVariant) => streetVariant.length >= 3) && effectiveState.length === 2 && remoteSuggestions.length < 8) {
+      const wideSuggestions = await loadNominatimSuggestions(effectiveState, effectiveCity, streetVariants);
+      const officialSuggestionsFromInferredCities: AddressSuggestion[] = [];
+      if (!effectiveCity && wideSuggestions.length > 0) {
+        for (const scope of getUniqueCityScopes(wideSuggestions).slice(0, 3)) {
+          officialSuggestionsFromInferredCities.push(
+            ...(await loadRemoteSuggestionsWithVariants(scope.state, scope.city, streetVariants)),
+          );
+        }
+      }
+      remoteSuggestions = dedupeSuggestions([...remoteSuggestions, ...officialSuggestionsFromInferredCities, ...wideSuggestions]);
+    }
+
     return NextResponse.json({
       effectiveCity,
       effectiveState,
-      suggestions: dedupeSuggestions(remoteSuggestions).slice(0, 8),
+      suggestions: sortSuggestionsForStreet(dedupeSuggestions(remoteSuggestions), street).slice(0, 8),
     });
   } catch {
     return NextResponse.json({ error: 'Nao foi possivel pesquisar o endereco.' }, { status: 502 });

@@ -6,7 +6,7 @@
     "dev": "node scripts/dev-local.mjs",
     "dev:app": "next dev -p 3000",
     "dev:realtime": "node realtime-gateway.js",
-    "build": "node scripts/clean-next.mjs && next build && node scripts/prepare-standalone.mjs",
+    "build": "next build && node scripts/prepare-standalone.mjs",
     "start": "node scripts/start-standalone.mjs",
     "lint": "eslint .",
     "clean": "node scripts/clean-next.mjs",

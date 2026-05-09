@@ -11,6 +11,7 @@ type OrderRow = {
   customer_name: string | null;
   customer_phone: string | null;
   delivery_address: string | null;
+  order_sequence_number: number | null;
   total: string;
   status: 'pending' | 'processing' | 'delivering' | 'completed' | 'cancelled';
   type: 'delivery' | 'pickup' | 'table';
@@ -43,6 +44,7 @@ export async function GET() {
          o.customer_name,
          o.customer_phone,
          o.delivery_address,
+         o.order_sequence_number,
          o.total::text,
          o.status,
          o.type,
@@ -70,7 +72,7 @@ export async function GET() {
          STRING_AGG(
            (oi.quantity::text || 'x ' || COALESCE(p.name, 'Produto removido')),
            ', '
-           ORDER BY COALESCE(p.name, 'Produto removido')
+           ORDER BY oi.ctid
          ) AS items_summary
        FROM order_items oi
        JOIN candidate_orders co
@@ -85,6 +87,7 @@ export async function GET() {
        co.customer_name,
        co.customer_phone,
        co.delivery_address,
+       co.order_sequence_number,
        co.total,
        co.status,
        co.type,
@@ -107,6 +110,7 @@ export async function GET() {
         customerName: row.customer_name || 'Sem nome',
         customerPhone: row.customer_phone || '',
         deliveryAddress: row.delivery_address || '',
+        orderSequenceNumber: row.order_sequence_number ?? null,
         total: Number(row.total),
         status: row.status,
         type: row.type,

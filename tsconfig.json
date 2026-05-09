@@ -38,6 +38,15 @@
   ],
   "exclude": [
     "node_modules",
-    ".next-dev"
+    ".next-dev",
+    "faceburg-delivery-app",
+    "faceburg-hub",
+    "faceburg-agent-dotnet",
+    "backups",
+    "scripts",
+    "tmp-swbot",
+    "tmp-whatsapp-products",
+    "tmp-sistemasnaweb-products",
+    "public"
   ]
 }

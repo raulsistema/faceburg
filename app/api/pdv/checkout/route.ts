@@ -7,6 +7,7 @@ import { enqueueOrderPrintJob } from '@/lib/printing';
 import { getOpenCashSession } from '@/lib/cash-register';
 import { isCashPaymentType } from '@/lib/cash-summary';
 import { parseMoneyInput } from '@/lib/finance-utils';
+import { assignOrderSequenceNumber, ensureOrderSequenceSchema } from '@/lib/order-sequence';
 
 type ProductPriceRow = {
   id: string;
@@ -63,6 +64,7 @@ function normalizeExtraAmount(value: unknown) {
 
 export async function POST(request: Request) {
   await ensureFinanceSchema();
+  await ensureOrderSequenceSchema();
   const session = await getValidatedTenantSession();
   if (!session) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
@@ -239,6 +241,7 @@ export async function POST(request: Request) {
     const totalNetAmount = roundMoney(total - totalFeeAmount);
     const orderId = randomUUID();
     const singlePayment = resolvedPayments.length === 1 ? resolvedPayments[0] : null;
+    let orderSequenceNumber: number | null = null;
     await client.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [`cash-register:${session.tenantId}`]);
     const openCashSession = await getOpenCashSession(session.tenantId, client);
 
@@ -286,6 +289,8 @@ export async function POST(request: Request) {
         openCashSession.id,
       ],
     );
+
+    orderSequenceNumber = await assignOrderSequenceNumber(session.tenantId, orderId, openCashSession.id, client);
 
     for (const payment of resolvedPayments) {
       await client.query(
@@ -368,6 +373,7 @@ export async function POST(request: Request) {
     return NextResponse.json({
       ok: true,
       orderId,
+      orderSequenceNumber,
       total,
       itemsCount: resolvedItems.length,
       payments: resolvedPayments.map((payment) => ({

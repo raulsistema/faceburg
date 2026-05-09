@@ -21,13 +21,16 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
   const { id } = await params;
   const body = await request.json().catch(() => ({})) as {
     printEventType?: string;
+    printEventTypes?: string[];
     whatsappEventType?: string;
     preferLocalAgent?: boolean;
   };
 
-  const printEventType = String(body.printEventType || '').trim() as PrintJobEventType;
+  const printEventTypes = (Array.isArray(body.printEventTypes) ? body.printEventTypes : [body.printEventType])
+    .map((eventType) => String(eventType || '').trim() as PrintJobEventType)
+    .filter((eventType) => allowedPrintEvents.has(eventType));
   const whatsappEventType = String(body.whatsappEventType || '').trim();
-  const shouldQueuePrint = allowedPrintEvents.has(printEventType);
+  const shouldQueuePrint = printEventTypes.length > 0;
   const shouldQueueWhatsapp = allowedWhatsappEvents.has(whatsappEventType);
 
   if (!shouldQueuePrint && !shouldQueueWhatsapp) {
@@ -57,9 +60,12 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
 
     if (shouldQueuePrint) {
       try {
-        localDispatch.printJobs = await prepareOrderPrintJobs(session.tenantId, id, printEventType, undefined, {
-          ignoreAgentEnabled: true,
-        });
+        const printJobs = await Promise.all(printEventTypes.map((eventType) =>
+          prepareOrderPrintJobs(session.tenantId, id, eventType, undefined, {
+            ignoreAgentEnabled: true,
+          })
+        ));
+        localDispatch.printJobs = printJobs.flat();
       } catch (error) {
         console.error('prepare local print dispatch failed', error);
         errors.push('print');
@@ -93,10 +99,12 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
 
   const [printQueued, whatsappQueued] = await Promise.all([
     shouldQueuePrint
-      ? enqueueOrderPrintJob(session.tenantId, id, printEventType).catch((error) => {
-        console.error('fallback print dispatch failed', error);
-        return false;
-      })
+      ? Promise.all(printEventTypes.map((eventType) =>
+        enqueueOrderPrintJob(session.tenantId, id, eventType).catch((error) => {
+          console.error('fallback print dispatch failed', error);
+          return false;
+        })
+      )).then((results) => results.some(Boolean))
       : Promise.resolve(false),
     shouldQueueWhatsapp
       ? enqueueOrderWhatsappJob(session.tenantId, id, whatsappEventType as 'new_order' | 'status_update').catch((error) => {

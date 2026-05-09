@@ -1,26 +1,11 @@
 import { NextResponse } from 'next/server';
 import { query } from '@/lib/db';
+import { createPublicImageResponse } from '@/lib/public-image-response';
 
 type TenantImageRow = {
   logo_url: string | null;
   menu_cover_image_url: string | null;
 };
-
-const TENANT_IMAGE_CACHE_HEADERS = {
-  'Cache-Control': 'public, max-age=300, stale-while-revalidate=3600',
-};
-
-function parseDataUrl(source: string) {
-  const match = source.match(/^data:([^;,]+)?(;base64)?,(.*)$/);
-  if (!match) return null;
-
-  const mimeType = match[1] || 'application/octet-stream';
-  const isBase64 = Boolean(match[2]);
-  const payload = match[3] || '';
-  const bytes = isBase64 ? Buffer.from(payload, 'base64') : Buffer.from(decodeURIComponent(payload), 'utf8');
-
-  return { bytes, mimeType };
-}
 
 export async function GET(request: Request, { params }: { params: Promise<{ slug: string; kind: string }> }) {
   try {
@@ -45,20 +30,7 @@ export async function GET(request: Request, { params }: { params: Promise<{ slug
       return NextResponse.json({ error: 'Imagem nao encontrada.' }, { status: 404 });
     }
 
-    const dataUrl = parseDataUrl(source);
-    if (dataUrl) {
-      return new NextResponse(new Uint8Array(dataUrl.bytes), {
-        headers: {
-          ...TENANT_IMAGE_CACHE_HEADERS,
-          'Content-Type': dataUrl.mimeType,
-          'Content-Length': String(dataUrl.bytes.byteLength),
-        },
-      });
-    }
-
-    return NextResponse.redirect(new URL(source, request.url), {
-      headers: TENANT_IMAGE_CACHE_HEADERS,
-    });
+    return createPublicImageResponse(source, request.url);
   } catch (error) {
     console.error('[public-tenant-image] failed to load image', error);
     return NextResponse.json({ error: 'Falha ao carregar imagem.' }, { status: 500 });

@@ -15,6 +15,9 @@ function normalizeIgnoredEntries(ignored: unknown): string[] {
 const nextConfig: NextConfig = {
   reactStrictMode: true,
   distDir: process.env.NEXT_DIST_DIR || '.next',
+  experimental: {
+    optimizePackageImports: ['lucide-react', 'framer-motion', 'motion', 'date-fns'],
+  },
   eslint: {
     ignoreDuringBuilds: true,
   },

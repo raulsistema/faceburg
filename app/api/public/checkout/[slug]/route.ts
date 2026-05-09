@@ -2,10 +2,14 @@ import { randomUUID } from 'node:crypto';
 import type { PoolClient } from 'pg';
 import { NextResponse } from 'next/server';
 import pool, { query } from '@/lib/db';
+import { ensureOrderDeliveryIdentifiers } from '@/lib/delivery-tracking';
 import { quoteDeliveryFee } from '@/lib/delivery-fee';
 import { parseMoneyInput } from '@/lib/finance-utils';
+import { getOrderAutomationConfig, initialOrderStatusForAutomation } from '@/lib/order-automation';
+import { assignOrderSequenceNumber, ensureOrderSequenceSchema } from '@/lib/order-sequence';
 import { enqueueOrderPrintJob } from '@/lib/printing';
 import { notifyOrderEvent } from '@/lib/realtime';
+import { ensureStoreHoursSchema, isMenuOpenNow } from '@/lib/store-hours';
 import { enqueueOrderWhatsappJob } from '@/lib/whatsapp';
 
 class CheckoutValidationError extends Error {}
@@ -15,10 +19,14 @@ type TenantRow = {
   slug: string;
   status: string;
   store_open: boolean;
+  menu_open_mode: string | null;
+  menu_hours: unknown;
   delivery_fee_base: string;
   delivery_fee_mode: string;
   delivery_fee_per_km: string;
   delivery_fee_table: unknown;
+  delivery_max_distance_meters: number | string | null;
+  delivery_min_order_amount: string | null;
   issuer_street: string | null;
   issuer_number: string | null;
   issuer_neighborhood: string | null;
@@ -51,6 +59,9 @@ type ExistingCheckoutOrderRow = {
   id: string;
   total: string;
   delivery_fee_amount: string;
+  type: string | null;
+  delivery_tracking_token: string | null;
+  order_sequence_number: number | string | null;
 };
 
 type AddressRow = {
@@ -245,6 +256,13 @@ function roundMoney(value: number) {
   return Number(value.toFixed(2));
 }
 
+function formatMoneyPtBr(value: number) {
+  return new Intl.NumberFormat('pt-BR', {
+    style: 'currency',
+    currency: 'BRL',
+  }).format(value);
+}
+
 function normalizeOrderType(value: string) {
   const type = value.trim().toLowerCase();
   if (type === 'delivery' || type === 'pickup' || type === 'table') {
@@ -254,7 +272,14 @@ function normalizeOrderType(value: string) {
 }
 
 function normalizePhone(value: string) {
-  return value.replace(/\D/g, '');
+  let digits = value.replace(/\D/g, '');
+  if (digits.startsWith('00')) {
+    digits = digits.slice(2);
+  }
+  if (digits.startsWith('55') && digits.length >= 12) {
+    digits = digits.slice(2);
+  }
+  return digits.replace(/^0+/, '');
 }
 
 function normalizeCheckoutKey(value: unknown) {
@@ -272,9 +297,14 @@ function formatAddressLine(address: AddressRow) {
 
 async function findExistingCheckoutOrder(tenantId: string, checkoutKey: string) {
   if (!checkoutKey) return null;
-  await ensureCheckoutKeySchema();
+  await Promise.all([ensureCheckoutKeySchema(), ensureOrderSequenceSchema()]);
   const result = await query<ExistingCheckoutOrderRow>(
-    `SELECT id, total::text, delivery_fee_amount::text
+    `SELECT id,
+            total::text,
+            delivery_fee_amount::text,
+            type,
+            delivery_tracking_token,
+            order_sequence_number
      FROM orders
      WHERE tenant_id = $1
        AND public_checkout_key = $2
@@ -284,12 +314,29 @@ async function findExistingCheckoutOrder(tenantId: string, checkoutKey: string) 
   return result.rows[0] || null;
 }
 
-function serializeExistingCheckoutOrder(row: ExistingCheckoutOrderRow) {
+function buildPublicTrackingPath(token: string | null | undefined) {
+  const normalizedToken = String(token || '').trim();
+  return normalizedToken ? `/acompanhar/${encodeURIComponent(normalizedToken)}` : '';
+}
+
+async function serializeExistingCheckoutOrder(tenantId: string, row: ExistingCheckoutOrderRow) {
+  let trackingToken = row.delivery_tracking_token || '';
+  if (row.type === 'delivery' && !trackingToken) {
+    const identifiers = await ensureOrderDeliveryIdentifiers(tenantId, row.id);
+    trackingToken = identifiers.token;
+  }
+
   return NextResponse.json({
     ok: true,
     orderId: row.id,
+    trackingToken,
+    trackingUrl: buildPublicTrackingPath(trackingToken),
     total: roundMoney(Number(row.total || 0)),
     deliveryFeeAmount: roundMoney(Number(row.delivery_fee_amount || 0)),
+    orderSequenceNumber:
+      row.order_sequence_number !== null && row.order_sequence_number !== undefined
+        ? Number(row.order_sequence_number)
+        : null,
     reused: true,
     message: 'Pedido recebido com sucesso.',
     communication: {
@@ -298,10 +345,6 @@ function serializeExistingCheckoutOrder(row: ExistingCheckoutOrderRow) {
       realtimeNotified: false,
     },
   });
-}
-
-function wasJobQueued(result: PromiseSettledResult<boolean>) {
-  return result.status === 'fulfilled' && result.value === true;
 }
 
 export async function POST(request: Request, { params }: { params: Promise<{ slug: string }> }) {
@@ -367,8 +410,9 @@ export async function POST(request: Request, { params }: { params: Promise<{ slu
       return NextResponse.json({ error: 'Carrinho vazio.' }, { status: 400 });
     }
 
+    await ensureStoreHoursSchema();
     const tenantResult = await query<TenantRow>(
-      `SELECT id, slug, status, store_open, delivery_fee_base::text, delivery_fee_mode, delivery_fee_per_km::text, delivery_fee_table, issuer_street, issuer_number, issuer_neighborhood, issuer_city, issuer_state, issuer_zip_code, delivery_origin_use_issuer, delivery_origin_street, delivery_origin_number, delivery_origin_complement, delivery_origin_neighborhood, delivery_origin_city, delivery_origin_state, delivery_origin_zip_code
+      `SELECT id, slug, status, store_open, menu_open_mode, menu_hours, delivery_fee_base::text, delivery_fee_mode, delivery_fee_per_km::text, delivery_fee_table, delivery_max_distance_meters, delivery_min_order_amount::text, issuer_street, issuer_number, issuer_neighborhood, issuer_city, issuer_state, issuer_zip_code, delivery_origin_use_issuer, delivery_origin_street, delivery_origin_number, delivery_origin_complement, delivery_origin_neighborhood, delivery_origin_city, delivery_origin_state, delivery_origin_zip_code
        FROM tenants
        WHERE slug = $1
        LIMIT 1`,
@@ -383,14 +427,14 @@ export async function POST(request: Request, { params }: { params: Promise<{ slu
     if (tenant.status !== 'active') {
       return NextResponse.json({ error: 'Empresa inativa.' }, { status: 403 });
     }
-    if (!tenant.store_open) {
+    if (!isMenuOpenNow({ manualOpen: Boolean(tenant.store_open), mode: tenant.menu_open_mode, hours: tenant.menu_hours })) {
       return NextResponse.json({ error: 'Delivery indisponivel no momento. Tente novamente mais tarde.' }, { status: 403 });
     }
 
-    await ensureCheckoutKeySchema();
+    await Promise.all([ensureCheckoutKeySchema(), ensureOrderSequenceSchema()]);
     const existingCheckoutOrder = await findExistingCheckoutOrder(tenant.id, checkoutKey);
     if (existingCheckoutOrder) {
-      return serializeExistingCheckoutOrder(existingCheckoutOrder);
+      return serializeExistingCheckoutOrder(tenant.id, existingCheckoutOrder);
     }
 
     const normalizedItems = items
@@ -633,6 +677,13 @@ export async function POST(request: Request, { params }: { params: Promise<{ slu
     }
 
     const subtotalAmount = roundMoney(total);
+    const deliveryMinOrderAmount = roundMoney(Math.max(0, Number(tenant.delivery_min_order_amount || 0)));
+    if (orderType === 'delivery' && deliveryMinOrderAmount > 0 && subtotalAmount < deliveryMinOrderAmount) {
+      const remainingAmount = roundMoney(deliveryMinOrderAmount - subtotalAmount);
+      throw new CheckoutValidationError(
+        `Pedido minimo para entrega: ${formatMoneyPtBr(deliveryMinOrderAmount)}. Faltam ${formatMoneyPtBr(remainingAmount)}.`,
+      );
+    }
     let selectedPaymentMethod: PaymentMethodRow | null = null;
     if (paymentMethodId) {
       const byId = await query<PaymentMethodRow>(
@@ -886,12 +937,17 @@ export async function POST(request: Request, { params }: { params: Promise<{ slu
               deliveryFeeMode: tenant.delivery_fee_mode,
               deliveryFeePerKm: tenant.delivery_fee_per_km,
               deliveryFeeTable: tenant.delivery_fee_table,
+              deliveryMaxDistanceMeters: tenant.delivery_max_distance_meters,
             },
             resolvedDeliveryAddressInput || {
               freeform: resolvedDeliveryAddress,
             },
           )
         : null;
+
+    if (deliveryFeeQuote?.isDeliveryAvailable === false) {
+      throw new CheckoutValidationError(deliveryFeeQuote.deliveryUnavailableReason || 'Endereco fora da area de entrega da loja.');
+    }
 
     const deliveryFeeAmount = orderType === 'delivery' ? deliveryFeeQuote?.deliveryFeeAmount ?? roundMoney(Number(tenant.delivery_fee_base || 0)) : 0;
     const baseTotal = roundMoney(subtotalAmount + deliveryFeeAmount);
@@ -909,7 +965,24 @@ export async function POST(request: Request, { params }: { params: Promise<{ slu
       throw new CheckoutValidationError('Troco deve ser maior ou igual ao total.');
     }
 
+    const automationConfig = await getOrderAutomationConfig(tenant.id, dbClient);
+    const initialOrderStatus = initialOrderStatusForAutomation(automationConfig);
+
+    const openCashResult = await dbClient.query<{ id: string }>(
+      `SELECT id FROM cash_register_sessions
+       WHERE tenant_id = $1 AND status = 'open'
+       ORDER BY opened_at DESC LIMIT 1`,
+      [tenant.id],
+    );
+    const openCashSessionId = openCashResult.rows[0]?.id || null;
+    let checkoutCashSessionId: string | null = null;
+    if (automationConfig.autoAcceptOrders) {
+      checkoutCashSessionId = openCashSessionId;
+    }
+
     const orderId = randomUUID();
+    let orderSequenceNumber: number | null = null;
+    let trackingToken = '';
     await dbClient.query(
       `INSERT INTO orders
        (
@@ -937,7 +1010,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ slu
        )
        VALUES
        (
-        $1, $2, $3, $4, NULLIF($5, ''), $6, $7, $8, 0, 0, $9, $10, $11, $12, $13, 'pending', $14, 'pending', $15, NULLIF($16, ''), NOW()
+        $1, $2, $3, $4, NULLIF($5, ''), $6, $7, $8, 0, 0, $9, $10, $11, $12, $13, $14, $15, 'pending', $16, NULLIF($17, ''), NOW()
        )`,
       [
         orderId,
@@ -953,11 +1026,22 @@ export async function POST(request: Request, { params }: { params: Promise<{ slu
         paymentNetAmount,
         changeFor,
         orderTotal,
+        initialOrderStatus,
         orderType,
-        null,
+        checkoutCashSessionId,
         checkoutKey,
       ],
     );
+
+    const sequenceCashSessionId = checkoutCashSessionId || openCashSessionId;
+    if (sequenceCashSessionId) {
+      orderSequenceNumber = await assignOrderSequenceNumber(tenant.id, orderId, sequenceCashSessionId, dbClient);
+    }
+
+    if (orderType === 'delivery') {
+      const identifiers = await ensureOrderDeliveryIdentifiers(tenant.id, orderId, dbClient);
+      trackingToken = identifiers.token;
+    }
 
     for (const item of resolvedItems) {
       await dbClient.query(
@@ -967,17 +1051,49 @@ export async function POST(request: Request, { params }: { params: Promise<{ slu
       );
     }
 
+    await dbClient.query(
+      `INSERT INTO order_payments
+       (id, tenant_id, order_id, payment_method_id, method_type, method_name, gross_amount, fee_amount, net_amount)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+      [
+        randomUUID(),
+        tenant.id,
+        orderId,
+        selectedPaymentMethod.id,
+        selectedPaymentMethod.method_type,
+        selectedPaymentMethod.name,
+        orderTotal,
+        paymentFeeAmount,
+        paymentNetAmount,
+      ],
+    );
+
     await dbClient.query('COMMIT');
 
-    const [printDispatch, whatsappDispatch, orderEventDispatch] = await Promise.allSettled([
-      enqueueOrderPrintJob(tenant.id, orderId, 'new_order'),
-      enqueueOrderWhatsappJob(tenant.id, orderId, 'new_order'),
+    const orderEventDispatch = await Promise.allSettled([
       notifyOrderEvent(tenant.id, 'created', orderId),
+      enqueueOrderPrintJob(tenant.id, orderId, 'new_order'),
+      initialOrderStatus === 'processing'
+        ? enqueueOrderPrintJob(tenant.id, orderId, 'status_update')
+        : Promise.resolve(false),
+      enqueueOrderWhatsappJob(tenant.id, orderId, 'new_order'),
     ]);
+    const realtimeNotified = orderEventDispatch[0]?.status === 'fulfilled';
+    const printQueued =
+      orderEventDispatch[1]?.status === 'fulfilled' && Boolean(orderEventDispatch[1].value);
+    const kitchenPrintQueued =
+      orderEventDispatch[2]?.status === 'fulfilled' && Boolean(orderEventDispatch[2].value);
+    const whatsappQueued =
+      orderEventDispatch[3]?.status === 'fulfilled' && Boolean(orderEventDispatch[3].value);
 
     return NextResponse.json({
       ok: true,
       orderId,
+      trackingToken,
+      trackingUrl: buildPublicTrackingPath(trackingToken),
+      orderSequenceNumber,
+      status: initialOrderStatus,
+      autoAccepted: automationConfig.autoAcceptOrders,
       total: orderTotal,
       deliveryFeeAmount,
       distanceKm: deliveryFeeQuote?.distanceKm ?? null,
@@ -987,9 +1103,11 @@ export async function POST(request: Request, { params }: { params: Promise<{ slu
       paymentFeeAmount,
       message: 'Pedido recebido com sucesso.',
       communication: {
-        printQueued: wasJobQueued(printDispatch),
-        whatsappQueued: wasJobQueued(whatsappDispatch),
-        realtimeNotified: orderEventDispatch.status === 'fulfilled',
+        printQueued,
+        kitchenPrintQueued,
+        whatsappQueued,
+        realtimeNotified,
+        localAutomationRequested: realtimeNotified,
       },
     });
   } catch (error) {
@@ -1006,7 +1124,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ slu
     if (checkoutTenantId && checkoutKey && isUniqueViolation(error)) {
       const existingCheckoutOrder = await findExistingCheckoutOrder(checkoutTenantId, checkoutKey).catch(() => null);
       if (existingCheckoutOrder) {
-        return serializeExistingCheckoutOrder(existingCheckoutOrder);
+        return serializeExistingCheckoutOrder(checkoutTenantId, existingCheckoutOrder);
       }
     }
     console.error('[public-checkout] failed to finalize order', error);

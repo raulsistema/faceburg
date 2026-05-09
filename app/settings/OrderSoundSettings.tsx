@@ -133,7 +133,6 @@ export default function OrderSoundSettings({
                 <div className="flex items-start justify-between gap-3">
                   <div>
                     <p className="font-bold text-slate-900">{option.label}</p>
-                    <p className="mt-1 text-xs leading-5 text-slate-500">{option.description}</p>
                   </div>
                   {saved ? <CheckCircle2 className="h-5 w-5 shrink-0 text-emerald-600" /> : null}
                 </div>

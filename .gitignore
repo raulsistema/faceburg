@@ -1,4 +1,6 @@
 node_modules/
+.codex-run/
+.codex-ilspy-tools/
 .next/
 .next-dev/
 .next-build-check/

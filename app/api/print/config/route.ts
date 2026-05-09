@@ -3,7 +3,9 @@ import { NextResponse } from 'next/server';
 import { query } from '@/lib/db';
 import {
   normalizePrintCopies,
-  normalizePrintEvents,
+  normalizeAutoAcceptOrders,
+  normalizePrintEventsForAutomation,
+  normalizePrintTextSize,
   normalizeReceiptOptions,
   normalizeReceiptText,
   normalizeReceiptWidth,
@@ -17,7 +19,9 @@ type ConfigRow = {
   connection_status: string | null;
   printer_name: string | null;
   receipt_width: number | null;
+  print_text_size: string | null;
   print_copies: number | null;
+  auto_accept_orders: boolean | null;
   print_events: unknown | null;
   receipt_options: unknown | null;
   receipt_header: string | null;
@@ -43,7 +47,9 @@ export async function GET() {
             connection_status,
             printer_name,
             receipt_width,
+            print_text_size,
             print_copies,
+            auto_accept_orders,
             print_events,
             receipt_options,
             receipt_header,
@@ -64,8 +70,10 @@ export async function GET() {
     connectionStatus: row?.connection_status || 'disconnected',
     printerName: row?.printer_name || '',
     receiptWidth: normalizeReceiptWidth(row?.receipt_width),
+    printTextSize: normalizePrintTextSize(row?.print_text_size),
     printCopies: normalizePrintCopies(row?.print_copies),
-    printEvents: normalizePrintEvents(row?.print_events),
+    autoAcceptOrders: normalizeAutoAcceptOrders(row?.auto_accept_orders),
+    printEvents: normalizePrintEventsForAutomation(row?.print_events, row?.auto_accept_orders),
     receiptOptions: normalizeReceiptOptions(row?.receipt_options),
     receiptHeader: normalizeReceiptText(row?.receipt_header),
     receiptFooter: normalizeReceiptText(row?.receipt_footer),
@@ -86,9 +94,8 @@ export async function PATCH(request: Request) {
   } catch {
     body = {};
   }
-  const enabled = Boolean(body.enabled);
   const rotateKey = Boolean(body.rotateKey);
-  const printerName = String(body.printerName || '').trim();
+  const hasBodyField = (field: string) => Object.prototype.hasOwnProperty.call(body, field);
 
   const currentResult = await query<ConfigRow>(
     `SELECT tenant_id,
@@ -97,7 +104,9 @@ export async function PATCH(request: Request) {
             connection_status,
             printer_name,
             receipt_width,
+            print_text_size,
             print_copies,
+            auto_accept_orders,
             print_events,
             receipt_options,
             receipt_header,
@@ -111,26 +120,33 @@ export async function PATCH(request: Request) {
   );
   const current = currentResult.rows[0];
   const nextKey = rotateKey || !current?.agent_key ? buildAgentKey() : current.agent_key;
-  const hasBodyField = (field: string) => Object.prototype.hasOwnProperty.call(body, field);
+  const enabled = hasBodyField('enabled') ? Boolean(body.enabled) : Boolean(current?.enabled);
+  const printerName = hasBodyField('printerName')
+    ? String(body.printerName || '').trim()
+    : String(current?.printer_name || '').trim();
   const receiptWidth = normalizeReceiptWidth(hasBodyField('receiptWidth') ? body.receiptWidth : current?.receipt_width);
+  const printTextSize = normalizePrintTextSize(hasBodyField('printTextSize') ? body.printTextSize : current?.print_text_size);
   const printCopies = normalizePrintCopies(hasBodyField('printCopies') ? body.printCopies : current?.print_copies);
-  const printEvents = normalizePrintEvents(hasBodyField('printEvents') ? body.printEvents : current?.print_events);
+  const autoAcceptOrders = normalizeAutoAcceptOrders(hasBodyField('autoAcceptOrders') ? body.autoAcceptOrders : current?.auto_accept_orders);
+  const printEvents = normalizePrintEventsForAutomation(hasBodyField('printEvents') ? body.printEvents : current?.print_events, autoAcceptOrders);
   const receiptOptions = normalizeReceiptOptions(hasBodyField('receiptOptions') ? body.receiptOptions : current?.receipt_options);
   const receiptHeader = normalizeReceiptText(hasBodyField('receiptHeader') ? body.receiptHeader : current?.receipt_header);
   const receiptFooter = normalizeReceiptText(hasBodyField('receiptFooter') ? body.receiptFooter : current?.receipt_footer);
 
   await query(
     `INSERT INTO printer_agents
-       (tenant_id, enabled, agent_key, printer_name, receipt_width, print_copies, print_events, receipt_options, receipt_header, receipt_footer, updated_at)
+       (tenant_id, enabled, agent_key, printer_name, receipt_width, print_text_size, print_copies, auto_accept_orders, print_events, receipt_options, receipt_header, receipt_footer, updated_at)
      VALUES
-       ($1, $2, $3, NULLIF($4, ''), $5, $6, $7::jsonb, $8::jsonb, NULLIF($9, ''), NULLIF($10, ''), NOW())
+       ($1, $2, $3, NULLIF($4, ''), $5, $6, $7, $8, $9::jsonb, $10::jsonb, NULLIF($11, ''), NULLIF($12, ''), NOW())
      ON CONFLICT (tenant_id)
      DO UPDATE SET
        enabled = EXCLUDED.enabled,
        agent_key = EXCLUDED.agent_key,
        printer_name = EXCLUDED.printer_name,
        receipt_width = EXCLUDED.receipt_width,
+       print_text_size = EXCLUDED.print_text_size,
        print_copies = EXCLUDED.print_copies,
+       auto_accept_orders = EXCLUDED.auto_accept_orders,
        print_events = EXCLUDED.print_events,
        receipt_options = EXCLUDED.receipt_options,
        receipt_header = EXCLUDED.receipt_header,
@@ -142,7 +158,9 @@ export async function PATCH(request: Request) {
       nextKey,
       printerName,
       receiptWidth,
+      printTextSize,
       printCopies,
+      autoAcceptOrders,
       JSON.stringify(printEvents),
       JSON.stringify(receiptOptions),
       receiptHeader,
@@ -158,7 +176,9 @@ export async function PATCH(request: Request) {
     connectionStatus: current?.connection_status || 'disconnected',
     printerName,
     receiptWidth,
+    printTextSize,
     printCopies,
+    autoAcceptOrders,
     printEvents,
     receiptOptions,
     receiptHeader,

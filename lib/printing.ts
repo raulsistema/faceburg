@@ -3,8 +3,11 @@ import { query } from '@/lib/db';
 import type { DbExecutor } from '@/lib/db';
 import {
   DEFAULT_PRINT_WIDTH,
+  getEffectiveReceiptWidth,
   normalizePrintCopies,
   normalizePrintEvents,
+  normalizePrintTextSize,
+  normalizeAutoAcceptOrders,
   normalizeReceiptOptions,
   normalizeReceiptText,
   normalizeReceiptWidth,
@@ -18,6 +21,7 @@ type OrderHeaderRow = {
   customer_name: string | null;
   customer_phone: string | null;
   delivery_address: string | null;
+  order_sequence_number: number | null;
   payment_method: string | null;
   payment_method_id: string | null;
   payment_method_names: string | null;
@@ -50,6 +54,8 @@ type OrderHeaderRow = {
 type OrderItemRow = {
   quantity: number;
   product_name: string;
+  product_description: string | null;
+  print_description: boolean | null;
   unit_price: string;
   notes: string | null;
 };
@@ -70,8 +76,13 @@ type AgentConfigRow = {
   tenant_id: string;
   enabled: boolean;
   agent_key: string | null;
+  printer_name: string | null;
+  connection_status?: string | null;
+  last_seen_at?: string | null;
   receipt_width: number | null;
+  print_text_size: string | null;
   print_copies: number | null;
+  auto_accept_orders: boolean | null;
   print_events: unknown | null;
   receipt_options: unknown | null;
   receipt_header: string | null;
@@ -80,6 +91,7 @@ type AgentConfigRow = {
 
 type PrepareOrderPrintJobsOptions = {
   ignoreAgentEnabled?: boolean;
+  requireActiveHub?: boolean;
 };
 
 type OrderStatusRow = {
@@ -87,12 +99,18 @@ type OrderStatusRow = {
 };
 
 const RECEIPT_WIDTH = DEFAULT_PRINT_WIDTH;
+const PRINT_HUB_HEARTBEAT_GRACE_MS = 5 * 60 * 1000;
+
+let communicationJobSchemaPromise: Promise<void> | null = null;
 
 export type PreparedOrderPrintJob = {
   id: string;
   orderId: string;
   eventType: PrintJobEventType;
   payloadText: string;
+  printerName?: string;
+  columns: number;
+  printTextSize: string;
   copyIndex: number;
   copies: number;
 };
@@ -107,8 +125,48 @@ function text(value: unknown) {
   return String(value ?? '').trim();
 }
 
+async function ensureCommunicationJobSchema(executor: DbExecutor = { query }) {
+  if (!communicationJobSchemaPromise) {
+    communicationJobSchemaPromise = (async () => {
+      await executor.query(`
+        DO $$
+        BEGIN
+          IF NOT EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_name = 'print_jobs' AND column_name = 'dedupe_key'
+          ) THEN
+            ALTER TABLE print_jobs ADD COLUMN dedupe_key TEXT;
+          END IF;
+        END $$;
+      `);
+      await executor.query(`
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_print_jobs_tenant_dedupe_key
+          ON print_jobs(tenant_id, dedupe_key)
+          WHERE dedupe_key IS NOT NULL;
+      `);
+    })().catch((error) => {
+      communicationJobSchemaPromise = null;
+      throw error;
+    });
+  }
+
+  await communicationJobSchemaPromise;
+}
+
+function isPrintHubActive(connectionStatus: string | null | undefined, lastSeenAt: string | null | undefined) {
+  if (!['ready', 'connecting'].includes(text(connectionStatus))) return false;
+  if (!lastSeenAt) return false;
+  const parsed = Date.parse(lastSeenAt);
+  if (Number.isNaN(parsed)) return false;
+  return Date.now() - parsed <= PRINT_HUB_HEARTBEAT_GRACE_MS;
+}
+
 function divider(width = RECEIPT_WIDTH, char = '-') {
   return char.repeat(width);
+}
+
+function receiptWidthForPrintSize(receiptWidth: unknown, printTextSize: unknown) {
+  return getEffectiveReceiptWidth(receiptWidth, printTextSize);
 }
 
 function wrapText(value: string, width = RECEIPT_WIDTH) {
@@ -153,22 +211,11 @@ function wrapText(value: string, width = RECEIPT_WIDTH) {
 }
 
 function wrapLabeled(label: string, value: string, width = RECEIPT_WIDTH) {
-  const trimmedLabel = label.trimEnd();
-  const contentWidth = Math.max(8, width - trimmedLabel.length);
+  const labelText = label.endsWith(' ') ? label : `${label.trimEnd()} `;
+  const contentWidth = Math.max(8, width - labelText.length);
   const wrapped = wrapText(value, contentWidth);
   if (!wrapped.length) return [];
-  return wrapped.map((line, index) => (index === 0 ? `${trimmedLabel}${line}` : `${' '.repeat(trimmedLabel.length)}${line}`));
-}
-
-function alignLine(left: string, right: string, width = RECEIPT_WIDTH) {
-  const safeLeft = text(left);
-  const safeRight = text(right);
-  if (!safeRight) return safeLeft;
-  const spacing = width - safeLeft.length - safeRight.length;
-  if (spacing >= 1) {
-    return `${safeLeft}${' '.repeat(spacing)}${safeRight}`;
-  }
-  return `${safeLeft}\n${safeRight}`;
+  return wrapped.map((line, index) => (index === 0 ? `${labelText}${line}` : ` ${line}`));
 }
 
 function centerLine(value: string, width = RECEIPT_WIDTH) {
@@ -179,8 +226,19 @@ function centerLine(value: string, width = RECEIPT_WIDTH) {
   return `${' '.repeat(leftPadding)}${clean}`;
 }
 
+function normalizeBrazilianPhoneDigits(raw: string | null) {
+  let digits = String(raw || '').replace(/\D/g, '');
+  if (digits.startsWith('00')) {
+    digits = digits.slice(2);
+  }
+  if (digits.startsWith('55') && digits.length >= 12) {
+    digits = digits.slice(2);
+  }
+  return digits.replace(/^0+/, '');
+}
+
 function maskPhone(raw: string | null) {
-  const digits = String(raw || '').replace(/\D/g, '').slice(0, 11);
+  const digits = normalizeBrazilianPhoneDigits(raw).slice(0, 11);
   if (!digits) return '';
   if (digits.length <= 2) return digits;
   if (digits.length <= 6) return `(${digits.slice(0, 2)}) ${digits.slice(2)}`;
@@ -209,9 +267,15 @@ function paymentToLabel(paymentMethod: string | null, paymentMethodNames: string
   return text(paymentMethod) || 'Nao informado';
 }
 
+function isCashPayment(paymentMethod: string | null, paymentMethodNames: string | null) {
+  const normalizedMethod = text(paymentMethod).toLowerCase();
+  const normalizedNames = text(paymentMethodNames).toLowerCase();
+  return normalizedMethod === 'cash' || normalizedNames.includes('dinheiro');
+}
+
 function typeToHeader(type: string) {
   if (type === 'delivery') return 'DELIVERY';
-  if (type === 'pickup') return 'BALCAO';
+  if (type === 'pickup') return 'RETIRADA';
   if (type === 'table') return 'MESA';
   return 'PEDIDO';
 }
@@ -220,21 +284,21 @@ function buildPrintStage(orderType: string, orderStatus: string, eventType: Prin
   if (eventType === 'status_update' && orderStatus === 'processing') {
     return {
       header: 'COZINHA',
-      tags: [typeToHeader(orderType), 'VIA COZINHA'],
+      tags: [typeToHeader(orderType)],
     };
   }
 
   if (eventType === 'new_order') {
     return {
       header: typeToHeader(orderType),
-      tags: ['VIA BALCAO'],
+      tags: [],
     };
   }
 
   if (eventType === 'manual_receipt') {
     return {
       header: typeToHeader(orderType),
-      tags: ['RECIBO'],
+      tags: [],
     };
   }
 
@@ -300,19 +364,50 @@ function parseItemNotes(raw: string | null) {
   }
 }
 
-function buildItemLines(item: OrderItemRow, width = RECEIPT_WIDTH, showDetails = true) {
-  const lines: string[] = [];
-  const itemTotal = Number(item.unit_price || 0) * Number(item.quantity || 0);
-  const title = `${item.quantity}un ${text(item.product_name)}`;
-  const priceLabel = formatBrl(itemTotal);
+function shouldPrintItemDescription(value: string) {
+  const normalized = value
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^\w\s]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return Boolean(normalized) && normalized !== 'sem descricao' && normalized !== 'sem descricao do produto';
+}
 
-  const wrappedTitle = wrapText(title, width);
-  if (wrappedTitle.length === 1 && wrappedTitle[0].length + priceLabel.length + 1 <= width) {
-    lines.push(alignLine(wrappedTitle[0], priceLabel, width));
+function buildItemLines(
+  item: OrderItemRow,
+  width = RECEIPT_WIDTH,
+  showDetails = true,
+  showDescription = false,
+) {
+  const lines: string[] = [];
+  const quantity = Math.max(1, Number(item.quantity || 1));
+  const unitPrice = Number(item.unit_price || 0);
+  const itemTotal = unitPrice * quantity;
+  const title = `${quantity}un ${text(item.product_name)}`;
+  const unitPriceLabel = formatBrl(unitPrice);
+  const itemTotalLabel = formatBrl(itemTotal);
+  const detailPrefix = ' ';
+  const detailWidth = Math.max(8, width - detailPrefix.length);
+
+  const itemLabel = `${title} x ${unitPriceLabel}`;
+  if (itemLabel.length <= width) {
+    lines.push(itemLabel);
   } else {
-    lines.push(...wrappedTitle);
-    lines.push(`x ${priceLabel}`);
+    lines.push(...wrapText(title, width));
+    lines.push(`${detailPrefix}x ${unitPriceLabel}`);
   }
+
+  const description = text(item.product_description);
+  if (showDescription && item.print_description !== false && shouldPrintItemDescription(description)) {
+    lines.push(...wrapText(description, detailWidth).map((line) => `${detailPrefix}${line}`));
+  }
+
+  if (quantity > 1 || Math.abs(itemTotal - unitPrice) > 0.009) {
+    lines.push(`${detailPrefix}x ${itemTotalLabel}`);
+  }
+
 
   if (!showDetails) {
     return lines;
@@ -324,29 +419,29 @@ function buildItemLines(item: OrderItemRow, width = RECEIPT_WIDTH, showDetails =
   const observation = text(parsedNotes?.notes);
 
   if (pizza?.sizeLabel) {
-    lines.push(...wrapText(`Tamanho: ${pizza.sizeLabel}`, width));
+    lines.push(...wrapText(`Tam: ${pizza.sizeLabel}`, detailWidth).map((line) => `${detailPrefix}${line}`));
   }
 
   const flavors = Array.isArray(pizza?.flavors) ? pizza?.flavors.filter((flavor) => text(flavor?.name)) : [];
   if (flavors.length > 1) {
     for (const flavor of flavors) {
-      lines.push(...wrapText(`1/${flavors.length} ${text(flavor.name)}`, width));
+      lines.push(...wrapText(`1/${flavors.length} ${text(flavor.name)}`, detailWidth).map((line) => `${detailPrefix}${line}`));
     }
   } else if (flavors.length === 1) {
-    lines.push(...wrapText(`Sabor: ${text(flavors[0].name)}`, width));
+    lines.push(...wrapText(`Sabor: ${text(flavors[0].name)}`, detailWidth).map((line) => `${detailPrefix}${line}`));
   }
 
   if (pizza?.border?.label) {
-    lines.push(...wrapText(`Borda: ${text(pizza.border.label)}`, width));
+    lines.push(...wrapText(`Borda: ${text(pizza.border.label)}`, detailWidth).map((line) => `${detailPrefix}${line}`));
   }
 
   if (pizza?.dough?.label) {
-    lines.push(...wrapText(`Massa: ${text(pizza.dough.label)}`, width));
+    lines.push(...wrapText(`Massa: ${text(pizza.dough.label)}`, detailWidth).map((line) => `${detailPrefix}${line}`));
   }
 
   if (pizza?.gift?.name) {
     const giftQty = Math.max(1, Number(pizza.gift.quantity || 1));
-    lines.push(...wrapText(`Brinde: ${text(pizza.gift.name)} x${giftQty}`, width));
+    lines.push(...wrapText(`Brinde: ${text(pizza.gift.name)} x${giftQty}`, detailWidth).map((line) => `${detailPrefix}${line}`));
   }
 
   for (const option of options) {
@@ -354,7 +449,7 @@ function buildItemLines(item: OrderItemRow, width = RECEIPT_WIDTH, showDetails =
     if (!optionName) continue;
     const optionPrice = Number(option?.priceAddition || 0);
     const label = optionPrice > 0 ? `+ ${optionName} (+ ${formatBrl(optionPrice)})` : `+ ${optionName}`;
-    lines.push(...wrapText(label, width));
+    lines.push(...wrapText(label, detailWidth).map((line) => `${detailPrefix}${line}`));
   }
 
   if (observation) {
@@ -403,6 +498,7 @@ export async function buildOrderPrintText(
             o.customer_name,
             o.customer_phone,
             o.delivery_address,
+            o.order_sequence_number,
             o.payment_method,
             o.payment_method_id,
             COALESCE(
@@ -465,7 +561,7 @@ export async function buildOrderPrintText(
 
   if (!orderResult.rowCount) return '';
   const order = orderResult.rows[0];
-  const receiptWidth = normalizeReceiptWidth(config?.receipt_width);
+  const receiptWidth = receiptWidthForPrintSize(config?.receipt_width, config?.print_text_size);
   const receiptOptions = normalizeReceiptOptions(config?.receipt_options);
   const receiptHeader = normalizeReceiptText(config?.receipt_header);
   const receiptFooter = normalizeReceiptText(config?.receipt_footer);
@@ -473,6 +569,8 @@ export async function buildOrderPrintText(
   const itemsResult = await executor.query<OrderItemRow>(
     `SELECT oi.quantity,
             COALESCE(p.name, 'Produto removido') AS product_name,
+            p.description AS product_description,
+            p.print_description,
             oi.unit_price::text,
             oi.notes
      FROM order_items oi
@@ -483,7 +581,7 @@ export async function buildOrderPrintText(
        ON p.id = oi.product_id
       AND p.tenant_id = o.tenant_id
      WHERE oi.order_id = $2
-     ORDER BY COALESCE(p.name, 'Produto removido') ASC`,
+     ORDER BY oi.ctid ASC`,
     [tenantId, orderId],
   );
 
@@ -496,9 +594,16 @@ export async function buildOrderPrintText(
   const deliveryFeeAmount = Number(order.delivery_fee_amount || 0);
   const totalAmount = Number(order.total || 0);
   const changeFor = Number(order.change_for || 0);
+  const shouldShowChangeFor = changeFor > 0 && isCashPayment(order.payment_method, order.payment_method_names);
   const itemCount = itemsResult.rows.length;
   const lines: string[] = [];
   const printStage = buildPrintStage(order.type, order.status, eventType);
+  const isKitchenPrint = eventType === 'status_update' && order.status === 'processing';
+  const typeHeader = typeToHeader(order.type);
+  const orderSequenceLabel =
+    order.order_sequence_number !== null && order.order_sequence_number !== undefined
+      ? String(order.order_sequence_number)
+      : '';
 
   if (receiptHeader) {
     for (const line of wrapText(receiptHeader, receiptWidth)) {
@@ -507,11 +612,22 @@ export async function buildOrderPrintText(
     lines.push(divider(receiptWidth));
   }
 
+  const orderCode = order.id.slice(0, 8).toUpperCase();
   lines.push(centerLine(printStage.header, receiptWidth));
+  let sequencePrinted = false;
+  if (orderSequenceLabel && printStage.header === typeHeader) {
+    lines.push(centerLine(orderSequenceLabel, receiptWidth));
+    sequencePrinted = true;
+  }
   for (const tag of printStage.tags) {
     lines.push(centerLine(tag, receiptWidth));
+    if (orderSequenceLabel && !sequencePrinted && tag === typeHeader) {
+      lines.push(centerLine(orderSequenceLabel, receiptWidth));
+      sequencePrinted = true;
+    }
   }
-  lines.push(`Venda: ${order.id.slice(0, 8).toUpperCase()}`);
+  lines.push('');
+  lines.push(`Venda: ${orderCode}`);
   lines.push(
     `Data: ${createdAt.toLocaleDateString('pt-BR')} ${createdAt.toLocaleTimeString('pt-BR', {
       hour: '2-digit',
@@ -544,7 +660,7 @@ export async function buildOrderPrintText(
   }
 
   const deliveryAddress = formatAddressText(order.delivery_address);
-  if (deliveryAddress && receiptOptions.showDeliveryAddress) {
+  if (order.type === 'delivery' && deliveryAddress && receiptOptions.showDeliveryAddress) {
     lines.push(...wrapLabeled('End.: ', deliveryAddress, receiptWidth));
   }
 
@@ -552,33 +668,37 @@ export async function buildOrderPrintText(
   lines.push(centerLine('DOCUMENTO DE VENDA', receiptWidth));
   lines.push(divider(receiptWidth));
 
-  for (const item of itemsResult.rows) {
-    lines.push(...buildItemLines(item, receiptWidth, receiptOptions.showItemNotes));
-    lines.push(divider(receiptWidth));
-  }
+  itemsResult.rows.forEach((item, index) => {
+    lines.push(...buildItemLines(item, receiptWidth, receiptOptions.showItemNotes, receiptOptions.showItemDescription));
+    if (index < itemsResult.rows.length - 1) lines.push(divider(receiptWidth));
+  });
+  lines.push(divider(receiptWidth));
 
   if (receiptOptions.showTotals) {
-    lines.push(alignLine('Itens Comanda', `${itemCount} ${itemCount === 1 ? 'item' : 'itens'}`, receiptWidth));
+    lines.push(`Itens Comanda ${itemCount} ${itemCount === 1 ? 'Item' : 'Itens'}`);
     lines.push('');
-    lines.push(alignLine('Sub Total:', formatBrl(subtotalAmount), receiptWidth));
+    lines.push(`Sub Total: ${formatBrl(subtotalAmount)}`);
     if (discountAmount > 0) {
-      lines.push(alignLine('Desconto:', `- ${formatBrl(discountAmount)}`, receiptWidth));
+      lines.push(`Desconto: - ${formatBrl(discountAmount)}`);
     }
     if (surchargeAmount > 0) {
-      lines.push(alignLine('Acrescimo:', formatBrl(surchargeAmount), receiptWidth));
+      lines.push(`Acrescimo: ${formatBrl(surchargeAmount)}`);
     }
     if (order.type === 'delivery' || deliveryFeeAmount > 0) {
-      lines.push(alignLine('Entrega:', formatBrl(deliveryFeeAmount), receiptWidth));
+      lines.push(`Entrega: ${formatBrl(deliveryFeeAmount)}`);
     }
-    lines.push(alignLine('Total:', formatBrl(totalAmount), receiptWidth));
-    if (changeFor > 0) {
-      lines.push(alignLine('Troco para:', formatBrl(changeFor), receiptWidth));
+    lines.push(`Total: ${formatBrl(totalAmount)}`);
+    if (shouldShowChangeFor) {
+      lines.push(`Troco para: ${formatBrl(changeFor)}`);
     }
   }
 
   if (receiptOptions.showPayment) {
     lines.push('');
     lines.push(...wrapText(typeToPaymentSentence(order.type, paymentLabel), receiptWidth));
+    if (!receiptOptions.showTotals && shouldShowChangeFor) {
+      lines.push(`Troco para: ${formatBrl(changeFor)}`);
+    }
   }
 
   if (order.status === 'cancelled' && text(order.cancellation_reason)) {
@@ -586,7 +706,7 @@ export async function buildOrderPrintText(
     lines.push(...wrapLabeled('Motivo: ', text(order.cancellation_reason), receiptWidth));
   }
 
-  const storeFooter = receiptOptions.showStoreInfo ? buildStoreFooter(order, receiptWidth) : [];
+  const storeFooter = !isKitchenPrint && receiptOptions.showStoreInfo ? buildStoreFooter(order, receiptWidth) : [];
   if (storeFooter.length) {
     lines.push('');
     lines.push(...storeFooter);
@@ -615,8 +735,13 @@ export async function prepareOrderPrintJobs(
     `SELECT tenant_id,
             enabled,
             agent_key,
+            printer_name,
+            connection_status,
+            last_seen_at,
             receipt_width,
+            print_text_size,
             print_copies,
+            auto_accept_orders,
             print_events,
             receipt_options,
             receipt_header,
@@ -633,8 +758,13 @@ export async function prepareOrderPrintJobs(
           tenant_id: tenantId,
           enabled: true,
           agent_key: 'local-http-agent',
+          printer_name: null,
+          connection_status: 'ready',
+          last_seen_at: new Date().toISOString(),
           receipt_width: null,
+          print_text_size: null,
           print_copies: null,
+          auto_accept_orders: null,
           print_events: null,
           receipt_options: null,
           receipt_header: null,
@@ -646,6 +776,13 @@ export async function prepareOrderPrintJobs(
     return [];
   }
   if (!options.ignoreAgentEnabled && (!config.enabled || !config.agent_key)) {
+    return [];
+  }
+  if (
+    !options.ignoreAgentEnabled &&
+    options.requireActiveHub &&
+    !isPrintHubActive(config.connection_status, config.last_seen_at)
+  ) {
     return [];
   }
 
@@ -660,7 +797,12 @@ export async function prepareOrderPrintJobs(
   const orderStatus = statusResult.rows[0]?.status || '';
   const eventKey = printEventKeyFor(eventType, orderStatus);
   const printEvents = normalizePrintEvents(config.print_events);
-  if (!eventKey || !printEvents[eventKey]) {
+  const autoAcceptOrders = normalizeAutoAcceptOrders(config.auto_accept_orders);
+  const eventEnabled = eventKey && (
+    printEvents[eventKey] ||
+    (autoAcceptOrders && (eventKey === 'new_order' || eventKey === 'status_processing'))
+  );
+  if (!eventEnabled) {
     return [];
   }
 
@@ -668,7 +810,8 @@ export async function prepareOrderPrintJobs(
   if (!payloadText) return [];
 
   const copies = normalizePrintCopies(config.print_copies);
-  const receiptWidth = normalizeReceiptWidth(config.receipt_width);
+  const printTextSize = normalizePrintTextSize(config.print_text_size);
+  const receiptWidth = receiptWidthForPrintSize(config.receipt_width, printTextSize);
   const jobs: PreparedOrderPrintJob[] = [];
   for (let copyIndex = 1; copyIndex <= copies; copyIndex += 1) {
     const copyLabel = copies > 1 ? `\n${centerLine(`VIA ${copyIndex}/${copies}`, receiptWidth)}\n\n` : '';
@@ -677,8 +820,11 @@ export async function prepareOrderPrintJobs(
       orderId,
       eventType,
       payloadText: `${payloadText}${copyLabel}`,
+      printerName: config.printer_name || undefined,
+      columns: normalizeReceiptWidth(config.receipt_width),
+      printTextSize,
       copyIndex,
-      copies,
+      copies: 1,
     });
   }
 
@@ -690,20 +836,32 @@ export async function enqueueOrderPrintJob(
   orderId: string,
   eventType: PrintJobEventType,
   executor: DbExecutor = { query },
+  options: PrepareOrderPrintJobsOptions = {},
 ) {
-  const jobs = await prepareOrderPrintJobs(tenantId, orderId, eventType, executor);
+  await ensureCommunicationJobSchema(executor);
+  const jobs = await prepareOrderPrintJobs(tenantId, orderId, eventType, executor, options);
   if (!jobs.length) return false;
 
+  let insertedCount = 0;
   for (const job of jobs) {
-    await executor.query(
+    const dedupeKey =
+      eventType === 'manual_receipt'
+        ? null
+        : `${orderId}:${eventType}:${job.copyIndex}`;
+    const result = await executor.query(
       `INSERT INTO print_jobs
-        (id, tenant_id, order_id, event_type, payload_text, status, attempt_count, created_at, updated_at)
+        (id, tenant_id, order_id, event_type, payload_text, status, attempt_count, dedupe_key, created_at, updated_at)
        VALUES
-        ($1, $2, $3, $4, $5, 'queued', 0, NOW(), NOW())`,
-      [job.id, tenantId, orderId, eventType, job.payloadText],
+        ($1, $2, $3, $4, $5, 'queued', 0, $6, NOW(), NOW())
+       ON CONFLICT DO NOTHING
+       RETURNING id`,
+      [job.id, tenantId, orderId, eventType, job.payloadText, dedupeKey],
     );
+    insertedCount += result.rowCount || 0;
   }
-  await notifyAgentJobAvailable(tenantId, 'print', executor);
+  if (insertedCount > 0) {
+    await notifyAgentJobAvailable(tenantId, 'print', executor);
+  }
 
-  return true;
+  return insertedCount > 0;
 }

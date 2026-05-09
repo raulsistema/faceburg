@@ -61,7 +61,6 @@ export async function GET(request: Request) {
       abortHandler = onAbort;
 
       const onNotification = (payload: OrderEventPayload) => {
-        if (payload.tenantId !== session.tenantId) return;
         const normalizedPayload: OrderNotificationPayload = {
           tenantId: payload.tenantId,
           event: payload.event,

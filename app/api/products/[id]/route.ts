@@ -15,6 +15,7 @@ type ProductRow = {
   category_name: string;
   name: string;
   description: string | null;
+  print_description: boolean;
   price: string;
   image_url: string | null;
   available: boolean;
@@ -30,6 +31,7 @@ const PRODUCT_SELECT_SQL = `SELECT p.id,
        c.name AS category_name,
        p.name,
        p.description,
+       p.print_description,
        p.price::text,
        p.image_url,
        p.available,
@@ -74,6 +76,9 @@ function normalizeProductPatch(body: Record<string, unknown>, current: ProductRo
   const categoryId = hasOwn(body, 'categoryId') ? String(body.categoryId ?? '').trim() : current.category_id;
   const name = hasOwn(body, 'name') ? String(body.name ?? '').trim() : current.name;
   const description = hasOwn(body, 'description') ? String(body.description ?? '').trim() : String(current.description || '');
+  const printDescription = hasOwn(body, 'printDescription')
+    ? body.printDescription !== false
+    : current.print_description !== false;
   const price = hasOwn(body, 'price') ? parseMoneyInput(body.price) : Number(current.price || 0);
   const imageUrl = hasOwn(body, 'imageUrl') ? String(body.imageUrl ?? '').trim() : String(current.image_url || '');
   const sku = hasOwn(body, 'sku') ? String(body.sku ?? '').trim() : String(current.sku || '');
@@ -97,6 +102,7 @@ function normalizeProductPatch(body: Record<string, unknown>, current: ProductRo
     categoryId,
     name,
     description,
+    printDescription,
     price,
     imageUrl,
     sku,
@@ -179,13 +185,14 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
             SET category_id = $3,
                 name = $4,
                 description = NULLIF($5, ''),
-                price = $6,
-                image_url = NULLIF($7, ''),
-                available = $8,
-                sku = NULLIF($9, ''),
-                product_type = $10,
-                product_meta = $11::jsonb,
-                status = $12
+                print_description = $6,
+                price = $7,
+                image_url = NULLIF($8, ''),
+                available = $9,
+                sku = NULLIF($10, ''),
+                product_type = $11,
+                product_meta = $12::jsonb,
+                status = $13
           WHERE id = $1
             AND tenant_id = $2
         RETURNING id,
@@ -193,6 +200,7 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
                   ''::text AS category_name,
                   name,
                   description,
+                  print_description,
                   price::text,
                   image_url,
                   available,
@@ -207,6 +215,7 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
           payload.categoryId,
           payload.name,
           payload.description,
+          payload.printDescription,
           payload.price,
           payload.imageUrl,
           payload.available,

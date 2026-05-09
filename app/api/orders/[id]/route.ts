@@ -7,6 +7,11 @@ type OrderRow = {
   customer_name: string | null;
   customer_phone: string | null;
   delivery_address: string | null;
+  order_sequence_number: number | null;
+  subtotal_amount: string | null;
+  discount_amount: string | null;
+  surcharge_amount: string | null;
+  delivery_fee_amount: string | null;
   total: string;
   status: 'pending' | 'processing' | 'delivering' | 'completed' | 'cancelled';
   cancellation_reason: string | null;
@@ -34,7 +39,23 @@ export async function GET(_: Request, { params }: { params: Promise<{ id: string
 
   const { id } = await params;
   const orderResult = await query<OrderRow>(
-    `SELECT id, customer_name, customer_phone, delivery_address, total::text, status, cancellation_reason, type, payment_method, change_for::text, created_at, updated_at
+    `SELECT id,
+            customer_name,
+            customer_phone,
+            delivery_address,
+            order_sequence_number,
+            subtotal_amount::text,
+            discount_amount::text,
+            surcharge_amount::text,
+            delivery_fee_amount::text,
+            total::text,
+            status,
+            cancellation_reason,
+            type,
+            payment_method,
+            change_for::text,
+            created_at,
+            updated_at
      FROM orders
      WHERE tenant_id = $1
        AND id = $2
@@ -61,7 +82,7 @@ export async function GET(_: Request, { params }: { params: Promise<{ id: string
        ON p.id = oi.product_id
       AND p.tenant_id = o.tenant_id
      WHERE oi.order_id = $2
-     ORDER BY COALESCE(p.name, 'Produto removido') ASC`,
+     ORDER BY oi.ctid ASC`,
     [session.tenantId, id],
   );
 
@@ -72,6 +93,11 @@ export async function GET(_: Request, { params }: { params: Promise<{ id: string
       customerName: order.customer_name || 'Sem nome',
       customerPhone: order.customer_phone || '',
       deliveryAddress: order.delivery_address || '',
+      orderSequenceNumber: order.order_sequence_number ?? null,
+      subtotalAmount: Number(order.subtotal_amount || 0),
+      discountAmount: Number(order.discount_amount || 0),
+      surchargeAmount: Number(order.surcharge_amount || 0),
+      deliveryFeeAmount: Number(order.delivery_fee_amount || 0),
       total: Number(order.total || 0),
       status: order.status,
       cancelReason: order.cancellation_reason || '',
@@ -124,7 +150,23 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
   }
 
   const orderResult = await query<OrderRow>(
-    `SELECT id, customer_name, customer_phone, delivery_address, total::text, status, cancellation_reason, type, payment_method, change_for::text, created_at, updated_at
+    `SELECT id,
+            customer_name,
+            customer_phone,
+            delivery_address,
+            order_sequence_number,
+            subtotal_amount::text,
+            discount_amount::text,
+            surcharge_amount::text,
+            delivery_fee_amount::text,
+            total::text,
+            status,
+            cancellation_reason,
+            type,
+            payment_method,
+            change_for::text,
+            created_at,
+            updated_at
      FROM orders
      WHERE tenant_id = $1
        AND id = $2

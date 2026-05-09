@@ -1,6 +1,6 @@
 ﻿import { NextResponse } from 'next/server';
 import { query } from '@/lib/db';
-import { normalizeDeliveryFeeMode, normalizeDeliveryFeeTable } from '@/lib/delivery-fee';
+import { normalizeDeliveryFeeMode, normalizeDeliveryFeeTable, normalizeDeliveryMaxDistanceMeters } from '@/lib/delivery-fee';
 import { getValidatedTenantSession } from '@/lib/tenant-auth';
 
 type CategoryRow = {
@@ -19,6 +19,7 @@ type ProductRow = {
   category_name: string;
   name: string;
   description: string | null;
+  print_description: boolean;
   price: string;
   image_url: string | null;
   available: boolean;
@@ -48,6 +49,8 @@ type TenantRow = {
   delivery_fee_mode: string;
   delivery_fee_per_km: string;
   delivery_fee_table: unknown;
+  delivery_max_distance_meters: number | string | null;
+  delivery_min_order_amount: string | null;
   delivery_origin_use_issuer: boolean;
   delivery_origin_zip_code: string | null;
   delivery_origin_street: string | null;
@@ -86,6 +89,8 @@ export async function GET(request: Request) {
               delivery_fee_mode,
               delivery_fee_per_km::text,
               delivery_fee_table,
+              delivery_max_distance_meters,
+              delivery_min_order_amount::text,
               delivery_origin_use_issuer,
               delivery_origin_zip_code,
               delivery_origin_street,
@@ -125,12 +130,13 @@ export async function GET(request: Request) {
               c.name AS category_name,
               p.name,
               p.description,
+              p.print_description,
               p.price::text,
               p.image_url,
               p.available,
               p.sku,
               p.product_type,
-              p.product_meta,
+              '{}'::jsonb AS product_meta,
               p.status,
               p.display_order
          FROM products p
@@ -183,6 +189,8 @@ export async function GET(request: Request) {
       deliveryFeeMode: normalizeDeliveryFeeMode(tenant.delivery_fee_mode),
       deliveryFeePerKm: Number(tenant.delivery_fee_per_km || 0),
       deliveryFeeTable: normalizeDeliveryFeeTable(tenant.delivery_fee_table),
+      deliveryMaxDistanceKm: Number((normalizeDeliveryMaxDistanceMeters(tenant.delivery_max_distance_meters) / 1000).toFixed(2)),
+      deliveryMinOrderAmount: Number(tenant.delivery_min_order_amount || 0),
       deliveryOriginUseIssuer: Boolean(tenant.delivery_origin_use_issuer),
       deliveryOriginZipCode: tenant.delivery_origin_zip_code || '',
       deliveryOriginStreet: tenant.delivery_origin_street || '',

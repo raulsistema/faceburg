@@ -30,6 +30,7 @@ type ProductRow = {
   category_name: string;
   name: string;
   description: string | null;
+  print_description: boolean;
   price: string;
   image_url: string | null;
   available: boolean;
@@ -52,6 +53,7 @@ export async function GET() {
             c.name AS category_name,
             p.name,
             p.description,
+            p.print_description,
             p.price::text,
             p.image_url,
             p.available,
@@ -80,6 +82,7 @@ export async function POST(request: Request) {
   const categoryId = String(body.categoryId || '').trim();
   const name = String(body.name || '').trim();
   const description = String(body.description || '').trim();
+  const printDescription = body.printDescription !== false;
   const price = parseMoneyInput(body.price);
   const imageUrl = String(body.imageUrl || '').trim();
   const sku = String(body.sku || '').trim();
@@ -126,16 +129,17 @@ export async function POST(request: Request) {
       const productId = randomUUID();
       const result = await client.query<ProductRow>(
         `INSERT INTO products
-         (id, tenant_id, category_id, name, description, price, image_url, available, sku, product_type, product_meta, status, display_order)
+         (id, tenant_id, category_id, name, description, print_description, price, image_url, available, sku, product_type, product_meta, status, display_order)
          VALUES
-         ($1, $2, $3, $4, NULLIF($5, ''), $6, NULLIF($7, ''), $8, NULLIF($9, ''), $10, $11::jsonb, $12, 0)
-         RETURNING id, category_id, ''::text AS category_name, name, description, price::text, image_url, available, sku, product_type, product_meta, status, display_order`,
+         ($1, $2, $3, $4, NULLIF($5, ''), $6, $7, NULLIF($8, ''), $9, NULLIF($10, ''), $11, $12::jsonb, $13, 0)
+         RETURNING id, category_id, ''::text AS category_name, name, description, print_description, price::text, image_url, available, sku, product_type, product_meta, status, display_order`,
         [
           productId,
           session.tenantId,
           categoryId,
           name,
           description,
+          printDescription,
           price,
           imageUrl,
           available,

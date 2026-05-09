@@ -1,6 +1,7 @@
 using System.Net;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json;
 using Faceburg.LocalAgent.Config;
 using Faceburg.LocalAgent.Models;
 using Faceburg.LocalAgent.Printing;
@@ -19,10 +20,14 @@ builder.WebHost.ConfigureKestrel(options =>
 builder.Services.AddSingleton(configStore);
 builder.Services.AddSingleton<NativePrinterApi>();
 builder.Services.AddSingleton<EscPosTextBuilder>();
+builder.Services.AddSingleton<AcbrPosPrinterApi>();
+builder.Services.AddSingleton<WindowsDriverReceiptPrinter>();
 builder.Services.AddSingleton<PrintService>();
 builder.Services.AddSingleton<WhatsAppSidecarService>();
 builder.Services.AddSingleton<StartupRegistrationService>();
+builder.Services.AddSingleton<DirectRealtimeService>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<WhatsAppSidecarService>());
+builder.Services.AddHostedService(sp => sp.GetRequiredService<DirectRealtimeService>());
 builder.Services.AddCors(options =>
 {
     options.AddPolicy("FaceburgLocal", policy =>
@@ -81,6 +86,16 @@ app.MapGet("/api/health", async (
         tenantSlug = config.TenantSlug,
         terminalId = config.TerminalId,
         printerName = config.DefaultPrinter,
+        printEngine = config.PrintEngine,
+        columns = config.Columns,
+        printTextSize = config.PrintTextSize,
+        realtimeGatewayPort = config.RealtimeGatewayPort,
+        realtimeGatewayPath = config.RealtimeGatewayPath,
+        hasPrintAgentKey = !string.IsNullOrWhiteSpace(config.PrintAgentKey),
+        hasWhatsAppAgentKey = !string.IsNullOrWhiteSpace(config.WhatsAppAgentKey),
+        codePage = config.CodePage,
+        cutPaper = config.CutPaper,
+        pulseDrawer = config.PulseDrawer,
         startWithWindows = config.StartWithWindows,
         startupRegistered = startup.IsRegistered(),
         configUpdatedAt = config.UpdatedAt,
@@ -97,6 +112,22 @@ app.MapGet("/api/printers", (NativePrinterApi printers) =>
     catch (Exception ex)
     {
         return Results.Problem(ex.Message, statusCode: StatusCodes.Status500InternalServerError);
+    }
+});
+
+app.MapGet("/impresoras/", (NativePrinterApi printers) =>
+{
+    try
+    {
+        return Results.Ok(new
+        {
+            Portas = printers.ListPrinters().Select(printer => printer.Name).ToArray(),
+            Operacao = 1,
+        });
+    }
+    catch
+    {
+        return Results.Json(false);
     }
 });
 
@@ -143,7 +174,7 @@ app.MapPost("/api/print/test", async (
     catch (Exception ex)
     {
         return Results.Json(
-            new PrintResult(false, Guid.NewGuid().ToString("N"), config.DefaultPrinter, 0, 0, "raw-escpos", ex.Message),
+            new PrintResult(false, Guid.NewGuid().ToString("N"), config.DefaultPrinter, 0, 0, config.PrintEngine, ex.Message),
             statusCode: StatusCodes.Status500InternalServerError
         );
     }
@@ -170,9 +201,40 @@ app.MapPost("/api/print", async (
     catch (Exception ex)
     {
         return Results.Json(
-            new PrintResult(false, request.JobId ?? Guid.NewGuid().ToString("N"), request.PrinterName ?? config.DefaultPrinter, 0, 0, "raw-escpos", ex.Message),
+            new PrintResult(false, request.JobId ?? Guid.NewGuid().ToString("N"), request.PrinterName ?? config.DefaultPrinter, 0, 0, config.PrintEngine, ex.Message),
             statusCode: StatusCodes.Status500InternalServerError
         );
+    }
+});
+
+app.MapPost("/imprimir/", async (
+    SwAnyPrintRequest request,
+    ConfigStore store,
+    PrintService print,
+    CancellationToken cancellationToken) =>
+{
+    var config = await store.LoadAsync(cancellationToken);
+    try
+    {
+        var jobId = Guid.NewGuid().ToString("N");
+        var printRequest = new PrintJobRequest
+        {
+            JobId = jobId,
+            PrinterName = request.Impresora,
+            PayloadText = BuildSwAnyPayloadText(request),
+            Columns = config.Columns,
+            PrintTextSize = config.PrintTextSize,
+            CodePage = config.CodePage,
+            CutPaper = config.CutPaper,
+            PulseDrawer = config.PulseDrawer,
+            Copies = 1,
+        };
+        print.Print(printRequest, config);
+        return Results.Json(true);
+    }
+    catch
+    {
+        return Results.Json(false);
     }
 });
 
@@ -322,8 +384,129 @@ static bool CryptographicEquals(string left, string right)
            CryptographicOperations.FixedTimeEquals(leftBytes, rightBytes);
 }
 
+static string BuildSwAnyPayloadText(SwAnyPrintRequest request)
+{
+    var builder = new StringBuilder();
+    var centered = false;
+    var expanded = false;
+
+    foreach (var operation in request.Operaciones ?? [])
+    {
+        var action = (operation.Accion ?? "").Trim().ToLowerInvariant();
+        var data = JsonValueToString(operation.Datos);
+
+        switch (action)
+        {
+            case "text":
+                builder.Append(DecorateSwAnyText(data, centered, expanded));
+                break;
+
+            case "settextsize":
+                if (string.Equals(data, "2,2", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(data, "2x2", StringComparison.OrdinalIgnoreCase))
+                {
+                    expanded = true;
+                }
+                else
+                {
+                    expanded = false;
+                }
+                break;
+
+            case "feed":
+                if (int.TryParse(data, out var feedLines))
+                {
+                    for (var i = 0; i < Math.Clamp(feedLines, 1, 20); i++)
+                    {
+                        builder.Append('\n');
+                    }
+                }
+                else
+                {
+                    builder.Append('\n');
+                }
+                break;
+
+            case "cut":
+                builder.Append('\n');
+                break;
+
+            case "qrimagen":
+                if (!string.IsNullOrWhiteSpace(data))
+                {
+                    builder.Append("\n<qrcode>")
+                        .Append(data)
+                        .Append("</qrcode>\n");
+                }
+                break;
+
+            case "setjustification":
+                if (string.Equals(data, "center", StringComparison.OrdinalIgnoreCase))
+                {
+                    centered = true;
+                }
+                else if (string.Equals(data, "left", StringComparison.OrdinalIgnoreCase))
+                {
+                    centered = false;
+                }
+                break;
+        }
+    }
+
+    return builder.ToString().TrimEnd();
+}
+
+static string DecorateSwAnyText(string value, bool centered, bool expanded)
+{
+    var lines = value
+        .Replace("\r\n", "\n")
+        .Replace('\r', '\n')
+        .Split('\n');
+    var builder = new StringBuilder(value.Length + 64);
+
+    foreach (var line in lines)
+    {
+        var text = line.TrimEnd();
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            builder.Append('\n');
+            continue;
+        }
+
+        if (expanded) text = $"<big>{text}</big>";
+        if (centered) text = $"<center>{text}</center>";
+        builder.Append(text).Append('\n');
+    }
+
+    return builder.ToString();
+}
+
+static string JsonValueToString(JsonElement value)
+{
+    return value.ValueKind switch
+    {
+        JsonValueKind.String => value.GetString() ?? "",
+        JsonValueKind.Number => value.ToString(),
+        JsonValueKind.True => "true",
+        JsonValueKind.False => "false",
+        _ => value.ToString(),
+    };
+}
+
 public sealed class LocalDispatchRequest
 {
     public PrintJobRequest[]? PrintJobs { get; set; }
     public WhatsAppSendRequest[]? WhatsAppJobs { get; set; }
+}
+
+public sealed class SwAnyPrintRequest
+{
+    public string? Impresora { get; set; }
+    public SwAnyOperation[]? Operaciones { get; set; }
+}
+
+public sealed class SwAnyOperation
+{
+    public string? Accion { get; set; }
+    public JsonElement Datos { get; set; }
 }
