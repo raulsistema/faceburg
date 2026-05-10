@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { NextResponse } from 'next/server';
 import { query } from '@/lib/db';
-import { getValidatedDeliveryAccess } from '@/lib/delivery-auth';
+import { getValidatedDeliveryAccess, isActiveDeliveryAccess } from '@/lib/delivery-auth';
 
 export const dynamic = 'force-dynamic';
 
@@ -13,6 +13,12 @@ export async function GET(request: Request) {
   const session = await getValidatedDeliveryAccess(request);
   if (!session) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+  }
+  if (!isActiveDeliveryAccess(session)) {
+    return NextResponse.json(
+      { error: 'Seu acesso esta desativado. Voce pode consultar apenas seus totais.' },
+      { status: 403 },
+    );
   }
 
   const url = new URL(request.url);
@@ -67,6 +73,9 @@ export async function POST(request: Request) {
   const session = await getValidatedDeliveryAccess(request);
   if (!session) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+  }
+  if (session.source !== 'dashboard') {
+    return NextResponse.json({ error: 'Somente o painel pode criar comandos para o app.' }, { status: 403 });
   }
 
   const body = await request.json().catch(() => ({})) as {

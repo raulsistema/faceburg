@@ -120,6 +120,8 @@ type CashCurrentResponse = {
     status: string;
   } | null;
   expectedAmount?: number;
+  storeOpen?: boolean;
+  effectiveStoreOpen?: boolean;
   error?: string;
 };
 
@@ -1680,6 +1682,9 @@ export default function PedidosPage() {
       const data = (await response.json().catch(() => ({}))) as CashCurrentResponse;
       if (response.ok) {
         setCashCurrent(data.current || null);
+        if (typeof data.storeOpen === 'boolean') {
+          setDeliveryEnabled(data.storeOpen);
+        }
       }
     } finally {
       setCashLoading(false);

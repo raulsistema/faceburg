@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { NextResponse } from 'next/server';
 import { query } from '@/lib/db';
-import { getValidatedDeliveryAccess } from '@/lib/delivery-auth';
+import { getValidatedDeliveryAccess, isActiveDeliveryAccess } from '@/lib/delivery-auth';
 
 export const dynamic = 'force-dynamic';
 
@@ -32,6 +32,12 @@ export async function POST(request: Request) {
   if (!session) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   }
+  if (!isActiveDeliveryAccess(session)) {
+    return NextResponse.json(
+      { error: 'Seu acesso esta desativado. Voce pode consultar apenas seus totais.' },
+      { status: 403 },
+    );
+  }
 
   const body = await request.json().catch(() => ({})) as LocationPayload;
   const orderId = text(body.orderId);
@@ -47,8 +53,8 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: 'Coordenadas fora do intervalo valido.' }, { status: 400 });
   }
 
-  const order = await query<{ id: string; status: string }>(
-    `SELECT id, status
+  const order = await query<{ id: string; status: string; delivery_driver_id: string | null }>(
+    `SELECT id, status, delivery_driver_id
      FROM orders
      WHERE tenant_id = $1
        AND id = $2
@@ -58,6 +64,12 @@ export async function POST(request: Request) {
   );
   if (!order.rowCount) {
     return NextResponse.json({ error: 'Pedido de entrega nao encontrado.' }, { status: 404 });
+  }
+  if (session.source === 'driver' && order.rows[0].delivery_driver_id && order.rows[0].delivery_driver_id !== session.driverId) {
+    return NextResponse.json({ error: 'Este pedido esta com outro entregador.' }, { status: 403 });
+  }
+  if (order.rows[0].status !== 'delivering') {
+    return NextResponse.json({ error: 'A localizacao so pode ser enviada durante a entrega.' }, { status: 409 });
   }
 
   if (deviceId) {
@@ -101,11 +113,12 @@ export async function POST(request: Request) {
     `UPDATE orders
      SET delivery_last_latitude = $3,
          delivery_last_longitude = $4,
+         delivery_driver_id = COALESCE(delivery_driver_id, $5),
          delivery_location_updated_at = NOW(),
          updated_at = NOW()
      WHERE tenant_id = $1
        AND id = $2`,
-    [session.tenantId, orderId, latitude, longitude],
+    [session.tenantId, orderId, latitude, longitude, driverId],
   );
 
   return NextResponse.json({ ok: true });

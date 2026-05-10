@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { query } from '@/lib/db';
 import { getCashSessionFinanceSummary } from '@/lib/cash-summary';
 import { ensureFinanceSchema } from '@/lib/finance-schema';
+import { ensureStoreHoursSchema, isMenuOpenNow } from '@/lib/store-hours';
 import { getValidatedTenantSession } from '@/lib/tenant-auth';
 
 type SessionRow = {
@@ -19,10 +20,38 @@ type MovementRow = {
   created_at: string;
 };
 
+type TenantStoreStatusRow = {
+  store_open: boolean;
+  menu_open_mode: string | null;
+  menu_hours: unknown;
+};
+
+function serializeStoreStatus(row: TenantStoreStatusRow | undefined) {
+  const storeOpen = Boolean(row?.store_open);
+  return {
+    storeOpen,
+    effectiveStoreOpen: isMenuOpenNow({
+      manualOpen: storeOpen,
+      mode: row?.menu_open_mode,
+      hours: row?.menu_hours,
+    }),
+  };
+}
+
 export async function GET() {
   await ensureFinanceSchema();
+  await ensureStoreHoursSchema();
   const session = await getValidatedTenantSession();
   if (!session) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+
+  const tenantStatusResult = await query<TenantStoreStatusRow>(
+    `SELECT store_open, menu_open_mode, menu_hours
+     FROM tenants
+     WHERE id = $1
+     LIMIT 1`,
+    [session.tenantId],
+  );
+  const storeStatus = serializeStoreStatus(tenantStatusResult.rows[0]);
 
   const currentResult = await query<SessionRow>(
     `SELECT id, opened_at, opening_amount::text, status
@@ -34,7 +63,7 @@ export async function GET() {
   );
 
   if (!currentResult.rowCount) {
-    return NextResponse.json({ current: null, movements: [], expectedAmount: 0 });
+    return NextResponse.json({ current: null, movements: [], expectedAmount: 0, ...storeStatus });
   }
 
   const current = currentResult.rows[0];
@@ -106,5 +135,6 @@ export async function GET() {
     })),
     expectedAmount: summary.expectedDrawer,
     summary,
+    ...storeStatus,
   });
 }

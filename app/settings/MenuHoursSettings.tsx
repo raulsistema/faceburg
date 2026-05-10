@@ -1,6 +1,7 @@
 'use client';
 
 import { FormEvent, useEffect, useState } from 'react';
+import { ChevronDown, Pencil } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
 type MenuOpenMode = 'manual' | 'schedule';
@@ -66,11 +67,16 @@ function normalizeMenuHours(value?: MenuHoursConfig | null): MenuHoursConfig {
   };
 }
 
+function modeLabel(mode: MenuOpenMode) {
+  return mode === 'schedule' ? 'Segue horarios' : 'Manual';
+}
+
 export default function MenuHoursSettings({ initialData }: { initialData?: MenuHoursSettingsData | null }) {
   const [storeOpen, setStoreOpen] = useState(Boolean(initialData?.storeOpen));
   const [effectiveStoreOpen, setEffectiveStoreOpen] = useState(Boolean(initialData?.effectiveStoreOpen ?? initialData?.storeOpen));
   const [menuOpenMode, setMenuOpenMode] = useState<MenuOpenMode>(() => normalizeMode(initialData?.menuOpenMode));
   const [menuHours, setMenuHours] = useState<MenuHoursConfig>(() => normalizeMenuHours(initialData?.menuHours));
+  const [expanded, setExpanded] = useState(false);
   const [bulkOpen, setBulkOpen] = useState('18:00');
   const [bulkClose, setBulkClose] = useState('00:00');
   const [saving, setSaving] = useState(false);
@@ -142,6 +148,7 @@ export default function MenuHoursSettings({ initialData }: { initialData?: MenuH
           ? 'Cardapio salvo em modo manual.'
           : 'Cardapio salvo para seguir os horarios de funcionamento.',
       );
+      setExpanded(false);
     } catch {
       setError('Falha ao salvar funcionamento do cardapio.');
     } finally {
@@ -150,25 +157,51 @@ export default function MenuHoursSettings({ initialData }: { initialData?: MenuH
   }
 
   return (
-    <section className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
-      <div className="mb-5 flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
-        <div>
-          <h3 className="text-sm font-bold uppercase tracking-widest text-slate-500">Funcionamento do cardapio</h3>
-          <p className="mt-2 text-sm text-slate-500">
-            Escolha se o cardapio abre manualmente ou se aceita pedidos somente dentro do horario.
-          </p>
+    <section className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
+      <div className="p-6">
+        <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
+          <div className="min-w-0">
+            <h3 className="text-sm font-bold uppercase tracking-widest text-slate-500">Funcionamento do cardapio</h3>
+            <p className="mt-2 text-sm text-slate-500">
+              Escolha se o cardapio abre manualmente ou se aceita pedidos somente dentro do horario.
+            </p>
+            <div className="mt-4 flex flex-wrap gap-2">
+              <span className="rounded-full border border-slate-200 bg-slate-50 px-3 py-1 text-xs font-black text-slate-700">
+                {modeLabel(menuOpenMode)}
+              </span>
+              <span className={cn(
+                'rounded-full border px-3 py-1 text-xs font-black',
+                storeOpen ? 'border-emerald-200 bg-emerald-50 text-emerald-700' : 'border-slate-200 bg-slate-50 text-slate-500',
+              )}>
+                Cardapio {storeOpen ? 'ligado' : 'desligado'}
+              </span>
+              <span
+                className={cn(
+                  'rounded-full border px-3 py-1 text-xs font-black',
+                  effectiveStoreOpen ? 'border-emerald-200 bg-emerald-50 text-emerald-700' : 'border-rose-200 bg-rose-50 text-rose-700',
+                )}
+              >
+                {effectiveStoreOpen ? 'Aceitando pedidos agora' : 'Fechado agora'}
+              </span>
+            </div>
+            {message ? <p className="mt-3 text-sm font-semibold text-emerald-700">{message}</p> : null}
+            {error ? <p className="mt-3 text-sm font-semibold text-rose-600">{error}</p> : null}
+          </div>
+
+          <button
+            type="button"
+            onClick={() => setExpanded((current) => !current)}
+            aria-expanded={expanded}
+            className="inline-flex h-11 shrink-0 items-center justify-center gap-2 rounded-xl border border-slate-200 px-4 text-sm font-black text-slate-800 transition hover:bg-slate-50"
+          >
+            {expanded ? null : <Pencil className="h-4 w-4" />}
+            {expanded ? 'Recolher' : 'Editar funcionamento'}
+            <ChevronDown className={cn('h-4 w-4 transition-transform', expanded ? 'rotate-180' : '')} />
+          </button>
         </div>
-        <span
-          className={cn(
-            'inline-flex rounded-full border px-3 py-1 text-xs font-black',
-            effectiveStoreOpen ? 'border-emerald-200 bg-emerald-50 text-emerald-700' : 'border-rose-200 bg-rose-50 text-rose-700',
-          )}
-        >
-          {effectiveStoreOpen ? 'Aceitando pedidos agora' : 'Fechado agora'}
-        </span>
       </div>
 
-      <form onSubmit={save} className="space-y-5">
+      <form onSubmit={save} className={cn('space-y-5 border-t border-slate-100 p-6', expanded ? 'block' : 'hidden')}>
         <div className="grid gap-3 md:grid-cols-2">
           <button
             type="button"
@@ -243,8 +276,6 @@ export default function MenuHoursSettings({ initialData }: { initialData?: MenuH
           <button type="submit" className="btn-primary" disabled={saving}>
             {saving ? 'Salvando...' : 'Salvar funcionamento'}
           </button>
-          {message ? <span className="text-sm font-semibold text-emerald-700">{message}</span> : null}
-          {error ? <span className="text-sm font-semibold text-rose-600">{error}</span> : null}
         </div>
       </form>
     </section>

@@ -87,7 +87,7 @@ function sourceLabel(source: Movement['source']) {
 
 function statusLabel(status: string) {
   if (status === 'completed') return 'Concluida';
-  if (status === 'pending') return 'Pendente';
+  if (status === 'pending') return 'A receber';
   if (status === 'paid') return 'Pago';
   if (status === 'received') return 'Recebido';
   if (status === 'posted') return 'Lancado';
@@ -278,7 +278,7 @@ export default function FinancialMovementsView() {
               <option value="all">Todos</option>
               <option value="completed">Concluida</option>
               <option value="posted">Lancado</option>
-              <option value="pending">Pendente</option>
+              <option value="pending">A receber</option>
               <option value="received">Recebido</option>
               <option value="paid">Pago</option>
             </select>

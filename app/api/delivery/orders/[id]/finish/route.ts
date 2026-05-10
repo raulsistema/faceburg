@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { query } from '@/lib/db';
-import { getValidatedDeliveryAccess } from '@/lib/delivery-auth';
+import { getValidatedDeliveryAccess, isActiveDeliveryAccess } from '@/lib/delivery-auth';
 import { buildTrackingUrl } from '@/lib/delivery-tracking';
 
 export const dynamic = 'force-dynamic';
@@ -11,6 +11,7 @@ type DeliveryStateRow = {
   type: string;
   delivery_tracking_token: string | null;
   delivery_driver_code: string | null;
+  delivery_driver_id: string | null;
   delivery_started_at: string | null;
   delivery_finished_at: string | null;
 };
@@ -35,6 +36,7 @@ async function loadDeliveryState(tenantId: string, orderId: string) {
             type,
             delivery_tracking_token,
             delivery_driver_code,
+            delivery_driver_id,
             delivery_started_at,
             delivery_finished_at
      FROM orders
@@ -51,6 +53,12 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
   if (!session) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   }
+  if (!isActiveDeliveryAccess(session)) {
+    return NextResponse.json(
+      { error: 'Seu acesso esta desativado. Voce pode consultar apenas seus totais.' },
+      { status: 403 },
+    );
+  }
 
   const { id } = await params;
   const current = await loadDeliveryState(session.tenantId, id);
@@ -62,6 +70,12 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
   }
   if (current.status === 'cancelled') {
     return NextResponse.json({ error: 'Pedido cancelado nao pode ser finalizado.' }, { status: 409 });
+  }
+  if (current.status !== 'delivering') {
+    return NextResponse.json({ error: 'Inicie a entrega antes de finalizar.' }, { status: 409 });
+  }
+  if (session.source === 'driver' && current.delivery_driver_id && current.delivery_driver_id !== session.driverId) {
+    return NextResponse.json({ error: 'Este pedido esta com outro entregador.' }, { status: 409 });
   }
 
   const statusResponse = await forwardStatusChange(request, id, 'completed');

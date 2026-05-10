@@ -206,7 +206,7 @@ export default function CashRegistersView() {
         setError(data.error || 'Falha ao fechar caixa.');
         return;
       }
-      setMessage('Caixa fechado com sucesso.');
+      setMessage('Caixa fechado com sucesso. Delivery do cardapio desligado.');
       await loadCurrent();
       await loadSessions();
     } catch {

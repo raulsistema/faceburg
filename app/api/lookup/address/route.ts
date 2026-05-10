@@ -29,7 +29,6 @@ type NominatimSuggestion = {
 type TenantStateRow = {
   id: string;
   status: string;
-  issuer_city: string | null;
   issuer_state: string | null;
 };
 
@@ -407,7 +406,7 @@ export async function GET(request: NextRequest) {
     const session = await getValidatedTenantSession();
     const tenantResult = session
       ? await query<TenantStateRow>(
-          `SELECT id, status, issuer_city, issuer_state
+          `SELECT id, status, issuer_state
            FROM tenants
            WHERE id = $1
            LIMIT 1`,
@@ -415,7 +414,7 @@ export async function GET(request: NextRequest) {
         )
       : slug
         ? await query<TenantStateRow>(
-            `SELECT id, status, issuer_city, issuer_state
+            `SELECT id, status, issuer_state
              FROM tenants
              WHERE slug = $1
              LIMIT 1`,
@@ -433,10 +432,9 @@ export async function GET(request: NextRequest) {
     }
 
     const tenantState = text(tenant.issuer_state).toUpperCase();
-    const tenantCity = text(tenant.issuer_city);
     const isPublicMenuLookup = !session && Boolean(slug);
     const effectiveState = isPublicMenuLookup ? tenantState || requestedState : requestedState || tenantState;
-    const effectiveCity = isPublicMenuLookup ? '' : requestedCity || tenantCity;
+    const effectiveCity = isPublicMenuLookup ? '' : requestedCity;
     const streetVariants = buildStreetSearchVariants(street);
 
     let remoteSuggestions: AddressSuggestion[] = [];

@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import { query } from '@/lib/db';
 import { buildTrackingUrl } from '@/lib/delivery-tracking';
-import { getValidatedDeliveryAccess } from '@/lib/delivery-auth';
+import { getValidatedDeliveryAccess, isActiveDeliveryAccess } from '@/lib/delivery-auth';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -15,6 +15,7 @@ type ActiveDeliveryRow = {
   total: string;
   delivery_tracking_token: string | null;
   delivery_driver_code: string | null;
+  delivery_driver_id: string | null;
   delivery_started_at: string | null;
   delivery_last_latitude: string | null;
   delivery_last_longitude: string | null;
@@ -27,6 +28,12 @@ export async function GET(request: Request) {
   if (!session) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   }
+  if (!isActiveDeliveryAccess(session)) {
+    return NextResponse.json(
+      { error: 'Seu acesso esta desativado. Voce pode consultar apenas seus totais.' },
+      { status: 403 },
+    );
+  }
 
   const result = await query<ActiveDeliveryRow>(
     `SELECT id,
@@ -37,6 +44,7 @@ export async function GET(request: Request) {
             total::text,
             delivery_tracking_token,
             delivery_driver_code,
+            delivery_driver_id,
             delivery_started_at,
             delivery_last_latitude::text,
             delivery_last_longitude::text,
@@ -46,11 +54,12 @@ export async function GET(request: Request) {
      WHERE tenant_id = $1
        AND type = 'delivery'
        AND status IN ('processing', 'delivering')
+       AND ($2::text IS NULL OR delivery_driver_id IS NULL OR delivery_driver_id = $2)
      ORDER BY
        CASE WHEN status = 'delivering' THEN 0 ELSE 1 END,
        COALESCE(delivery_started_at, updated_at) DESC
      LIMIT 100`,
-    [session.tenantId],
+    [session.tenantId, session.source === 'driver' ? session.driverId : null],
   );
 
   return NextResponse.json({

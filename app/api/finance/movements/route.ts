@@ -129,7 +129,13 @@ const ledgerCte = `
       'receivable'::text AS source,
       ('Recebivel #' || substring(r.order_id from 1 for 8))::text AS title,
       COALESCE(pm.name, 'Recebimento futuro')::text AS description,
-      r.status,
+      CASE
+        WHEN r.status = 'pending'
+         AND pm.id IS NOT NULL
+         AND COALESCE(pm.settlement_days, 0) <= 0
+        THEN 'received'
+        ELSE r.status
+      END AS status,
       r.net_amount AS amount,
       r.gross_amount AS gross_amount,
       0::numeric AS discount_amount,

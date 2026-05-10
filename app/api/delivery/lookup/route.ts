@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { query } from '@/lib/db';
-import { getValidatedDeliveryAccess } from '@/lib/delivery-auth';
+import { getValidatedDeliveryAccess, isActiveDeliveryAccess } from '@/lib/delivery-auth';
 import { ensureOrderDeliveryIdentifiers, normalizeDeliveryCode, buildTrackingUrl } from '@/lib/delivery-tracking';
 
 export const dynamic = 'force-dynamic';
@@ -19,6 +19,7 @@ type DeliveryOrderRow = {
   type: string;
   delivery_tracking_token: string | null;
   delivery_driver_code: string | null;
+  delivery_driver_id: string | null;
   delivery_started_at: string | null;
   delivery_finished_at: string | null;
   created_at: string;
@@ -33,6 +34,66 @@ type DeliveryItemRow = {
 
 function text(value: unknown) {
   return String(value ?? '').trim();
+}
+
+function optionText(option: unknown) {
+  if (typeof option === 'string') return option.trim();
+  if (!option || typeof option !== 'object') return '';
+  const payload = option as Record<string, unknown>;
+  return text(payload.name) || text(payload.label) || text(payload.title);
+}
+
+function formatDeliveryItemNotes(raw: string | null) {
+  const clean = text(raw);
+  if (!clean || clean === 'null' || clean === '{}' || clean === '[]') return '';
+
+  let parsed: unknown = clean;
+  try {
+    parsed = JSON.parse(clean);
+  } catch {
+    return clean;
+  }
+
+  if (!parsed || parsed === 'null') return '';
+  if (typeof parsed === 'string') return text(parsed);
+  if (Array.isArray(parsed)) {
+    return parsed.map(optionText).filter(Boolean).join(' | ');
+  }
+  if (typeof parsed !== 'object') return '';
+
+  const payload = parsed as Record<string, unknown>;
+  const lines: string[] = [];
+  const observation = text(payload.notes) || text(payload.observacao);
+  if (observation) lines.push(`Obs.: ${observation}`);
+
+  const pizza = payload.pizza ?? payload.sabor;
+  if (typeof pizza === 'string' && pizza.trim()) {
+    lines.push(`Sabor: ${pizza.trim()}`);
+  } else if (pizza && typeof pizza === 'object') {
+    const pizzaPayload = pizza as Record<string, unknown>;
+    const sizeLabel = text(pizzaPayload.sizeLabel);
+    if (sizeLabel) lines.push(`Tam: ${sizeLabel}`);
+
+    const flavors = Array.isArray(pizzaPayload.flavors) ? pizzaPayload.flavors.map(optionText).filter(Boolean) : [];
+    if (flavors.length) lines.push(`Sabores: ${flavors.join(' / ')}`);
+
+    const border = pizzaPayload.border && typeof pizzaPayload.border === 'object' ? pizzaPayload.border as Record<string, unknown> : null;
+    const dough = pizzaPayload.dough && typeof pizzaPayload.dough === 'object' ? pizzaPayload.dough as Record<string, unknown> : null;
+    const gift = pizzaPayload.gift && typeof pizzaPayload.gift === 'object' ? pizzaPayload.gift as Record<string, unknown> : null;
+    if (border && text(border.label)) lines.push(`Borda: ${text(border.label)}`);
+    if (dough && text(dough.label)) lines.push(`Massa: ${text(dough.label)}`);
+    if (gift && text(gift.name)) lines.push(`Brinde: ${text(gift.name)}`);
+  }
+
+  const optionsRaw = Array.isArray(payload.options)
+    ? payload.options
+    : Array.isArray(payload.opcoes)
+      ? payload.opcoes
+      : [];
+  const options = optionsRaw.map(optionText).filter(Boolean);
+  if (options.length) lines.push(`Opcoes: ${options.join(', ')}`);
+
+  return lines.join(' | ');
 }
 
 function paymentLabel(row: Pick<DeliveryOrderRow, 'payment_method' | 'payment_method_names'>) {
@@ -91,7 +152,7 @@ function serializeOrder(row: DeliveryOrderRow, items: DeliveryItemRow[]) {
     items: items.map((item) => ({
       productName: item.product_name,
       quantity: Number(item.quantity || 0),
-      notes: item.notes || '',
+      notes: formatDeliveryItemNotes(item.notes),
     })),
   };
 }
@@ -100,6 +161,12 @@ export async function POST(request: Request) {
   const session = await getValidatedDeliveryAccess(request);
   if (!session) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+  }
+  if (!isActiveDeliveryAccess(session)) {
+    return NextResponse.json(
+      { error: 'Seu acesso esta desativado. Voce pode consultar apenas seus totais.' },
+      { status: 403 },
+    );
   }
 
   const body = await request.json().catch(() => ({})) as { code?: unknown };
@@ -129,6 +196,7 @@ export async function POST(request: Request) {
             o.type,
             o.delivery_tracking_token,
             o.delivery_driver_code,
+            o.delivery_driver_id,
             o.delivery_started_at,
             o.delivery_finished_at,
             o.created_at,
@@ -159,6 +227,9 @@ export async function POST(request: Request) {
   const row = result.rows[0];
   if (row.status === 'cancelled' || row.status === 'completed') {
     return NextResponse.json({ error: 'Este pedido ja esta finalizado ou cancelado.' }, { status: 409 });
+  }
+  if (session.source === 'driver' && row.delivery_driver_id && row.delivery_driver_id !== session.driverId) {
+    return NextResponse.json({ error: 'Este pedido ja esta com outro entregador.' }, { status: 409 });
   }
 
   if (!row.delivery_tracking_token || !row.delivery_driver_code) {

@@ -21,7 +21,7 @@ type NavGroupItem = {
 const navItems: Array<NavLinkItem | NavGroupItem> = [
   { name: 'Dashboard', icon: LayoutDashboard, href: '/' },
   { name: 'Pedidos', icon: ShoppingBag, href: '/pedidos' },
-  { name: 'Entregador', icon: Bike, href: '/entregador' },
+  { name: 'Entregadores', icon: Bike, href: '/entregadores' },
   { name: 'PDV / Caixa', icon: Monitor, href: '/pdv' },
   { name: 'Relatorios', icon: BarChart3, href: '/relatorios' },
   {

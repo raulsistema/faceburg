@@ -5,7 +5,7 @@ import { ensureFinanceSchema } from '@/lib/finance-schema';
 import { parseMoneyInput } from '@/lib/finance-utils';
 import { getValidatedTenantSession } from '@/lib/tenant-auth';
 
-const allowedTypes = new Set(['sale', 'withdrawal', 'supply', 'adjustment', 'refund']);
+const allowedTypes = new Set(['withdrawal', 'supply', 'adjustment', 'refund']);
 
 export async function POST(request: Request) {
   await ensureFinanceSchema();

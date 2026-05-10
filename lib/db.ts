@@ -168,6 +168,7 @@ async function initializeDb() {
           delivery_last_longitude NUMERIC(10,7),
           delivery_location_updated_at TIMESTAMPTZ,
           delivery_route_synced_at TIMESTAMPTZ,
+          delivery_driver_id TEXT,
           order_sequence_number INTEGER,
           created_at TIMESTAMPTZ DEFAULT NOW(),
           updated_at TIMESTAMPTZ DEFAULT NOW()
@@ -247,7 +248,10 @@ async function initializeDb() {
           name TEXT NOT NULL,
           phone TEXT,
           pin_hash TEXT,
+          status TEXT NOT NULL DEFAULT 'active',
           active BOOLEAN NOT NULL DEFAULT TRUE,
+          last_login_at TIMESTAMPTZ,
+          dismissed_at TIMESTAMPTZ,
           created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
           updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         );
@@ -987,9 +991,58 @@ async function initializeDb() {
 
           IF NOT EXISTS (
             SELECT 1 FROM information_schema.columns
+            WHERE table_name = 'orders' AND column_name = 'delivery_driver_id'
+          ) THEN
+            ALTER TABLE orders ADD COLUMN delivery_driver_id TEXT;
+          END IF;
+
+          IF NOT EXISTS (
+            SELECT 1 FROM information_schema.columns
             WHERE table_name = 'orders' AND column_name = 'order_sequence_number'
           ) THEN
             ALTER TABLE orders ADD COLUMN order_sequence_number INTEGER;
+          END IF;
+
+          IF NOT EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_name = 'delivery_drivers' AND column_name = 'status'
+          ) THEN
+            ALTER TABLE delivery_drivers ADD COLUMN status TEXT;
+          END IF;
+
+          UPDATE delivery_drivers
+          SET status = CASE WHEN active THEN 'active' ELSE 'inactive' END
+          WHERE status IS NULL OR status NOT IN ('active', 'inactive', 'dismissed');
+
+          ALTER TABLE delivery_drivers ALTER COLUMN status SET DEFAULT 'active';
+          ALTER TABLE delivery_drivers ALTER COLUMN status SET NOT NULL;
+
+          UPDATE delivery_drivers
+          SET active = (status = 'active')
+          WHERE active IS DISTINCT FROM (status = 'active');
+
+          IF NOT EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_name = 'delivery_drivers' AND column_name = 'last_login_at'
+          ) THEN
+            ALTER TABLE delivery_drivers ADD COLUMN last_login_at TIMESTAMPTZ;
+          END IF;
+
+          IF NOT EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_name = 'delivery_drivers' AND column_name = 'dismissed_at'
+          ) THEN
+            ALTER TABLE delivery_drivers ADD COLUMN dismissed_at TIMESTAMPTZ;
+          END IF;
+
+          IF NOT EXISTS (
+            SELECT 1
+            FROM pg_constraint
+            WHERE conname = 'chk_delivery_drivers_status'
+          ) THEN
+            ALTER TABLE delivery_drivers
+              ADD CONSTRAINT chk_delivery_drivers_status
+              CHECK (status IN ('active', 'inactive', 'dismissed'));
           END IF;
 
           IF NOT EXISTS (
@@ -1302,8 +1355,40 @@ async function initializeDb() {
       `);
 
       await client.query(`
+        DO $$
+        BEGIN
+          IF NOT EXISTS (
+            SELECT 1
+            FROM pg_indexes
+            WHERE schemaname = current_schema()
+              AND indexname = 'uq_payment_methods_tenant_name_normalized'
+          ) AND NOT EXISTS (
+            SELECT tenant_id, lower(trim(name))
+            FROM payment_methods
+            GROUP BY tenant_id, lower(trim(name))
+            HAVING COUNT(*) > 1
+          ) THEN
+            EXECUTE 'CREATE UNIQUE INDEX uq_payment_methods_tenant_name_normalized
+              ON payment_methods(tenant_id, lower(trim(name)))';
+          END IF;
+        END
+        $$;
+      `);
+
+      await client.query(`
         CREATE INDEX IF NOT EXISTS idx_delivery_drivers_tenant_active
           ON delivery_drivers(tenant_id, active, name);
+      `);
+
+      await client.query(`
+        CREATE INDEX IF NOT EXISTS idx_delivery_drivers_tenant_status
+          ON delivery_drivers(tenant_id, status, name);
+      `);
+
+      await client.query(`
+        CREATE INDEX IF NOT EXISTS idx_orders_tenant_delivery_driver_id
+          ON orders(tenant_id, delivery_driver_id, status, updated_at DESC)
+          WHERE delivery_driver_id IS NOT NULL;
       `);
 
       await client.query(`

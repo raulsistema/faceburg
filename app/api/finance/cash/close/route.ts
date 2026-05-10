@@ -3,10 +3,12 @@ import pool from '@/lib/db';
 import { getCashSessionFinanceSummary } from '@/lib/cash-summary';
 import { ensureFinanceSchema } from '@/lib/finance-schema';
 import { parseMoneyInput } from '@/lib/finance-utils';
+import { ensureStoreHoursSchema } from '@/lib/store-hours';
 import { getValidatedTenantSession } from '@/lib/tenant-auth';
 
 export async function POST(request: Request) {
   await ensureFinanceSchema();
+  await ensureStoreHoursSchema();
   const session = await getValidatedTenantSession();
   if (!session) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 
@@ -73,14 +75,18 @@ export async function POST(request: Request) {
 
     await client.query(
       `UPDATE tenants
-       SET store_open = FALSE,
-           updated_at = NOW()
+       SET store_open = FALSE
        WHERE id = $1`,
       [session.tenantId],
     );
 
     await client.query('COMMIT');
-    return NextResponse.json({ cashSession: result.rows[0], storeOpen: false });
+    return NextResponse.json({
+      cashSession: result.rows[0],
+      storeOpen: false,
+      effectiveStoreOpen: false,
+      deliveryDisabled: true,
+    });
   } catch (error) {
     await client.query('ROLLBACK').catch(() => undefined);
     const message = error instanceof Error ? error.message : 'Falha ao fechar caixa.';

@@ -444,7 +444,6 @@ export default function PDVPage() {
     }
 
     const streetQuery = quickForm.street.trim();
-    const cityQuery = quickForm.city.trim();
     const stateQuery = quickForm.state.trim().toUpperCase();
 
     if (streetQuery.length < 2) {
@@ -458,7 +457,6 @@ export default function PDVPage() {
       setQuickStreetLoading(true);
       try {
         const params = new URLSearchParams({ street: streetQuery });
-        if (cityQuery) params.set('city', cityQuery);
         if (stateQuery) params.set('state', stateQuery);
         const response = await fetch(`/api/lookup/address?${params.toString()}`, { cache: 'no-store' });
         const data = (await response.json()) as { suggestions?: QuickStreetSuggestion[]; effectiveState?: string };
@@ -478,7 +476,7 @@ export default function PDVPage() {
       active = false;
       clearTimeout(timer);
     };
-  }, [quickForm.city, quickForm.state, quickForm.street, quickModalOpen]);
+  }, [quickForm.state, quickForm.street, quickModalOpen]);
 
   useEffect(() => {
     const query = customerName.trim();
@@ -1974,7 +1972,7 @@ export default function PDVPage() {
                           </button>
                         ))
                       ) : (
-                        <p className="px-3 py-2 text-xs text-slate-500">Nenhuma rua encontrada ainda. Continue digitando ou informe cidade/UF para ampliar a busca.</p>
+                        <p className="px-3 py-2 text-xs text-slate-500">Nenhuma rua encontrada ainda. Continue digitando ou informe a UF para ampliar a busca.</p>
                       )}
                     </div>
                   </div>
@@ -1983,7 +1981,7 @@ export default function PDVPage() {
                   {quickForm.street.trim().length < 2
                     ? 'Digite pelo menos 2 letras da rua para abrir as sugestoes.'
                     : quickStreetScopeState
-                      ? `As ruas aparecem enquanto voce digita. Busca filtrada pela UF do emitente (${quickStreetScopeState}).`
+                      ? `As ruas aparecem enquanto voce digita. Busca por UF (${quickStreetScopeState}), sem prender no municipio.`
                       : 'As ruas aparecem enquanto voce digita. Se a UF do emitente estiver configurada, a busca usa ela automaticamente.'}
                 </p>
               </div>

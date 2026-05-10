@@ -36,6 +36,7 @@ const DASHBOARD_WARMUP_ROUTES = [
   '/',
   '/pedidos',
   '/pdv',
+  '/entregadores',
   '/cardapio-admin',
   '/settings',
   '/financeiro/caixas',

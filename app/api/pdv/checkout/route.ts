@@ -347,8 +347,12 @@ export async function POST(request: Request) {
 
       await client.query(
         `INSERT INTO receivables
-         (id, tenant_id, order_id, payment_method_id, gross_amount, fee_amount, net_amount, due_date, status)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, (NOW()::date + $8::int), 'pending')`,
+         (id, tenant_id, order_id, payment_method_id, gross_amount, fee_amount, net_amount, due_date, status, received_at)
+         VALUES (
+           $1, $2, $3, $4, $5, $6, $7, (NOW()::date + $8::int),
+           CASE WHEN $8::int <= 0 THEN 'received' ELSE 'pending' END,
+           CASE WHEN $8::int <= 0 THEN NOW() ELSE NULL END
+         )`,
         [
           randomUUID(),
           session.tenantId,
