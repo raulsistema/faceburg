@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { NextResponse } from 'next/server';
 import pool from '@/lib/db';
 import { ensureFinanceSchema } from '@/lib/finance-schema';
+import { getActiveLocalAutomationLease } from '@/lib/local-automation';
 import { getValidatedTenantSession } from '@/lib/tenant-auth';
 import { enqueueOrderPrintJob } from '@/lib/printing';
 import { notifyOrderEvent } from '@/lib/realtime';
@@ -409,8 +410,10 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
 
     await client.query('COMMIT');
 
+    const localAutomationLease = await getActiveLocalAutomationLease(session.tenantId).catch(() => null);
+    const localPrintActive = Boolean(localAutomationLease?.capabilities.print);
     await Promise.allSettled([
-      enqueueOrderPrintJob(session.tenantId, orderId, 'new_order'),
+      localPrintActive ? Promise.resolve(false) : enqueueOrderPrintJob(session.tenantId, orderId, 'new_order'),
       notifyOrderEvent(session.tenantId, 'created', orderId),
     ]);
 

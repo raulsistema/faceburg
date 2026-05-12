@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { query } from '@/lib/db';
+import { claimLocalAutomationDispatch } from '@/lib/local-automation';
 import { getValidatedTenantSession } from '@/lib/tenant-auth';
 import { enqueueOrderPrintJob, prepareOrderPrintJobs } from '@/lib/printing';
 import { enqueueOrderWhatsappJob, prepareOrderWhatsappJob } from '@/lib/whatsapp';
@@ -24,6 +25,8 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
     printEventTypes?: string[];
     whatsappEventType?: string;
     preferLocalAgent?: boolean;
+    localAutomationOwnerId?: string;
+    localAutomationOwnerLabel?: string;
   };
 
   const printEventTypes = (Array.isArray(body.printEventTypes) ? body.printEventTypes : [body.printEventType])
@@ -55,17 +58,38 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
       printJobs?: Awaited<ReturnType<typeof prepareOrderPrintJobs>>;
       whatsappJobs?: Array<NonNullable<Awaited<ReturnType<typeof prepareOrderWhatsappJob>>>>;
       errors?: string[];
+      skipped?: string[];
     } = {};
     const errors: string[] = [];
+    const skipped: string[] = [];
+    const localAutomationOwnerId = String(body.localAutomationOwnerId || '').trim();
+    const localAutomationOwnerLabel = String(body.localAutomationOwnerLabel || '').trim();
 
     if (shouldQueuePrint) {
       try {
-        const printJobs = await Promise.all(printEventTypes.map((eventType) =>
-          prepareOrderPrintJobs(session.tenantId, id, eventType, undefined, {
+        const preparedPrintJobs: Awaited<ReturnType<typeof prepareOrderPrintJobs>> = [];
+        for (const eventType of printEventTypes) {
+          if (localAutomationOwnerId) {
+            const claimed = await claimLocalAutomationDispatch({
+              tenantId: session.tenantId,
+              orderId: id,
+              channel: 'print',
+              eventType,
+              ownerId: localAutomationOwnerId,
+              ownerLabel: localAutomationOwnerLabel,
+            });
+            if (!claimed) {
+              skipped.push(`print:${eventType}`);
+              continue;
+            }
+          }
+
+          const printJobs = await prepareOrderPrintJobs(session.tenantId, id, eventType, undefined, {
             ignoreAgentEnabled: true,
-          })
-        ));
-        localDispatch.printJobs = printJobs.flat();
+          });
+          preparedPrintJobs.push(...printJobs);
+        }
+        localDispatch.printJobs = preparedPrintJobs;
       } catch (error) {
         console.error('prepare local print dispatch failed', error);
         errors.push('print');
@@ -75,14 +99,38 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
 
     if (shouldQueueWhatsapp) {
       try {
-        const whatsappJob = await prepareOrderWhatsappJob(
-          session.tenantId,
-          id,
-          whatsappEventType as 'new_order' | 'status_update',
-          undefined,
-          { requireActiveHub: false },
-        );
-        localDispatch.whatsappJobs = whatsappJob ? [whatsappJob] : [];
+        if (localAutomationOwnerId) {
+          const claimed = await claimLocalAutomationDispatch({
+            tenantId: session.tenantId,
+            orderId: id,
+            channel: 'whatsapp',
+            eventType: whatsappEventType,
+            ownerId: localAutomationOwnerId,
+            ownerLabel: localAutomationOwnerLabel,
+          });
+          if (!claimed) {
+            skipped.push(`whatsapp:${whatsappEventType}`);
+            localDispatch.whatsappJobs = [];
+          } else {
+            const whatsappJob = await prepareOrderWhatsappJob(
+              session.tenantId,
+              id,
+              whatsappEventType as 'new_order' | 'status_update',
+              undefined,
+              { requireActiveHub: false },
+            );
+            localDispatch.whatsappJobs = whatsappJob ? [whatsappJob] : [];
+          }
+        } else {
+          const whatsappJob = await prepareOrderWhatsappJob(
+            session.tenantId,
+            id,
+            whatsappEventType as 'new_order' | 'status_update',
+            undefined,
+            { requireActiveHub: false },
+          );
+          localDispatch.whatsappJobs = whatsappJob ? [whatsappJob] : [];
+        }
       } catch (error) {
         console.error('prepare local whatsapp dispatch failed', error);
         errors.push('whatsapp');
@@ -92,6 +140,9 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
 
     if (errors.length) {
       localDispatch.errors = errors;
+    }
+    if (skipped.length) {
+      localDispatch.skipped = skipped;
     }
 
     return NextResponse.json({ ok: true, delivery: 'local', localDispatch });

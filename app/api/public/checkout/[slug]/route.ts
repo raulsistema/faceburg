@@ -5,6 +5,7 @@ import pool, { query } from '@/lib/db';
 import { ensureOrderDeliveryIdentifiers } from '@/lib/delivery-tracking';
 import { quoteDeliveryFee } from '@/lib/delivery-fee';
 import { parseMoneyInput } from '@/lib/finance-utils';
+import { getActiveLocalAutomationLease } from '@/lib/local-automation';
 import { getOrderAutomationConfig, initialOrderStatusForAutomation } from '@/lib/order-automation';
 import { assignOrderSequenceNumber, ensureOrderSequenceSchema } from '@/lib/order-sequence';
 import { enqueueOrderPrintJob } from '@/lib/printing';
@@ -1070,13 +1071,17 @@ export async function POST(request: Request, { params }: { params: Promise<{ slu
 
     await dbClient.query('COMMIT');
 
+    const localAutomationLease = await getActiveLocalAutomationLease(tenant.id).catch(() => null);
+    const localPrintActive = Boolean(localAutomationLease?.capabilities.print);
+    const localWhatsappActive = Boolean(localAutomationLease?.capabilities.whatsapp);
+    const localAutomationActive = localPrintActive || localWhatsappActive;
     const orderEventDispatch = await Promise.allSettled([
       notifyOrderEvent(tenant.id, 'created', orderId),
-      enqueueOrderPrintJob(tenant.id, orderId, 'new_order'),
-      initialOrderStatus === 'processing'
+      localPrintActive ? Promise.resolve(false) : enqueueOrderPrintJob(tenant.id, orderId, 'new_order'),
+      !localPrintActive && initialOrderStatus === 'processing'
         ? enqueueOrderPrintJob(tenant.id, orderId, 'status_update')
         : Promise.resolve(false),
-      enqueueOrderWhatsappJob(tenant.id, orderId, 'new_order'),
+      localWhatsappActive ? Promise.resolve(false) : enqueueOrderWhatsappJob(tenant.id, orderId, 'new_order'),
     ]);
     const realtimeNotified = orderEventDispatch[0]?.status === 'fulfilled';
     const printQueued =
@@ -1107,7 +1112,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ slu
         kitchenPrintQueued,
         whatsappQueued,
         realtimeNotified,
-        localAutomationRequested: realtimeNotified,
+        localAutomationRequested: localAutomationActive,
       },
     });
   } catch (error) {

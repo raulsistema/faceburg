@@ -187,7 +187,6 @@ export default function DashboardShell({
 
   return (
     <div className="flex h-dvh overflow-hidden bg-slate-50">
-      <LocalAutomationBridge enabled={Boolean(data?.authenticated)} tenantId={data?.tenant?.id || ''} />
       <Sidebar mobileOpen={mobileMenuOpen} overlayMode={overlaySidebar} onCloseMobile={() => setMobileMenuOpen(false)} />
       {mobileMenuOpen ? (
         <button
@@ -216,6 +215,7 @@ export default function DashboardShell({
             </div>
           </div>
           <div className="flex items-center gap-5">
+            <LocalAutomationBridge enabled={Boolean(data?.authenticated)} tenantId={data?.tenant?.id || ''} />
             <div className="text-right hidden sm:block">
               <div className="text-xs font-bold text-slate-900">{data?.user?.name || 'Usuario'}</div>
               <div className="text-[10px] text-slate-500 font-medium">{data?.user?.email || ''}</div>

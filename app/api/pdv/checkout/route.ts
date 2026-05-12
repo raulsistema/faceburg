@@ -2,8 +2,10 @@ import { randomUUID } from 'node:crypto';
 import { NextResponse } from 'next/server';
 import pool, { query } from '@/lib/db';
 import { ensureFinanceSchema } from '@/lib/finance-schema';
+import { getActiveLocalAutomationLease } from '@/lib/local-automation';
 import { getValidatedTenantSession } from '@/lib/tenant-auth';
 import { enqueueOrderPrintJob } from '@/lib/printing';
+import { notifyOrderEvent } from '@/lib/realtime';
 import { getOpenCashSession } from '@/lib/cash-register';
 import { isCashPaymentType } from '@/lib/cash-summary';
 import { parseMoneyInput } from '@/lib/finance-utils';
@@ -368,11 +370,12 @@ export async function POST(request: Request) {
 
     await client.query('COMMIT');
 
-    try {
-      await enqueueOrderPrintJob(session.tenantId, orderId, 'new_order');
-    } catch {
-      // Nao bloqueia venda do PDV por falha de impressao.
-    }
+    const localAutomationLease = await getActiveLocalAutomationLease(session.tenantId).catch(() => null);
+    const localPrintActive = Boolean(localAutomationLease?.capabilities.print);
+    await Promise.allSettled([
+      notifyOrderEvent(session.tenantId, 'created', orderId),
+      localPrintActive ? Promise.resolve(false) : enqueueOrderPrintJob(session.tenantId, orderId, 'new_order'),
+    ]);
 
     return NextResponse.json({
       ok: true,

@@ -34,9 +34,19 @@ type WhatsappConfigResponse = {
 
 type LocalAgentHealth = {
   online?: boolean;
+  terminalId?: string;
+  printerName?: string;
   whatsapp?: {
     status?: string;
   };
+};
+
+type LocalAgentProbe = {
+  available: boolean;
+  whatsappReady: boolean;
+  whatsappStatus: string;
+  printerName: string;
+  terminalId: string;
 };
 
 type LocalPrintJob = {
@@ -63,6 +73,7 @@ type LocalDispatchPayload = {
   printJobs?: LocalPrintJob[];
   whatsappJobs?: LocalWhatsappJob[];
   errors?: string[];
+  skipped?: string[];
 };
 
 type DispatchFallbackResponse = {
@@ -76,6 +87,19 @@ type OrderEventPayload = {
   event?: string;
   orderId?: string;
   ts?: number;
+};
+
+type LocalAutomationLease = {
+  ownerId: string;
+  ownerLabel: string;
+  leaseUntil: string;
+  isOwner: boolean;
+  active: boolean;
+};
+
+type LocalAutomationLeaseResponse = {
+  ok?: boolean;
+  lease?: LocalAutomationLease | null;
 };
 
 type NavigatorWithLocks = Navigator & {
@@ -98,8 +122,8 @@ const FALLBACK_SCAN_INITIAL_MS = 30_000;
 const FALLBACK_SCAN_MAX_MS = 5 * 60 * 1000;
 const LEADER_HEARTBEAT_MS = 2500;
 const LEADER_EXPIRES_MS = 9000;
-const PRINT_HUB_ACTIVE_MS = 5 * 60 * 1000;
-const WHATSAPP_HUB_ACTIVE_MS = 2 * 60 * 1000;
+const SERVER_LEASE_RENEW_MS = 5000;
+const SERVER_LEASE_SECONDS = 20;
 
 function makeTabId() {
   if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) {
@@ -162,25 +186,73 @@ async function requestLocalAgent<T>(path: string, init: RequestInit = {}, timeou
   const controller = new AbortController();
   const timeoutId = window.setTimeout(() => controller.abort(), timeoutMs);
   try {
-    return await fetchJson<T>(`${LOCAL_AGENT_URL}${path}`, {
+    const response = await fetch(`${LOCAL_AGENT_URL}${path}`, {
       ...init,
       signal: controller.signal,
     });
+    const data = (await response.json().catch(() => ({}))) as T & { error?: string };
+    if (!response.ok) {
+      throw new Error(data.error || `HTTP ${response.status}`);
+    }
+    return data;
   } finally {
     window.clearTimeout(timeoutId);
   }
 }
 
-async function probeLocalAgent() {
+async function probeLocalAgent(): Promise<LocalAgentProbe> {
   try {
     const health = await requestLocalAgent<LocalAgentHealth>('/api/health', {}, 900);
+    const whatsappStatus = String(health.whatsapp?.status || 'disconnected');
     return {
       available: Boolean(health.online),
-      whatsappReady: String(health.whatsapp?.status || '') === 'ready',
+      whatsappReady: whatsappStatus === 'ready',
+      whatsappStatus,
+      printerName: String(health.printerName || ''),
+      terminalId: String(health.terminalId || ''),
     };
   } catch {
-    return { available: false, whatsappReady: false };
+    return {
+      available: false,
+      whatsappReady: false,
+      whatsappStatus: 'disconnected',
+      printerName: '',
+      terminalId: '',
+    };
   }
+}
+
+function buildOwnerLabel(localAgent: LocalAgentProbe) {
+  const terminal = localAgent.terminalId.trim();
+  const printer = localAgent.printerName.trim();
+  if (terminal && printer) return `${terminal} - ${printer}`;
+  if (terminal) return terminal;
+  if (printer) return printer;
+  return 'Computador da loja';
+}
+
+async function claimServerLease(ownerId: string, localAgent: LocalAgentProbe) {
+  return fetchJson<LocalAutomationLeaseResponse>('/api/local-automation/lease', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      ownerId,
+      ownerLabel: buildOwnerLabel(localAgent),
+      leaseSeconds: SERVER_LEASE_SECONDS,
+      capabilities: {
+        print: localAgent.available,
+        whatsapp: localAgent.whatsappReady,
+      },
+    }),
+  });
+}
+
+async function releaseServerLease(ownerId: string) {
+  return fetchJson<{ ok?: boolean }>('/api/local-automation/lease', {
+    method: 'DELETE',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ ownerId }),
+  });
 }
 
 async function queueOrderDispatchFallback(
@@ -231,6 +303,7 @@ async function dispatchLocalJobs(
   const printJobs = Array.isArray(localDispatch?.printJobs) ? localDispatch.printJobs : [];
   const whatsappJobs = Array.isArray(localDispatch?.whatsappJobs) ? localDispatch.whatsappJobs : [];
   const dispatchErrors = Array.isArray(localDispatch?.errors) ? localDispatch.errors : [];
+  const dispatchSkipped = Array.isArray(localDispatch?.skipped) ? localDispatch.skipped : [];
   let printFailed = false;
   let whatsappFailed = false;
 
@@ -239,6 +312,8 @@ async function dispatchLocalJobs(
       if (dispatchErrors.includes('print')) {
         printFailed = true;
         failures.push('impressao');
+      } else if (dispatchSkipped.some((entry) => entry.startsWith('print:'))) {
+        printFailed = false;
       } else {
         printFailed = true;
         failures.push('impressao (nenhum recibo preparado)');
@@ -258,6 +333,8 @@ async function dispatchLocalJobs(
       if (dispatchErrors.includes('whatsapp')) {
         whatsappFailed = true;
         failures.push('WhatsApp');
+      } else if (dispatchSkipped.some((entry) => entry.startsWith('whatsapp:'))) {
+        whatsappFailed = false;
       } else {
         whatsappFailed = true;
         failures.push('WhatsApp (nenhuma mensagem preparada)');
@@ -289,29 +366,6 @@ function isRecentOpenOrder(order: { status: OrderStatus; createdAt?: string }) {
   return Date.now() - createdAt <= NEW_ORDER_SCAN_WINDOW_MS;
 }
 
-function isRecentHeartbeat(lastSeenAt: string | null | undefined, maxAgeMs: number) {
-  if (!lastSeenAt) return false;
-  const parsed = Date.parse(lastSeenAt);
-  if (Number.isNaN(parsed)) return false;
-  return Date.now() - parsed <= maxAgeMs;
-}
-
-function isServerPrintHubActive(config: PrintConfigResponse) {
-  return (
-    config.enabled === true &&
-    ['ready', 'connecting'].includes(String(config.connectionStatus || '')) &&
-    isRecentHeartbeat(config.lastSeenAt, PRINT_HUB_ACTIVE_MS)
-  );
-}
-
-function isServerWhatsappHubActive(config: WhatsappConfigResponse) {
-  return (
-    config.enabled === true &&
-    String(config.sessionStatus || '') === 'ready' &&
-    isRecentHeartbeat(config.lastSeenAt, WHATSAPP_HUB_ACTIVE_MS)
-  );
-}
-
 function parseLeaderRecord() {
   try {
     return JSON.parse(window.localStorage.getItem(LEADER_STORAGE_KEY) || '{}') as {
@@ -323,9 +377,8 @@ function parseLeaderRecord() {
   }
 }
 
-function useAutomationLeadership(enabled: boolean, tenantId: string) {
+function useAutomationLeadership(enabled: boolean, tenantId: string, tabId: string) {
   const [leader, setLeader] = useState(false);
-  const tabIdRef = useRef(makeTabId());
 
   useEffect(() => {
     if (!enabled || !tenantId) {
@@ -336,7 +389,6 @@ function useAutomationLeadership(enabled: boolean, tenantId: string) {
     let disposed = false;
     let releaseLock: (() => void) | null = null;
     const navigatorWithLocks = navigator as NavigatorWithLocks;
-    const tabId = tabIdRef.current;
 
     if (navigatorWithLocks.locks?.request) {
       const controller = new AbortController();
@@ -401,9 +453,75 @@ function useAutomationLeadership(enabled: boolean, tenantId: string) {
       }
       setLeader(false);
     };
-  }, [enabled, tenantId]);
+  }, [enabled, tabId, tenantId]);
 
   return leader;
+}
+
+function useServerAutomationLease(enabled: boolean, tenantId: string, localLeader: boolean, ownerId: string) {
+  const [lease, setLease] = useState<LocalAutomationLease | null>(null);
+  const [localAgent, setLocalAgent] = useState<LocalAgentProbe | null>(null);
+  const [checking, setChecking] = useState(false);
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    if (!enabled || !tenantId || !localLeader) {
+      setLease(null);
+      setChecking(false);
+      return;
+    }
+
+    let disposed = false;
+    let intervalId: number | null = null;
+
+    async function renew() {
+      if (disposed) return;
+      setChecking(true);
+      try {
+        const probedAgent = await probeLocalAgent();
+        if (disposed) return;
+        setLocalAgent(probedAgent);
+
+        if (!probedAgent.available) {
+          setLease(null);
+          setError('Agente local offline');
+          void releaseServerLease(ownerId).catch(() => undefined);
+          return;
+        }
+
+        const response = await claimServerLease(ownerId, probedAgent);
+        if (disposed) return;
+        setLease(response.lease || null);
+        setError('');
+      } catch (leaseError) {
+        if (disposed) return;
+        setLease(null);
+        setError(errorMessage(leaseError));
+      } finally {
+        if (!disposed) setChecking(false);
+      }
+    }
+
+    void renew();
+    intervalId = window.setInterval(() => {
+      void renew();
+    }, SERVER_LEASE_RENEW_MS);
+
+    return () => {
+      disposed = true;
+      if (intervalId) window.clearInterval(intervalId);
+      setLease(null);
+      void releaseServerLease(ownerId).catch(() => undefined);
+    };
+  }, [enabled, localLeader, ownerId, tenantId]);
+
+  return {
+    lease,
+    localAgent,
+    checking,
+    error,
+    isServerLeader: Boolean(localLeader && lease?.active && lease.isOwner),
+  };
 }
 
 export default function LocalAutomationBridge({
@@ -413,11 +531,19 @@ export default function LocalAutomationBridge({
   enabled: boolean;
   tenantId: string;
 }) {
-  const isLeader = useAutomationLeadership(enabled, tenantId);
+  const ownerIdRef = useRef(makeTabId());
+  const isLocalTabLeader = useAutomationLeadership(enabled, tenantId, ownerIdRef.current);
+  const {
+    lease,
+    localAgent,
+    checking,
+    error: leaseError,
+    isServerLeader,
+  } = useServerAutomationLease(enabled, tenantId, isLocalTabLeader, ownerIdRef.current);
   const knownOrderIdsRef = useRef<Set<string>>(new Set());
 
   useEffect(() => {
-    if (!enabled || !tenantId || !isLeader) return;
+    if (!enabled || !tenantId || !isServerLeader) return;
 
     let disposed = false;
     let eventSource: EventSource | null = null;
@@ -475,14 +601,12 @@ export default function LocalAutomationBridge({
         const wantsWhatsapp = Boolean(whatsappConfig.enabled);
         if (!wantsPrint && !wantsWhatsapp) return;
 
-        const serverPrintHubActive = isServerPrintHubActive(printConfig);
-        const serverWhatsappHubActive = isServerWhatsappHubActive(whatsappConfig);
-        const canUseLocalPrint = Boolean(printConfig.enabled && localAgent.available && !serverPrintHubActive);
-        const canUseLocalWhatsapp = Boolean(whatsappConfig.enabled && localAgent.whatsappReady && !serverWhatsappHubActive);
-        const shouldQueueFallbackPrint = wantsPrint && !canUseLocalPrint && !serverPrintHubActive;
-        const shouldQueueFallbackWhatsapp = wantsWhatsapp && !canUseLocalWhatsapp && !serverWhatsappHubActive;
-        shouldFallbackPrint = wantsPrint && !serverPrintHubActive;
-        shouldFallbackWhatsapp = wantsWhatsapp && !serverWhatsappHubActive;
+        const canUseLocalPrint = Boolean(printConfig.enabled && localAgent.available);
+        const canUseLocalWhatsapp = Boolean(whatsappConfig.enabled && localAgent.whatsappReady);
+        const shouldQueueFallbackPrint = wantsPrint && !canUseLocalPrint;
+        const shouldQueueFallbackWhatsapp = wantsWhatsapp && !canUseLocalWhatsapp;
+        shouldFallbackPrint = wantsPrint;
+        shouldFallbackWhatsapp = wantsWhatsapp;
         if (shouldQueueFallbackPrint || shouldQueueFallbackWhatsapp) {
           await queueOrderDispatchFallback(normalizedOrderId, {
             printEventType: shouldQueueFallbackPrint && !Array.isArray(fallbackPrintEvents)
@@ -507,6 +631,8 @@ export default function LocalAutomationBridge({
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify({
             preferLocalAgent: true,
+            localAutomationOwnerId: ownerIdRef.current,
+            localAutomationOwnerLabel: buildOwnerLabel(localAgent),
             printEventTypes,
             whatsappEventType: canUseLocalWhatsapp ? 'new_order' : undefined,
           }),
@@ -630,7 +756,53 @@ export default function LocalAutomationBridge({
       clearFallbackTimer();
       closeEventSource();
     };
-  }, [enabled, isLeader, tenantId]);
+  }, [enabled, isServerLeader, tenantId]);
 
-  return null;
+  if (!enabled || !tenantId) return null;
+
+  const localAgentAvailable = Boolean(localAgent?.available);
+  const anotherDeviceActive = Boolean(lease?.active && !lease.isOwner);
+  const statusTone = isServerLeader
+    ? localAgentAvailable
+      ? 'active'
+      : 'warning'
+    : anotherDeviceActive || !isLocalTabLeader
+      ? 'standby'
+      : 'warning';
+  const statusLabel = isServerLeader
+    ? 'Recebe e envia local'
+    : anotherDeviceActive
+      ? 'Ponte local em outro PC'
+      : !isLocalTabLeader
+        ? 'Ponte local em outra aba'
+        : localAgentAvailable
+          ? 'Assumindo ponte local'
+          : 'Agente local offline';
+  const detail = isServerLeader
+    ? buildOwnerLabel(localAgent || {
+        available: false,
+        whatsappReady: false,
+        whatsappStatus: 'disconnected',
+        printerName: '',
+        terminalId: '',
+      })
+    : anotherDeviceActive
+      ? lease?.ownerLabel || 'Outro computador'
+      : leaseError || (checking ? 'Conferindo agente' : 'Aguardando');
+
+  return (
+    <div
+      className={
+        statusTone === 'active'
+          ? 'hidden min-w-0 max-w-[260px] rounded-md border border-emerald-200 bg-emerald-50 px-3 py-1.5 text-xs text-emerald-800 sm:block'
+          : statusTone === 'standby'
+            ? 'hidden min-w-0 max-w-[260px] rounded-md border border-slate-200 bg-slate-50 px-3 py-1.5 text-xs text-slate-600 sm:block'
+            : 'hidden min-w-0 max-w-[260px] rounded-md border border-amber-200 bg-amber-50 px-3 py-1.5 text-xs text-amber-800 sm:block'
+      }
+      title={`${statusLabel}${detail ? ` - ${detail}` : ''}`}
+    >
+      <div className="truncate font-bold">{statusLabel}</div>
+      <div className="truncate text-[10px] opacity-80">{detail}</div>
+    </div>
+  );
 }

@@ -407,6 +407,30 @@ async function initializeDb() {
           updated_at TIMESTAMPTZ DEFAULT NOW()
         );
 
+        CREATE TABLE IF NOT EXISTS local_automation_leases (
+          tenant_id TEXT PRIMARY KEY REFERENCES tenants(id) ON DELETE CASCADE,
+          owner_id TEXT NOT NULL,
+          owner_label TEXT,
+          capabilities JSONB NOT NULL DEFAULT '{}'::jsonb,
+          lease_until TIMESTAMPTZ NOT NULL,
+          last_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+
+        CREATE TABLE IF NOT EXISTS local_automation_dispatches (
+          tenant_id TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+          dedupe_key TEXT NOT NULL,
+          order_id TEXT,
+          channel TEXT NOT NULL,
+          event_type TEXT NOT NULL,
+          owner_id TEXT,
+          owner_label TEXT,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          PRIMARY KEY (tenant_id, dedupe_key)
+        );
+
         CREATE TABLE IF NOT EXISTS payment_methods (
           id TEXT PRIMARY KEY,
           tenant_id TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
