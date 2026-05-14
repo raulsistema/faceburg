@@ -2,14 +2,16 @@ import { randomUUID } from 'node:crypto';
 import { NextResponse } from 'next/server';
 import pool from '@/lib/db';
 import { ensureFinanceSchema } from '@/lib/finance-schema';
-import { getActiveLocalAutomationLease } from '@/lib/local-automation';
-import { getValidatedTenantSession } from '@/lib/tenant-auth';
+import { requireTenantSession } from '@/lib/tenant-auth';
 import { enqueueOrderPrintJob } from '@/lib/printing';
 import { notifyOrderEvent } from '@/lib/realtime';
 import { getOpenCashSession } from '@/lib/cash-register';
 import { isCashPaymentType } from '@/lib/cash-summary';
+import { BUSINESS_CURRENT_DATE_SQL } from '@/lib/business-time';
 import { parseMoneyInput } from '@/lib/finance-utils';
 import { assignOrderSequenceNumber, ensureOrderSequenceSchema } from '@/lib/order-sequence';
+
+const LOCAL_FALLBACK_QUEUE_DELAY_SECONDS = 90;
 
 type TabRow = {
   id: string;
@@ -80,10 +82,8 @@ function normalizePositiveAmount(value: unknown) {
 export async function POST(request: Request, { params }: { params: Promise<{ id: string }> }) {
   await ensureFinanceSchema();
   await ensureOrderSequenceSchema();
-  const session = await getValidatedTenantSession();
-  if (!session) {
-    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-  }
+  const { session, response } = await requireTenantSession(['admin', 'staff']);
+  if (response) return response;
 
   const { id } = await params;
   const body = await request.json();
@@ -359,7 +359,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
         `INSERT INTO receivables
          (id, tenant_id, order_id, payment_method_id, gross_amount, fee_amount, net_amount, due_date, status, received_at)
          VALUES (
-           $1, $2, $3, $4, $5, $6, $7, (NOW()::date + $8::int),
+           $1, $2, $3, $4, $5, $6, $7, (${BUSINESS_CURRENT_DATE_SQL} + $8::int),
            CASE WHEN $8::int <= 0 THEN 'received' ELSE 'pending' END,
            CASE WHEN $8::int <= 0 THEN NOW() ELSE NULL END
          )`,
@@ -410,10 +410,10 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
 
     await client.query('COMMIT');
 
-    const localAutomationLease = await getActiveLocalAutomationLease(session.tenantId).catch(() => null);
-    const localPrintActive = Boolean(localAutomationLease?.capabilities.print);
+    const printQueueOptions = { initialDelaySeconds: LOCAL_FALLBACK_QUEUE_DELAY_SECONDS };
+
     await Promise.allSettled([
-      localPrintActive ? Promise.resolve(false) : enqueueOrderPrintJob(session.tenantId, orderId, 'new_order'),
+      enqueueOrderPrintJob(session.tenantId, orderId, 'new_order', undefined, printQueueOptions),
       notifyOrderEvent(session.tenantId, 'created', orderId),
     ]);
 

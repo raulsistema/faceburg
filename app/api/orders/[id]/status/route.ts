@@ -7,6 +7,7 @@ import { enqueueOrderPrintJob, prepareOrderPrintJobs } from '@/lib/printing';
 import { notifyOrderEvent } from '@/lib/realtime';
 import { enqueueOrderWhatsappJob, prepareOrderWhatsappJob } from '@/lib/whatsapp';
 import { isCashPaymentType } from '@/lib/cash-summary';
+import { BUSINESS_CURRENT_DATE_SQL } from '@/lib/business-time';
 import { assignOrderSequenceNumber, ensureOrderSequenceSchema } from '@/lib/order-sequence';
 import { randomUUID } from 'node:crypto';
 
@@ -487,7 +488,7 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
                    gross_amount = $4,
                    fee_amount = $5,
                    net_amount = $6,
-                   due_date = (NOW()::date + $7::int),
+                   due_date = (${BUSINESS_CURRENT_DATE_SQL} + $7::int),
                    status = CASE WHEN $7::int <= 0 THEN 'received' ELSE 'pending' END,
                    received_at = CASE WHEN $7::int <= 0 THEN NOW() ELSE NULL END
                WHERE id = $1 AND tenant_id = $2`,
@@ -498,7 +499,7 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
               `INSERT INTO receivables
                (id, tenant_id, order_id, payment_method_id, gross_amount, fee_amount, net_amount, due_date, status, received_at)
                VALUES (
-                 $1, $2, $3, $4, $5, $6, $7, (NOW()::date + $8::int),
+                 $1, $2, $3, $4, $5, $6, $7, (${BUSINESS_CURRENT_DATE_SQL} + $8::int),
                  CASE WHEN $8::int <= 0 THEN 'received' ELSE 'pending' END,
                  CASE WHEN $8::int <= 0 THEN NOW() ELSE NULL END
                )`,

@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { NextResponse } from 'next/server';
 import { query } from '@/lib/db';
 import { notifyAgentJobAvailable } from '@/lib/realtime';
-import { getValidatedTenantSession } from '@/lib/tenant-auth';
+import { requireTenantSession } from '@/lib/tenant-auth';
 
 type AgentRow = {
   enabled: boolean;
@@ -10,10 +10,8 @@ type AgentRow = {
 };
 
 export async function POST(request: Request) {
-  const session = await getValidatedTenantSession();
-  if (!session) {
-    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-  }
+  const { session, response } = await requireTenantSession(['admin']);
+  if (response) return response;
 
   let body: Record<string, unknown> = {};
   try {

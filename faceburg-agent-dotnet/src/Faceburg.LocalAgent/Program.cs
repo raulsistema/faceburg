@@ -89,6 +89,7 @@ app.MapGet("/api/health", async (
         printEngine = config.PrintEngine,
         columns = config.Columns,
         printTextSize = config.PrintTextSize,
+        directRealtimeEnabled = config.DirectRealtimeEnabled,
         realtimeGatewayPort = config.RealtimeGatewayPort,
         realtimeGatewayPath = config.RealtimeGatewayPath,
         hasPrintAgentKey = !string.IsNullOrWhiteSpace(config.PrintAgentKey),

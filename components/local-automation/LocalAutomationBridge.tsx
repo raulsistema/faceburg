@@ -3,6 +3,8 @@
 import { useEffect, useRef, useState } from 'react';
 
 type OrderStatus = 'pending' | 'processing' | 'delivering' | 'completed' | 'cancelled';
+type PrintEventType = 'new_order' | 'status_update' | 'manual_receipt';
+type WhatsappEventType = 'new_order' | 'status_update';
 
 type OrderDetailResponse = {
   order?: {
@@ -20,18 +22,6 @@ type OrdersResponse = {
   }>;
 };
 
-type PrintConfigResponse = {
-  enabled?: boolean;
-  connectionStatus?: string;
-  lastSeenAt?: string | null;
-};
-
-type WhatsappConfigResponse = {
-  enabled?: boolean;
-  sessionStatus?: string;
-  lastSeenAt?: string | null;
-};
-
 type LocalAgentHealth = {
   online?: boolean;
   terminalId?: string;
@@ -41,12 +31,40 @@ type LocalAgentHealth = {
   };
 };
 
+type DesktopBridgeState = {
+  isDesktopApp?: boolean;
+  whatsRunning?: boolean;
+  printRunning?: boolean;
+  whatsapp?: {
+    status?: string;
+    phoneNumber?: string;
+    qrCode?: string;
+    lastError?: string;
+  } | null;
+  print?: {
+    status?: string;
+    lastError?: string;
+    lastJobAt?: string;
+    realtimeConnected?: boolean;
+  } | null;
+};
+
+type FaceburgDesktopBridge = {
+  isDesktopApp: boolean;
+  getState: () => Promise<DesktopBridgeState>;
+  syncSession?: () => Promise<unknown>;
+  printDirect?: (payload: LocalPrintJob) => Promise<unknown>;
+  sendWhatsAppDirect?: (payload: LocalWhatsappJob) => Promise<unknown>;
+};
+
 type LocalAgentProbe = {
   available: boolean;
+  printAvailable: boolean;
   whatsappReady: boolean;
   whatsappStatus: string;
   printerName: string;
   terminalId: string;
+  desktopBridge?: FaceburgDesktopBridge | null;
 };
 
 type LocalPrintJob = {
@@ -89,19 +107,6 @@ type OrderEventPayload = {
   ts?: number;
 };
 
-type LocalAutomationLease = {
-  ownerId: string;
-  ownerLabel: string;
-  leaseUntil: string;
-  isOwner: boolean;
-  active: boolean;
-};
-
-type LocalAutomationLeaseResponse = {
-  ok?: boolean;
-  lease?: LocalAutomationLease | null;
-};
-
 type NavigatorWithLocks = Navigator & {
   locks?: {
     request: (
@@ -114,16 +119,15 @@ type NavigatorWithLocks = Navigator & {
 
 const LOCAL_AGENT_URL = 'http://127.0.0.1:9787';
 const LOCK_NAME = 'faceburg-local-automation';
-const LEADER_STORAGE_KEY = 'faceburg:localAutomation:leader:v1';
-const PROCESSED_STORAGE_KEY = 'faceburg:localAutomation:processed:v1';
+const LEADER_STORAGE_KEY = 'faceburg:localAutomation:leader:v2';
+const PROCESSED_STORAGE_KEY = 'faceburg:localAutomation:processed:v2';
 const PROCESSED_TTL_MS = 20 * 60 * 1000;
 const NEW_ORDER_SCAN_WINDOW_MS = 20 * 60 * 1000;
-const FALLBACK_SCAN_INITIAL_MS = 30_000;
-const FALLBACK_SCAN_MAX_MS = 5 * 60 * 1000;
+const FALLBACK_SCAN_INITIAL_MS = 10 * 60 * 1000;
+const FALLBACK_SCAN_MAX_MS = 10 * 60 * 1000;
 const LEADER_HEARTBEAT_MS = 2500;
 const LEADER_EXPIRES_MS = 9000;
-const SERVER_LEASE_RENEW_MS = 5000;
-const SERVER_LEASE_SECONDS = 20;
+const LOCAL_AGENT_PROBE_MS = 5000;
 
 function makeTabId() {
   if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) {
@@ -137,6 +141,11 @@ function errorMessage(error: unknown) {
   return String(error || 'Falha desconhecida.');
 }
 
+function getDesktopBridge() {
+  if (typeof window === 'undefined') return null;
+  return (window as Window & { faceburgDesktop?: FaceburgDesktopBridge }).faceburgDesktop ?? null;
+}
+
 function readJsonRecord(key: string) {
   try {
     const parsed = JSON.parse(window.localStorage.getItem(key) || '{}') as Record<string, number>;
@@ -146,7 +155,7 @@ function readJsonRecord(key: string) {
   }
 }
 
-function claimProcessed(key: string) {
+function compactProcessedRecords() {
   const now = Date.now();
   const processed = readJsonRecord(PROCESSED_STORAGE_KEY);
   const compacted: Record<string, number> = {};
@@ -155,15 +164,22 @@ function claimProcessed(key: string) {
       compacted[entryKey] = Number(expiresAt);
     }
   }
+  window.localStorage.setItem(PROCESSED_STORAGE_KEY, JSON.stringify(compacted));
+  return { now, compacted };
+}
 
+function isProcessed(key: string) {
+  const { now, compacted } = compactProcessedRecords();
   if (compacted[key] && compacted[key] > now) {
-    window.localStorage.setItem(PROCESSED_STORAGE_KEY, JSON.stringify(compacted));
-    return false;
+    return true;
   }
+  return false;
+}
 
+function markProcessed(key: string) {
+  const { now, compacted } = compactProcessedRecords();
   compacted[key] = now + PROCESSED_TTL_MS;
   window.localStorage.setItem(PROCESSED_STORAGE_KEY, JSON.stringify(compacted));
-  return true;
 }
 
 async function fetchJson<T>(url: string, init?: RequestInit) {
@@ -188,6 +204,7 @@ async function requestLocalAgent<T>(path: string, init: RequestInit = {}, timeou
   try {
     const response = await fetch(`${LOCAL_AGENT_URL}${path}`, {
       ...init,
+      cache: 'no-store',
       signal: controller.signal,
     });
     const data = (await response.json().catch(() => ({}))) as T & { error?: string };
@@ -201,11 +218,30 @@ async function requestLocalAgent<T>(path: string, init: RequestInit = {}, timeou
 }
 
 async function probeLocalAgent(): Promise<LocalAgentProbe> {
+  const desktopBridge = getDesktopBridge();
+  if (desktopBridge?.isDesktopApp) {
+    const state = await desktopBridge.getState().catch(() => null);
+    const whatsappStatus = String(state?.whatsapp?.status || 'disconnected');
+    const printAvailable = Boolean(desktopBridge.printDirect);
+    const whatsappReady = Boolean(desktopBridge.sendWhatsAppDirect) && whatsappStatus === 'ready';
+    return {
+      available: printAvailable || whatsappReady,
+      printAvailable,
+      whatsappReady,
+      whatsappStatus,
+      printerName: '',
+      terminalId: 'Faceburg Hub',
+      desktopBridge,
+    };
+  }
+
   try {
     const health = await requestLocalAgent<LocalAgentHealth>('/api/health', {}, 900);
     const whatsappStatus = String(health.whatsapp?.status || 'disconnected');
+    const printAvailable = Boolean(health.online);
     return {
-      available: Boolean(health.online),
+      available: printAvailable || whatsappStatus === 'ready',
+      printAvailable,
       whatsappReady: whatsappStatus === 'ready',
       whatsappStatus,
       printerName: String(health.printerName || ''),
@@ -214,6 +250,7 @@ async function probeLocalAgent(): Promise<LocalAgentProbe> {
   } catch {
     return {
       available: false,
+      printAvailable: false,
       whatsappReady: false,
       whatsappStatus: 'disconnected',
       printerName: '',
@@ -231,36 +268,12 @@ function buildOwnerLabel(localAgent: LocalAgentProbe) {
   return 'Computador da loja';
 }
 
-async function claimServerLease(ownerId: string, localAgent: LocalAgentProbe) {
-  return fetchJson<LocalAutomationLeaseResponse>('/api/local-automation/lease', {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({
-      ownerId,
-      ownerLabel: buildOwnerLabel(localAgent),
-      leaseSeconds: SERVER_LEASE_SECONDS,
-      capabilities: {
-        print: localAgent.available,
-        whatsapp: localAgent.whatsappReady,
-      },
-    }),
-  });
-}
-
-async function releaseServerLease(ownerId: string) {
-  return fetchJson<{ ok?: boolean }>('/api/local-automation/lease', {
-    method: 'DELETE',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ ownerId }),
-  });
-}
-
 async function queueOrderDispatchFallback(
   orderId: string,
   payload: {
-    printEventType?: 'new_order' | 'status_update' | 'manual_receipt';
-    printEventTypes?: Array<'new_order' | 'status_update' | 'manual_receipt'>;
-    whatsappEventType?: 'new_order' | 'status_update';
+    printEventType?: PrintEventType;
+    printEventTypes?: PrintEventType[];
+    whatsappEventType?: WhatsappEventType;
   },
 ) {
   return fetchJson<DispatchFallbackResponse>(`/api/orders/${orderId}/dispatch`, {
@@ -270,7 +283,33 @@ async function queueOrderDispatchFallback(
   });
 }
 
+async function ackOrderDispatchLocal(
+  orderId: string,
+  payload: {
+    printEventType?: PrintEventType;
+    printEventTypes?: PrintEventType[];
+    whatsappEventType?: WhatsappEventType;
+  },
+) {
+  return fetchJson<{ ok?: boolean }>(`/api/orders/${orderId}/dispatch`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      ackLocalDispatch: true,
+      ...payload,
+    }),
+  });
+}
+
 async function runLocalPrintJobs(printJobs: LocalPrintJob[]) {
+  const desktopBridge = getDesktopBridge();
+  if (desktopBridge?.isDesktopApp && desktopBridge.printDirect) {
+    for (const job of printJobs) {
+      await desktopBridge.printDirect(job);
+    }
+    return;
+  }
+
   for (const job of printJobs) {
     await requestLocalAgent('/api/print', {
       method: 'POST',
@@ -281,6 +320,14 @@ async function runLocalPrintJobs(printJobs: LocalPrintJob[]) {
 }
 
 async function runLocalWhatsappJobs(whatsappJobs: LocalWhatsappJob[]) {
+  const desktopBridge = getDesktopBridge();
+  if (desktopBridge?.isDesktopApp && desktopBridge.sendWhatsAppDirect) {
+    for (const job of whatsappJobs) {
+      await desktopBridge.sendWhatsAppDirect(job);
+    }
+    return;
+  }
+
   for (const job of whatsappJobs) {
     await requestLocalAgent('/api/whatsapp/send', {
       method: 'POST',
@@ -293,37 +340,43 @@ async function runLocalWhatsappJobs(whatsappJobs: LocalWhatsappJob[]) {
 async function dispatchLocalJobs(
   orderId: string,
   localDispatch: LocalDispatchPayload | undefined,
-  expected: { print?: boolean; whatsapp?: boolean },
-  fallbackEvents: {
-    print?: 'new_order' | 'status_update' | 'manual_receipt' | Array<'new_order' | 'status_update' | 'manual_receipt'>;
-    whatsapp?: 'new_order' | 'status_update';
-  },
+  expected: { printEvents?: PrintEventType[]; whatsapp?: boolean },
+  markCompleted: {
+    print?: (eventType: PrintEventType) => void;
+    whatsapp?: () => void;
+    ackPrint?: (eventType: PrintEventType) => Promise<void>;
+    ackWhatsapp?: () => Promise<void>;
+  } = {},
 ) {
   const failures: string[] = [];
   const printJobs = Array.isArray(localDispatch?.printJobs) ? localDispatch.printJobs : [];
   const whatsappJobs = Array.isArray(localDispatch?.whatsappJobs) ? localDispatch.whatsappJobs : [];
   const dispatchErrors = Array.isArray(localDispatch?.errors) ? localDispatch.errors : [];
   const dispatchSkipped = Array.isArray(localDispatch?.skipped) ? localDispatch.skipped : [];
-  let printFailed = false;
+  const failedPrintEvents: PrintEventType[] = [];
   let whatsappFailed = false;
 
-  if (expected.print) {
-    if (!printJobs.length) {
+  for (const eventType of expected.printEvents || []) {
+    const eventPrintJobs = printJobs.filter((job) => job.eventType === eventType);
+    if (!eventPrintJobs.length) {
       if (dispatchErrors.includes('print')) {
-        printFailed = true;
-        failures.push('impressao');
-      } else if (dispatchSkipped.some((entry) => entry.startsWith('print:'))) {
-        printFailed = false;
+        failedPrintEvents.push(eventType);
+        failures.push(`impressao ${eventType}`);
+      } else if (dispatchSkipped.includes(`print:${eventType}`)) {
+        markCompleted.print?.(eventType);
       } else {
-        printFailed = true;
-        failures.push('impressao (nenhum recibo preparado)');
+        markCompleted.print?.(eventType);
       }
     } else {
       try {
-        await runLocalPrintJobs(printJobs);
+        await runLocalPrintJobs(eventPrintJobs);
+        await markCompleted.ackPrint?.(eventType).catch((error) => {
+          console.warn('Faceburg local print ack failed', error);
+        });
+        markCompleted.print?.(eventType);
       } catch (error) {
-        printFailed = true;
-        failures.push(`impressao (${errorMessage(error)})`);
+        failedPrintEvents.push(eventType);
+        failures.push(`impressao ${eventType} (${errorMessage(error)})`);
       }
     }
   }
@@ -342,6 +395,10 @@ async function dispatchLocalJobs(
     } else {
       try {
         await runLocalWhatsappJobs(whatsappJobs);
+        await markCompleted.ackWhatsapp?.().catch((error) => {
+          console.warn('Faceburg local whatsapp ack failed', error);
+        });
+        markCompleted.whatsapp?.();
       } catch (error) {
         whatsappFailed = true;
         failures.push(`WhatsApp (${errorMessage(error)})`);
@@ -351,12 +408,18 @@ async function dispatchLocalJobs(
 
   if (!failures.length) return;
 
-  const fallbackPrintEvents = fallbackEvents.print || 'new_order';
   await queueOrderDispatchFallback(orderId, {
-    printEventType: printFailed && !Array.isArray(fallbackPrintEvents) ? fallbackPrintEvents : undefined,
-    printEventTypes: printFailed && Array.isArray(fallbackPrintEvents) ? fallbackPrintEvents : undefined,
-    whatsappEventType: whatsappFailed ? fallbackEvents.whatsapp || 'new_order' : undefined,
-  }).catch(() => undefined);
+    printEventType: failedPrintEvents.length === 1 ? failedPrintEvents[0] : undefined,
+    printEventTypes: failedPrintEvents.length > 1 ? failedPrintEvents : undefined,
+    whatsappEventType: whatsappFailed ? 'new_order' : undefined,
+  });
+
+  for (const eventType of failedPrintEvents) {
+    markCompleted.print?.(eventType);
+  }
+  if (whatsappFailed) {
+    markCompleted.whatsapp?.();
+  }
 }
 
 function isRecentOpenOrder(order: { status: OrderStatus; createdAt?: string }) {
@@ -458,15 +521,26 @@ function useAutomationLeadership(enabled: boolean, tenantId: string, tabId: stri
   return leader;
 }
 
-function useServerAutomationLease(enabled: boolean, tenantId: string, localLeader: boolean, ownerId: string) {
-  const [lease, setLease] = useState<LocalAutomationLease | null>(null);
+function useLocalAutomationProbe({
+  enabled,
+  tenantId,
+  localLeader,
+  printEnabled,
+  whatsappEnabled,
+}: {
+  enabled: boolean;
+  tenantId: string;
+  localLeader: boolean;
+  printEnabled: boolean;
+  whatsappEnabled: boolean;
+}) {
   const [localAgent, setLocalAgent] = useState<LocalAgentProbe | null>(null);
   const [checking, setChecking] = useState(false);
   const [error, setError] = useState('');
 
   useEffect(() => {
     if (!enabled || !tenantId || !localLeader) {
-      setLease(null);
+      setLocalAgent(null);
       setChecking(false);
       return;
     }
@@ -482,21 +556,21 @@ function useServerAutomationLease(enabled: boolean, tenantId: string, localLeade
         if (disposed) return;
         setLocalAgent(probedAgent);
 
-        if (!probedAgent.available) {
-          setLease(null);
-          setError('Agente local offline');
-          void releaseServerLease(ownerId).catch(() => undefined);
+        const capabilities = {
+          print: Boolean(printEnabled && probedAgent.printAvailable),
+          whatsapp: Boolean(whatsappEnabled && probedAgent.whatsappReady),
+        };
+
+        if (!capabilities.print && !capabilities.whatsapp) {
+          setError(probedAgent.available ? 'Automacao local aguardando recurso' : 'Agente local offline');
           return;
         }
 
-        const response = await claimServerLease(ownerId, probedAgent);
-        if (disposed) return;
-        setLease(response.lease || null);
         setError('');
-      } catch (leaseError) {
+      } catch (probeError) {
         if (disposed) return;
-        setLease(null);
-        setError(errorMessage(leaseError));
+        setLocalAgent(null);
+        setError(errorMessage(probeError));
       } finally {
         if (!disposed) setChecking(false);
       }
@@ -505,45 +579,52 @@ function useServerAutomationLease(enabled: boolean, tenantId: string, localLeade
     void renew();
     intervalId = window.setInterval(() => {
       void renew();
-    }, SERVER_LEASE_RENEW_MS);
+    }, LOCAL_AGENT_PROBE_MS);
 
     return () => {
       disposed = true;
       if (intervalId) window.clearInterval(intervalId);
-      setLease(null);
-      void releaseServerLease(ownerId).catch(() => undefined);
+      setLocalAgent(null);
     };
-  }, [enabled, localLeader, ownerId, tenantId]);
+  }, [enabled, localLeader, printEnabled, tenantId, whatsappEnabled]);
 
   return {
-    lease,
     localAgent,
     checking,
     error,
-    isServerLeader: Boolean(localLeader && lease?.active && lease.isOwner),
+    isAutomationLeader: Boolean(localLeader),
   };
 }
 
 export default function LocalAutomationBridge({
   enabled,
   tenantId,
+  printEnabled,
+  whatsappEnabled,
 }: {
   enabled: boolean;
   tenantId: string;
+  printEnabled: boolean;
+  whatsappEnabled: boolean;
 }) {
   const ownerIdRef = useRef(makeTabId());
   const isLocalTabLeader = useAutomationLeadership(enabled, tenantId, ownerIdRef.current);
   const {
-    lease,
     localAgent,
     checking,
-    error: leaseError,
-    isServerLeader,
-  } = useServerAutomationLease(enabled, tenantId, isLocalTabLeader, ownerIdRef.current);
-  const knownOrderIdsRef = useRef<Set<string>>(new Set());
+    error: probeError,
+    isAutomationLeader,
+  } = useLocalAutomationProbe({
+    enabled,
+    tenantId,
+    localLeader: isLocalTabLeader,
+    printEnabled,
+    whatsappEnabled,
+  });
+  const inFlightOrderIdsRef = useRef<Set<string>>(new Set());
 
   useEffect(() => {
-    if (!enabled || !tenantId || !isServerLeader) return;
+    if (!enabled || !tenantId || !isAutomationLeader) return;
 
     let disposed = false;
     let eventSource: EventSource | null = null;
@@ -572,102 +653,146 @@ export default function LocalAutomationBridge({
       }
     }
 
+    function orderProcessedKey(orderId: string) {
+      return `${tenantId}:new-order:${orderId}`;
+    }
+
+    function printProcessedKey(orderId: string, eventType: PrintEventType) {
+      return `${tenantId}:print:${orderId}:${eventType}`;
+    }
+
+    function whatsappProcessedKey(orderId: string, eventType: WhatsappEventType) {
+      return `${tenantId}:whatsapp:${orderId}:${eventType}`;
+    }
+
+    function markPrintProcessed(orderId: string, eventType: PrintEventType) {
+      markProcessed(printProcessedKey(orderId, eventType));
+    }
+
+    function markWhatsappProcessed(orderId: string, eventType: WhatsappEventType) {
+      markProcessed(whatsappProcessedKey(orderId, eventType));
+    }
+
+    function markOrderIfComplete(
+      orderId: string,
+      printEvents: PrintEventType[],
+      wantsWhatsapp: boolean,
+    ) {
+      const hasPendingPrint = printEvents.some((eventType) => !isProcessed(printProcessedKey(orderId, eventType)));
+      const hasPendingWhatsapp = wantsWhatsapp && !isProcessed(whatsappProcessedKey(orderId, 'new_order'));
+      if (!hasPendingPrint && !hasPendingWhatsapp) {
+        markProcessed(orderProcessedKey(orderId));
+      }
+    }
+
+    async function queueFallbackAndMark(
+      orderId: string,
+      printEvents: PrintEventType[],
+      whatsapp: boolean,
+    ) {
+      if (!printEvents.length && !whatsapp) return;
+      await queueOrderDispatchFallback(orderId, {
+        printEventType: printEvents.length === 1 ? printEvents[0] : undefined,
+        printEventTypes: printEvents.length > 1 ? printEvents : undefined,
+        whatsappEventType: whatsapp ? 'new_order' : undefined,
+      });
+      for (const eventType of printEvents) {
+        markPrintProcessed(orderId, eventType);
+      }
+      if (whatsapp) {
+        markWhatsappProcessed(orderId, 'new_order');
+      }
+    }
+
     async function dispatchNewOrder(orderId: string) {
       const normalizedOrderId = String(orderId || '').trim();
       if (!normalizedOrderId) return;
-      knownOrderIdsRef.current.add(normalizedOrderId);
 
-      const processedKey = `${tenantId}:new-order:${normalizedOrderId}`;
-      if (!claimProcessed(processedKey)) return;
+      const processedKey = orderProcessedKey(normalizedOrderId);
+      if (isProcessed(processedKey) || inFlightOrderIdsRef.current.has(normalizedOrderId)) return;
+      inFlightOrderIdsRef.current.add(normalizedOrderId);
 
-      let fallbackPrintEvents: 'new_order' | Array<'new_order' | 'status_update'> = 'new_order';
-      let shouldFallbackPrint = false;
-      let shouldFallbackWhatsapp = false;
+      let allPrintEvents: PrintEventType[] = ['new_order'];
+      let wantsPrint = Boolean(printEnabled);
+      let wantsWhatsapp = Boolean(whatsappEnabled);
 
       try {
         const orderData = await fetchJson<OrderDetailResponse>(`/api/orders/${normalizedOrderId}`);
         const status = orderData.order?.status;
-        if (status !== 'pending' && status !== 'processing') return;
-        const autoAccepted = status === 'processing';
-        fallbackPrintEvents = autoAccepted ? ['new_order', 'status_update'] : 'new_order';
-
-        const [printConfig, whatsappConfig, localAgent] = await Promise.all([
-          fetchJson<PrintConfigResponse>('/api/print/config').catch(() => ({ enabled: false })),
-          fetchJson<WhatsappConfigResponse>('/api/whatsapp/config').catch(() => ({ enabled: false })),
-          probeLocalAgent(),
-        ]);
-
-        const wantsPrint = Boolean(printConfig.enabled);
-        const wantsWhatsapp = Boolean(whatsappConfig.enabled);
-        if (!wantsPrint && !wantsWhatsapp) return;
-
-        const canUseLocalPrint = Boolean(printConfig.enabled && localAgent.available);
-        const canUseLocalWhatsapp = Boolean(whatsappConfig.enabled && localAgent.whatsappReady);
-        const shouldQueueFallbackPrint = wantsPrint && !canUseLocalPrint;
-        const shouldQueueFallbackWhatsapp = wantsWhatsapp && !canUseLocalWhatsapp;
-        shouldFallbackPrint = wantsPrint;
-        shouldFallbackWhatsapp = wantsWhatsapp;
-        if (shouldQueueFallbackPrint || shouldQueueFallbackWhatsapp) {
-          await queueOrderDispatchFallback(normalizedOrderId, {
-            printEventType: shouldQueueFallbackPrint && !Array.isArray(fallbackPrintEvents)
-              ? fallbackPrintEvents
-              : undefined,
-            printEventTypes: shouldQueueFallbackPrint && Array.isArray(fallbackPrintEvents)
-              ? fallbackPrintEvents
-              : undefined,
-            whatsappEventType: shouldQueueFallbackWhatsapp ? 'new_order' : undefined,
-          }).catch(() => undefined);
+        if (status !== 'pending' && status !== 'processing') {
+          markProcessed(processedKey);
+          return;
         }
-        if (!canUseLocalPrint && !canUseLocalWhatsapp) return;
+        const autoAccepted = status === 'processing';
+        allPrintEvents = autoAccepted ? ['new_order', 'status_update'] : ['new_order'];
 
-        const printEventTypes: Array<'new_order' | 'status_update'> = canUseLocalPrint
-          ? autoAccepted
-            ? ['new_order', 'status_update']
-            : ['new_order']
+        const probedAgent = await probeLocalAgent();
+        wantsPrint = Boolean(printEnabled);
+        wantsWhatsapp = Boolean(whatsappEnabled);
+        if (!wantsPrint && !wantsWhatsapp) {
+          markProcessed(processedKey);
+          return;
+        }
+
+        const pendingPrintEvents = wantsPrint
+          ? allPrintEvents.filter((eventType) => !isProcessed(printProcessedKey(normalizedOrderId, eventType)))
           : [];
+        const pendingWhatsapp = wantsWhatsapp && !isProcessed(whatsappProcessedKey(normalizedOrderId, 'new_order'));
+        if (!pendingPrintEvents.length && !pendingWhatsapp) {
+          markProcessed(processedKey);
+          return;
+        }
+
+        const canUseLocalPrint = Boolean(pendingPrintEvents.length && probedAgent.printAvailable);
+        const canUseLocalWhatsapp = Boolean(pendingWhatsapp && probedAgent.whatsappReady);
+        const fallbackPrintEvents = canUseLocalPrint ? [] : pendingPrintEvents;
+        const fallbackWhatsapp = Boolean(pendingWhatsapp && !canUseLocalWhatsapp);
+
+        await queueFallbackAndMark(normalizedOrderId, fallbackPrintEvents, fallbackWhatsapp);
+
+        const printEventTypes = canUseLocalPrint ? pendingPrintEvents : [];
+        const shouldSendWhatsappLocal = Boolean(canUseLocalWhatsapp && pendingWhatsapp);
+        if (!printEventTypes.length && !shouldSendWhatsappLocal) {
+          markOrderIfComplete(normalizedOrderId, allPrintEvents, wantsWhatsapp);
+          return;
+        }
 
         const dispatchData = await fetchJson<{ localDispatch?: LocalDispatchPayload }>(`/api/orders/${normalizedOrderId}/dispatch`, {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify({
             preferLocalAgent: true,
-            localAutomationOwnerId: ownerIdRef.current,
-            localAutomationOwnerLabel: buildOwnerLabel(localAgent),
             printEventTypes,
-            whatsappEventType: canUseLocalWhatsapp ? 'new_order' : undefined,
+            whatsappEventType: shouldSendWhatsappLocal ? 'new_order' : undefined,
           }),
         });
 
         await dispatchLocalJobs(
           normalizedOrderId,
           dispatchData.localDispatch,
-          { print: canUseLocalPrint, whatsapp: canUseLocalWhatsapp },
-          { print: fallbackPrintEvents, whatsapp: 'new_order' },
+          { printEvents: printEventTypes, whatsapp: shouldSendWhatsappLocal },
+          {
+            print: (eventType) => markPrintProcessed(normalizedOrderId, eventType),
+            whatsapp: () => markWhatsappProcessed(normalizedOrderId, 'new_order'),
+            ackPrint: (eventType) => ackOrderDispatchLocal(normalizedOrderId, { printEventType: eventType }).then(() => undefined),
+            ackWhatsapp: () => ackOrderDispatchLocal(normalizedOrderId, { whatsappEventType: 'new_order' }).then(() => undefined),
+          },
         );
+        markOrderIfComplete(normalizedOrderId, allPrintEvents, wantsWhatsapp);
       } catch (error) {
         console.warn('Faceburg local automation failed', error);
-        if (shouldFallbackPrint || shouldFallbackWhatsapp) {
-          await queueOrderDispatchFallback(normalizedOrderId, {
-            printEventType: shouldFallbackPrint && !Array.isArray(fallbackPrintEvents) ? fallbackPrintEvents : undefined,
-            printEventTypes: shouldFallbackPrint && Array.isArray(fallbackPrintEvents) ? fallbackPrintEvents : undefined,
-            whatsappEventType: shouldFallbackWhatsapp ? 'new_order' : undefined,
-          }).catch(() => undefined);
+        const retryPrintEvents = wantsPrint
+          ? allPrintEvents.filter((eventType) => !isProcessed(printProcessedKey(normalizedOrderId, eventType)))
+          : [];
+        const retryWhatsapp = wantsWhatsapp && !isProcessed(whatsappProcessedKey(normalizedOrderId, 'new_order'));
+        try {
+          await queueFallbackAndMark(normalizedOrderId, retryPrintEvents, retryWhatsapp);
+          markOrderIfComplete(normalizedOrderId, allPrintEvents, wantsWhatsapp);
+        } catch (fallbackError) {
+          console.warn('Faceburg local automation fallback failed', fallbackError);
         }
-      }
-    }
-
-    async function primeKnownOrders() {
-      try {
-        const data = await fetchJson<OrdersResponse>('/api/orders');
-        for (const order of data.orders || []) {
-          if (isRecentOpenOrder(order)) {
-            void dispatchNewOrder(order.id);
-            continue;
-          }
-          knownOrderIdsRef.current.add(order.id);
-        }
-      } catch {
-        // A automacao continua pelo realtime mesmo se a primeira carga falhar.
+      } finally {
+        inFlightOrderIdsRef.current.delete(normalizedOrderId);
       }
     }
 
@@ -676,17 +801,16 @@ export default function LocalAutomationBridge({
       try {
         const data = await fetchJson<OrdersResponse>('/api/orders');
         for (const order of data.orders || []) {
-          const alreadyKnown = knownOrderIdsRef.current.has(order.id);
-          knownOrderIdsRef.current.add(order.id);
-          if (!alreadyKnown && isRecentOpenOrder(order)) {
+          if (isRecentOpenOrder(order)) {
             void dispatchNewOrder(order.id);
           }
         }
+        fallbackDelayMs = FALLBACK_SCAN_INITIAL_MS;
       } catch {
-        // Mantem backoff sem transformar a queda do realtime em martelada.
+        // Mantem backoff sem transformar queda do realtime em martelada.
+        fallbackDelayMs = Math.min(fallbackDelayMs * 2, FALLBACK_SCAN_MAX_MS);
       } finally {
-        if (!disposed && !eventSource) {
-          fallbackDelayMs = Math.min(fallbackDelayMs * 2, FALLBACK_SCAN_MAX_MS);
+        if (!disposed) {
           scheduleFallbackScan();
         }
       }
@@ -727,9 +851,6 @@ export default function LocalAutomationBridge({
       eventSource.addEventListener('order-updated', (event) => {
         try {
           const payload = JSON.parse((event as MessageEvent).data || '{}') as OrderEventPayload;
-          if (payload.orderId) {
-            knownOrderIdsRef.current.add(payload.orderId);
-          }
           if (payload.event === 'created' && payload.orderId) {
             void dispatchNewOrder(payload.orderId);
           }
@@ -744,11 +865,11 @@ export default function LocalAutomationBridge({
       };
     }
 
-    void primeKnownOrders().finally(() => {
-      if (!disposed) {
-        connectEvents();
-      }
-    });
+    connectEvents();
+    fallbackTimer = window.setTimeout(() => {
+      fallbackTimer = null;
+      void scanFallbackOrders();
+    }, 1000);
 
     return () => {
       disposed = true;
@@ -756,39 +877,35 @@ export default function LocalAutomationBridge({
       clearFallbackTimer();
       closeEventSource();
     };
-  }, [enabled, isServerLeader, tenantId]);
+  }, [enabled, isAutomationLeader, printEnabled, tenantId, whatsappEnabled]);
 
   if (!enabled || !tenantId) return null;
 
   const localAgentAvailable = Boolean(localAgent?.available);
-  const anotherDeviceActive = Boolean(lease?.active && !lease.isOwner);
-  const statusTone = isServerLeader
+  const statusTone = isAutomationLeader
     ? localAgentAvailable
       ? 'active'
       : 'warning'
-    : anotherDeviceActive || !isLocalTabLeader
+    : !isLocalTabLeader
       ? 'standby'
       : 'warning';
-  const statusLabel = isServerLeader
-    ? 'Recebe e envia local'
-    : anotherDeviceActive
-      ? 'Ponte local em outro PC'
-      : !isLocalTabLeader
+  const statusLabel = isAutomationLeader
+    ? 'Ponte local ativa'
+    : !isLocalTabLeader
         ? 'Ponte local em outra aba'
         : localAgentAvailable
           ? 'Assumindo ponte local'
           : 'Agente local offline';
-  const detail = isServerLeader
+  const detail = isAutomationLeader
     ? buildOwnerLabel(localAgent || {
         available: false,
+        printAvailable: false,
         whatsappReady: false,
         whatsappStatus: 'disconnected',
         printerName: '',
         terminalId: '',
       })
-    : anotherDeviceActive
-      ? lease?.ownerLabel || 'Outro computador'
-      : leaseError || (checking ? 'Conferindo agente' : 'Aguardando');
+    : probeError || (checking ? 'Conferindo agente' : 'Aguardando');
 
   return (
     <div

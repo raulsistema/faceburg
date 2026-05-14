@@ -19,6 +19,7 @@ import {
   WalletCards,
   type LucideIcon,
 } from 'lucide-react';
+import { formatBusinessDateTime, getBusinessDateKey } from '@/lib/business-time';
 import { cn } from '@/lib/utils';
 
 type DriverStatus = 'active' | 'inactive' | 'dismissed';
@@ -163,24 +164,22 @@ function toInputDate(date: Date) {
 }
 
 function todayInputDate() {
-  return toInputDate(new Date());
+  return getBusinessDateKey() || toInputDate(new Date());
 }
 
 function monthStartInputDate() {
-  const now = new Date();
-  return toInputDate(new Date(now.getFullYear(), now.getMonth(), 1));
+  const today = todayInputDate();
+  return today ? `${today.slice(0, 8)}01` : toInputDate(new Date());
 }
 
 function formatDateTime(value: string | null) {
   if (!value) return 'Sem horario';
-  const parsed = new Date(value);
-  if (Number.isNaN(parsed.getTime())) return 'Sem horario';
-  return new Intl.DateTimeFormat('pt-BR', {
+  return formatBusinessDateTime(value, {
     day: '2-digit',
     month: '2-digit',
     hour: '2-digit',
     minute: '2-digit',
-  }).format(parsed);
+  }) || 'Sem horario';
 }
 
 function formatDuration(seconds: number | null) {

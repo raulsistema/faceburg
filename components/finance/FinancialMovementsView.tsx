@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { ArrowDownUp, CalendarDays, Filter, RotateCcw } from 'lucide-react';
+import { formatBusinessDateKey, formatBusinessDateTime } from '@/lib/business-time';
 
 type Summary = {
   totalFees: number;
@@ -102,19 +103,11 @@ function formatCurrency(value: number) {
 }
 
 function formatDateTime(value: string) {
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return '-';
-  return date.toLocaleString('pt-BR');
+  return formatBusinessDateTime(value) || '-';
 }
 
 function formatDateOnly(value: string) {
-  if (/^\d{4}-\d{2}-\d{2}$/.test(value)) {
-    const [year, month, day] = value.split('-');
-    return `${day}/${month}/${year}`;
-  }
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return '-';
-  return date.toLocaleDateString('pt-BR');
+  return formatBusinessDateKey(value) || '-';
 }
 
 function moneyClass(value: number, positiveClass = 'text-emerald-600') {

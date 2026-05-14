@@ -1,5 +1,6 @@
 import { query } from '@/lib/db';
 import type { DbExecutor } from '@/lib/db';
+import { BUSINESS_TIME_ZONE } from '@/lib/business-time';
 
 export type MenuOpenMode = 'manual' | 'schedule';
 
@@ -15,7 +16,6 @@ export type MenuHoursConfig = {
 
 const DEFAULT_OPEN_TIME = '18:00';
 const DEFAULT_CLOSE_TIME = '00:00';
-const STORE_TIME_ZONE = 'America/Sao_Paulo';
 const DAY_KEYS = ['0', '1', '2', '3', '4', '5', '6'];
 const WEEKDAY_TO_INDEX: Record<string, number> = {
   Sun: 0,
@@ -82,7 +82,7 @@ function timeToMinutes(value: string) {
 
 function getSaoPauloNowParts(now = new Date()) {
   const parts = new Intl.DateTimeFormat('en-US', {
-    timeZone: STORE_TIME_ZONE,
+    timeZone: BUSINESS_TIME_ZONE,
     weekday: 'short',
     hour: '2-digit',
     minute: '2-digit',

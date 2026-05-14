@@ -2,6 +2,7 @@
 
 import { FormEvent, useEffect, useMemo, useState } from 'react';
 import { Bike, CheckCircle2, Loader2, LockKeyhole, Power, ShieldOff, UserPlus } from 'lucide-react';
+import { formatBusinessDateTime } from '@/lib/business-time';
 import { cn } from '@/lib/utils';
 
 type DriverStatus = 'active' | 'inactive' | 'dismissed';
@@ -57,13 +58,13 @@ function statusClasses(status: DriverStatus) {
 
 function formatDateTime(value: string | null) {
   if (!value) return 'Nunca';
-  return new Intl.DateTimeFormat('pt-BR', {
+  return formatBusinessDateTime(value, {
     day: '2-digit',
     month: '2-digit',
     year: 'numeric',
     hour: '2-digit',
     minute: '2-digit',
-  }).format(new Date(value));
+  }) || 'Nunca';
 }
 
 export default function DeliveryDriversAdminClient() {

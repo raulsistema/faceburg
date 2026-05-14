@@ -45,6 +45,27 @@ function normalizeWhitespace(value) {
   return String(value || '').replace(/\s+/g, ' ').trim();
 }
 
+function resolveDatabaseSsl() {
+  const sslEnabled =
+    process.env.DB_SSL === 'true' ||
+    process.env.DB_SSL === '1' ||
+    process.env.DB_SSL === 'require' ||
+    (process.env.DB_SSL !== 'false' && process.env.NODE_ENV === 'production');
+
+  if (!sslEnabled) return false;
+
+  const rejectUnauthorized = process.env.DB_SSL_REJECT_UNAUTHORIZED !== 'false';
+  if (!rejectUnauthorized && process.env.NODE_ENV === 'production') {
+    throw new Error('DB_SSL_REJECT_UNAUTHORIZED=false is not allowed in production.');
+  }
+
+  const ca = process.env.DB_CA_CERT ? process.env.DB_CA_CERT.replace(/\\n/g, '\n') : '';
+  return {
+    rejectUnauthorized,
+    ...(ca ? { ca } : {}),
+  };
+}
+
 function decodeXml(value) {
   return String(value || '')
     .replace(/&amp;/g, '&')
@@ -447,7 +468,7 @@ async function importProducts({ tenantSlug, workbookPath }) {
       database: process.env.DB_NAME,
       user: process.env.DB_USER,
       password: process.env.DB_PASSWORD || process.env.PGPASSWORD || '',
-      ssl: process.env.DB_SSL === 'true' ? { rejectUnauthorized: false } : false,
+      ssl: resolveDatabaseSsl(),
     });
 
     await client.connect();

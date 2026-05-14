@@ -6,6 +6,27 @@ declare global {
   var __faceburgDbInitPromise: Promise<void> | null | undefined;
 }
 
+function resolveDatabaseSsl() {
+  const sslEnabled =
+    process.env.DB_SSL === 'true' ||
+    process.env.DB_SSL === '1' ||
+    process.env.DB_SSL === 'require' ||
+    (process.env.DB_SSL !== 'false' && process.env.NODE_ENV === 'production');
+
+  if (!sslEnabled) return false;
+
+  const rejectUnauthorized = process.env.DB_SSL_REJECT_UNAUTHORIZED !== 'false';
+  if (!rejectUnauthorized && process.env.NODE_ENV === 'production') {
+    throw new Error('DB_SSL_REJECT_UNAUTHORIZED=false is not allowed in production.');
+  }
+
+  const ca = process.env.DB_CA_CERT?.replace(/\\n/g, '\n');
+  return {
+    rejectUnauthorized,
+    ...(ca ? { ca } : {}),
+  };
+}
+
 const pool =
   globalThis.__faceburgPool ??
   new Pool({
@@ -14,7 +35,7 @@ const pool =
     database: process.env.DB_NAME || 'faceburg',
     user: process.env.DB_USER || 'faceburg',
     password: process.env.DB_PASSWORD || process.env.PGPASSWORD || '',
-    ssl: process.env.DB_SSL === 'true' ? { rejectUnauthorized: false } : false,
+    ssl: resolveDatabaseSsl(),
     max: 20,
     idleTimeoutMillis: 30_000,
     connectionTimeoutMillis: 5_000,
@@ -1476,7 +1497,7 @@ async function initializeDb() {
       const tenantSeed = await client.query<{ id: string }>(
         `INSERT INTO tenants (id, name, slug)
          VALUES ($1, $2, $3)
-         ON CONFLICT (slug) DO UPDATE SET name = EXCLUDED.name
+         ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name
          RETURNING id`,
         ['t1', 'Pizza & Burger Master', 'pizza-burger'],
       );
@@ -1489,38 +1510,47 @@ async function initializeDb() {
       const seedOption1Id = `seed-${tenantId}-opt-1`;
       const seedOption2Id = `seed-${tenantId}-opt-2`;
       const seedOption3Id = `seed-${tenantId}-opt-3`;
-
-      await client.query(
-        `INSERT INTO categories (id, tenant_id, name, icon, product_type)
-         VALUES
-          ($1, $3, $4, $5, $8),
-          ($2, $3, $6, $7, $9)
-         ON CONFLICT (id) DO NOTHING`,
-        [category1Id, category2Id, tenantId, 'Pizzas', 'pizza', 'Burgers', 'hamburger', 'size_based', 'prepared'],
+      const catalogSeedCheck = await client.query<{ total: string }>(
+        `SELECT COUNT(*)::text AS total
+         FROM products
+         WHERE tenant_id = $1`,
+        [tenantId],
       );
+      const shouldSeedCatalog = Number(catalogSeedCheck.rows[0]?.total || 0) === 0;
 
-      await client.query(
-        `INSERT INTO products (id, tenant_id, category_id, name, description, price, image_url)
-         VALUES
-          ($1, $3, $4, $5, $6, $7, $8),
-          ($2, $3, $9, $10, $11, $12, $13)
-         ON CONFLICT (id) DO NOTHING`,
-        [
-          `seed-${tenantId}-p1`,
-          seedBurgerId,
-          tenantId,
-          category1Id,
-          'Margherita',
-          'Classic tomato, mozzarella, and basil',
-          45.0,
-          'https://picsum.photos/seed/pizza/400/300',
-          category2Id,
-          'Bacon Cheeseburger',
-          'Bento bun, beef patty, bacon, cheddar',
-          32.0,
-          'https://picsum.photos/seed/burger/400/300',
-        ],
-      );
+      if (shouldSeedCatalog) {
+        await client.query(
+          `INSERT INTO categories (id, tenant_id, name, icon, product_type)
+           VALUES
+            ($1, $3, $4, $5, $8),
+            ($2, $3, $6, $7, $9)
+           ON CONFLICT (id) DO NOTHING`,
+          [category1Id, category2Id, tenantId, 'Pizzas', 'pizza', 'Burgers', 'hamburger', 'size_based', 'prepared'],
+        );
+
+        await client.query(
+          `INSERT INTO products (id, tenant_id, category_id, name, description, price, image_url)
+           VALUES
+            ($1, $3, $4, $5, $6, $7, $8),
+            ($2, $3, $9, $10, $11, $12, $13)
+           ON CONFLICT (id) DO NOTHING`,
+          [
+            `seed-${tenantId}-p1`,
+            seedBurgerId,
+            tenantId,
+            category1Id,
+            'Margherita',
+            'Classic tomato, mozzarella, and basil',
+            45.0,
+            'https://picsum.photos/seed/pizza/400/300',
+            category2Id,
+            'Bacon Cheeseburger',
+            'Bento bun, beef patty, bacon, cheddar',
+            32.0,
+            'https://picsum.photos/seed/burger/400/300',
+          ],
+        );
+      }
 
       await client.query(
         `INSERT INTO payment_methods (id, tenant_id, name, method_type, fee_percent, fee_fixed, settlement_days, active)
@@ -1539,24 +1569,26 @@ async function initializeDb() {
         ],
       );
 
-      await client.query(
-        `INSERT INTO product_option_groups
-         (id, tenant_id, product_id, name, min_select, max_select, required, display_order)
-         VALUES ($1, $2, $3, $4, 0, 10, FALSE, 0)
-         ON CONFLICT (id) DO NOTHING`,
-        [seedOptionGroupId, tenantId, seedBurgerId, 'Turbine seu lanche'],
-      );
+      if (shouldSeedCatalog) {
+        await client.query(
+          `INSERT INTO product_option_groups
+           (id, tenant_id, product_id, name, min_select, max_select, required, display_order)
+           VALUES ($1, $2, $3, $4, 0, 10, FALSE, 0)
+           ON CONFLICT (id) DO NOTHING`,
+          [seedOptionGroupId, tenantId, seedBurgerId, 'Turbine seu lanche'],
+        );
 
-      await client.query(
-        `INSERT INTO product_options
-         (id, tenant_id, group_id, name, price_addition, active, display_order)
-         VALUES
-         ($1, $4, $5, $6, $7, TRUE, 0),
-         ($2, $4, $5, $8, $9, TRUE, 1),
-         ($3, $4, $5, $10, $11, TRUE, 2)
-         ON CONFLICT (id) DO NOTHING`,
-        [seedOption1Id, seedOption2Id, seedOption3Id, tenantId, seedOptionGroupId, 'Bacon', 3, 'Cheddar', 3, 'Ovo', 2],
-      );
+        await client.query(
+          `INSERT INTO product_options
+           (id, tenant_id, group_id, name, price_addition, active, display_order)
+           VALUES
+           ($1, $4, $5, $6, $7, TRUE, 0),
+           ($2, $4, $5, $8, $9, TRUE, 1),
+           ($3, $4, $5, $10, $11, TRUE, 2)
+           ON CONFLICT (id) DO NOTHING`,
+          [seedOption1Id, seedOption2Id, seedOption3Id, tenantId, seedOptionGroupId, 'Bacon', 3, 'Cheddar', 3, 'Ovo', 2],
+        );
+      }
     } finally {
       client.release();
     }

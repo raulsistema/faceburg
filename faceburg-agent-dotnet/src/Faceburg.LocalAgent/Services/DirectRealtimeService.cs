@@ -15,6 +15,7 @@ public sealed class DirectRealtimeService(
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
     private static readonly TimeSpan ReconnectDelay = TimeSpan.FromSeconds(3);
+    private static readonly TimeSpan DisabledCheckDelay = TimeSpan.FromSeconds(30);
     private static readonly TimeSpan StateInterval = TimeSpan.FromSeconds(15);
 
     private string _lastPrintError = "";
@@ -34,6 +35,12 @@ public sealed class DirectRealtimeService(
             try
             {
                 var config = await configStore.LoadAsync(stoppingToken);
+                if (!config.DirectRealtimeEnabled)
+                {
+                    await Task.Delay(DisabledCheckDelay, stoppingToken);
+                    continue;
+                }
+
                 var agentKey = GetAgentKey(config, kind);
                 if (string.IsNullOrWhiteSpace(agentKey) || (kind == "whatsapp" && !config.WhatsAppEnabled))
                 {

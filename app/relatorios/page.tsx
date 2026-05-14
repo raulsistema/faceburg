@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import DashboardShell from '@/components/layout/DashboardShell';
 import { RefreshCw } from 'lucide-react';
+import { formatBusinessDateKey, getBusinessDateKey } from '@/lib/business-time';
 
 type ReportsResponse = {
   period: {
@@ -51,16 +52,7 @@ function brl(value: number) {
 }
 
 function todayInSaoPaulo() {
-  const parts = new Intl.DateTimeFormat('en-CA', {
-    timeZone: 'America/Sao_Paulo',
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-  }).formatToParts(new Date());
-  const year = parts.find((part) => part.type === 'year')?.value || '1970';
-  const month = parts.find((part) => part.type === 'month')?.value || '01';
-  const day = parts.find((part) => part.type === 'day')?.value || '01';
-  return `${year}-${month}-${day}`;
+  return getBusinessDateKey() || '1970-01-01';
 }
 
 function shiftDate(dateInput: string, days: number) {
@@ -70,7 +62,7 @@ function shiftDate(dateInput: string, days: number) {
 }
 
 function formatDate(dateIso: string) {
-  return new Date(`${dateIso}T00:00:00`).toLocaleDateString('pt-BR');
+  return formatBusinessDateKey(dateIso);
 }
 
 export default function RelatoriosPage() {

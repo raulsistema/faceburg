@@ -2,7 +2,7 @@
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import DashboardShell from '@/components/layout/DashboardShell';
-import { Search, Plus, Minus, Trash2, ShoppingCart, Ticket, X, Bike } from 'lucide-react';
+import { Search, Plus, Minus, Trash2, ShoppingCart, Ticket, X, Bike, MoreHorizontal, Loader2 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { formatBrl, parseMoneyInput, roundMoney } from '@/lib/finance-utils';
 import { useZipCodeAutofill } from '@/hooks/use-zip-code-autofill';
@@ -15,7 +15,25 @@ interface Product {
   categoryId: string;
   imageUrl?: string | null;
   available: boolean;
+  optionGroupCount?: number;
 }
+
+type ProductOption = {
+  id: string;
+  name: string;
+  imageUrl?: string | null;
+  priceAddition: number;
+  active: boolean;
+};
+
+type ProductOptionGroup = {
+  id: string;
+  name: string;
+  minSelect: number;
+  maxSelect: number;
+  required: boolean;
+  options: ProductOption[];
+};
 
 interface Category {
   id: string;
@@ -24,7 +42,10 @@ interface Category {
 }
 
 interface CartItem extends Product {
+  cartKey: string;
   quantity: number;
+  selectedOptions: ProductOption[];
+  notes: string;
 }
 
 type PaymentMethod = string;
@@ -189,6 +210,77 @@ function makeLocalId() {
   return `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
+function normalizeOptionGroups(value: unknown): ProductOptionGroup[] {
+  if (!Array.isArray(value)) return [];
+
+  const groups: ProductOptionGroup[] = [];
+  for (const rawGroup of value) {
+    const group = rawGroup && typeof rawGroup === 'object' ? rawGroup as Record<string, unknown> : null;
+    if (!group) continue;
+
+    const options: ProductOption[] = [];
+    if (Array.isArray(group.options)) {
+      for (const rawOption of group.options) {
+        const option = rawOption && typeof rawOption === 'object' ? rawOption as Record<string, unknown> : null;
+        if (!option) continue;
+        const name = String(option.name || '').trim();
+        const id = String(option.id || '').trim();
+        if (!id || !name || option.active === false) continue;
+        options.push({
+          id,
+          name,
+          imageUrl: typeof option.imageUrl === 'string' ? option.imageUrl : null,
+          priceAddition: Number(option.priceAddition || 0),
+          active: true,
+        });
+      }
+    }
+
+    const name = String(group.name || '').trim();
+    const id = String(group.id || '').trim();
+    if (!id || !name || options.length === 0) continue;
+
+    const minSelect = Math.max(0, Math.floor(Number(group.minSelect || 0)));
+    const maxSelectRaw = Math.floor(Number(group.maxSelect || options.length));
+    const maxSelect = Math.max(1, Math.min(options.length, Number.isFinite(maxSelectRaw) ? maxSelectRaw : options.length));
+    groups.push({
+      id,
+      name,
+      minSelect: Math.min(minSelect, options.length),
+      maxSelect,
+      required: group.required === true,
+      options,
+    });
+  }
+
+  return groups;
+}
+
+function getRequiredOptionCount(group: ProductOptionGroup) {
+  const minSelect = Math.max(0, Number(group.minSelect || 0));
+  return group.required ? Math.max(1, minSelect) : minSelect;
+}
+
+function buildCartKey(productId: string, selectedOptions: ProductOption[], notes: string) {
+  const optionKey = selectedOptions.map((option) => option.id).sort().join('|');
+  const cleanNotes = notes.trim();
+  if (!optionKey && !cleanNotes) return productId;
+  return `${productId}::${optionKey}::${cleanNotes}`;
+}
+
+function buildCartItem(product: Product, selectedOptions: ProductOption[] = [], quantity = 1, notes = ''): CartItem {
+  const cleanNotes = notes.trim();
+  const optionsTotal = selectedOptions.reduce((sum, option) => sum + Number(option.priceAddition || 0), 0);
+  return {
+    ...product,
+    cartKey: buildCartKey(product.id, selectedOptions, cleanNotes),
+    price: roundMoney(Number(product.price || 0) + optionsTotal),
+    quantity,
+    selectedOptions,
+    notes: cleanNotes,
+  };
+}
+
 export default function PDVPage() {
   const [products, setProducts] = useState<Product[]>([]);
   const [categories, setCategories] = useState<Category[]>([]);
@@ -235,11 +327,19 @@ export default function PDVPage() {
   const [quickStreetLoading, setQuickStreetLoading] = useState(false);
   const [quickStreetMenuOpen, setQuickStreetMenuOpen] = useState(false);
   const [quickStreetScopeState, setQuickStreetScopeState] = useState('');
+  const [customizeProduct, setCustomizeProduct] = useState<Product | null>(null);
+  const [customizeGroups, setCustomizeGroups] = useState<ProductOptionGroup[]>([]);
+  const [customizeSelectedByGroup, setCustomizeSelectedByGroup] = useState<Record<string, string[]>>({});
+  const [customizeQuantity, setCustomizeQuantity] = useState(1);
+  const [customizeNotes, setCustomizeNotes] = useState('');
+  const [customizeLoading, setCustomizeLoading] = useState(false);
+  const [customizeError, setCustomizeError] = useState<string | null>(null);
   const customerBoxRef = useRef<HTMLDivElement | null>(null);
   const quickStreetBoxRef = useRef<HTMLDivElement | null>(null);
   const selectedTabIdRef = useRef('');
   const syncQueueRef = useRef<Promise<void>>(Promise.resolve());
   const syncJobsRef = useRef(0);
+  const productOptionsCacheRef = useRef<Map<string, ProductOptionGroup[]>>(new Map());
 
   useEffect(() => {
     selectedTabIdRef.current = selectedTabId;
@@ -268,6 +368,12 @@ export default function PDVPage() {
     setCheckoutPayments([]);
     setCheckoutModalOpen(false);
     setTabDeleteTarget(null);
+    setCustomizeProduct(null);
+    setCustomizeGroups([]);
+    setCustomizeSelectedByGroup({});
+    setCustomizeQuantity(1);
+    setCustomizeNotes('');
+    setCustomizeError(null);
     setSyncingItems(false);
     syncQueueRef.current = Promise.resolve();
     syncJobsRef.current = 0;
@@ -292,6 +398,12 @@ export default function PDVPage() {
     setCheckoutPayments([]);
     setSyncingItems(false);
     setTabDeleteTarget(null);
+    setCustomizeProduct(null);
+    setCustomizeGroups([]);
+    setCustomizeSelectedByGroup({});
+    setCustomizeQuantity(1);
+    setCustomizeNotes('');
+    setCustomizeError(null);
     syncQueueRef.current = Promise.resolve();
     syncJobsRef.current = 0;
 
@@ -390,10 +502,14 @@ export default function PDVPage() {
                 id: item.productId,
                 name: item.productName,
                 price: Number(item.unitPrice || 0),
+                cartKey: item.productId,
                 quantity: item.quantity,
                 categoryId: '',
                 imageUrl: item.imageUrl,
                 available: true,
+                optionGroupCount: 0,
+                selectedOptions: [],
+                notes: item.notes || '',
               })),
             );
           }
@@ -589,10 +705,14 @@ export default function PDVPage() {
           id: item.productId,
           name: item.productName,
           price: Number(item.unitPrice || 0),
+          cartKey: item.productId,
           quantity: item.quantity,
           categoryId: '',
           imageUrl: item.imageUrl,
           available: true,
+          optionGroupCount: 0,
+          selectedOptions: [],
+          notes: item.notes || '',
         })),
       );
       setCheckoutPayments([]);
@@ -819,14 +939,138 @@ export default function PDVPage() {
       });
   }, [syncTabItems]);
 
-  const addToCart = (product: Product) => {
+  const resetCustomization = () => {
+    setCustomizeProduct(null);
+    setCustomizeGroups([]);
+    setCustomizeSelectedByGroup({});
+    setCustomizeQuantity(1);
+    setCustomizeNotes('');
+    setCustomizeLoading(false);
+    setCustomizeError(null);
+  };
+
+  const getSelectedCustomizeOptions = () => {
+    const selected: ProductOption[] = [];
+    for (const group of customizeGroups) {
+      const selectedIds = customizeSelectedByGroup[group.id] || [];
+      for (const option of group.options) {
+        if (selectedIds.includes(option.id)) selected.push(option);
+      }
+    }
+    return selected;
+  };
+
+  const getInvalidCustomizeGroup = () => {
+    for (const group of customizeGroups) {
+      const selectedCount = (customizeSelectedByGroup[group.id] || []).length;
+      const requiredCount = getRequiredOptionCount(group);
+      if (selectedCount < requiredCount) return group;
+      if (group.maxSelect > 0 && selectedCount > group.maxSelect) return group;
+    }
+    return null;
+  };
+
+  const fetchProductOptionGroups = async (product: Product) => {
+    const cached = productOptionsCacheRef.current.get(product.id);
+    if (cached) return cached;
+
+    const response = await fetch(`/api/products/${product.id}`, { cache: 'no-store' });
+    const data = await response.json();
+    if (!response.ok) {
+      throw new Error(data.error || 'Falha ao carregar complementos.');
+    }
+
+    const optionGroups = normalizeOptionGroups(data?.product?.optionGroups || []);
+    productOptionsCacheRef.current.set(product.id, optionGroups);
+    return optionGroups;
+  };
+
+  const openCustomizationDrawer = async (product: Product) => {
+    if (saleMode !== 'quick') {
+      addToCart(product);
+      return;
+    }
+
+    setCustomizeProduct(product);
+    setCustomizeGroups([]);
+    setCustomizeSelectedByGroup({});
+    setCustomizeQuantity(1);
+    setCustomizeNotes('');
+    setCustomizeLoading(true);
+    setCustomizeError(null);
+
+    try {
+      const optionGroups = await fetchProductOptionGroups(product);
+      if (optionGroups.length === 0) {
+        resetCustomization();
+        addToCart(product);
+        return;
+      }
+      setCustomizeGroups(optionGroups);
+    } catch (error) {
+      setCustomizeError(error instanceof Error ? error.message : 'Falha ao carregar complementos.');
+    } finally {
+      setCustomizeLoading(false);
+    }
+  };
+
+  const handleProductClick = (product: Product) => {
+    if (saleMode === 'quick' && Number(product.optionGroupCount || 0) > 0) {
+      void openCustomizationDrawer(product);
+      return;
+    }
+    addToCart(product);
+  };
+
+  const toggleCustomizeOption = (group: ProductOptionGroup, option: ProductOption) => {
+    setCustomizeError(null);
+    setCustomizeSelectedByGroup((prev) => {
+      const current = prev[group.id] || [];
+      const exists = current.includes(option.id);
+      if (exists) {
+        return { ...prev, [group.id]: current.filter((id) => id !== option.id) };
+      }
+      if (group.maxSelect === 1) {
+        return { ...prev, [group.id]: [option.id] };
+      }
+      if (group.maxSelect > 0 && current.length >= group.maxSelect) {
+        return prev;
+      }
+      return { ...prev, [group.id]: [...current, option.id] };
+    });
+  };
+
+  const confirmCustomization = () => {
+    if (!customizeProduct || customizeLoading) return;
+    const invalidGroup = getInvalidCustomizeGroup();
+    if (invalidGroup) {
+      const requiredCount = getRequiredOptionCount(invalidGroup);
+      setCustomizeError(
+        requiredCount > 0
+          ? `Escolha pelo menos ${requiredCount} opcao(oes) em "${invalidGroup.name}".`
+          : `Revise as opcoes de "${invalidGroup.name}".`,
+      );
+      return;
+    }
+
+    addToCart(customizeProduct, getSelectedCustomizeOptions(), customizeQuantity, customizeNotes);
+    resetCustomization();
+  };
+
+  const addToCart = (product: Product, selectedOptions: ProductOption[] = [], quantityToAdd = 1, notes = '') => {
+    const nextItem = buildCartItem(product, selectedOptions, Math.max(1, quantityToAdd), notes);
+
     if (saleMode === 'quick') {
       setCart((prev) => {
-        const existing = prev.find((item) => item.id === product.id);
+        const existing = prev.find((item) => item.cartKey === nextItem.cartKey);
         if (existing) {
-          return prev.map((item) => (item.id === product.id ? { ...item, quantity: item.quantity + 1 } : item));
+          return prev.map((item) =>
+            item.cartKey === nextItem.cartKey
+              ? { ...item, quantity: item.quantity + nextItem.quantity }
+              : item,
+          );
         }
-        return [...prev, { ...product, quantity: 1 }];
+        return [...prev, nextItem];
       });
       return;
     }
@@ -838,21 +1082,25 @@ export default function PDVPage() {
     }
 
     setCart((prev) => {
-      const existing = prev.find((item) => item.id === product.id);
+      const existing = prev.find((item) => item.cartKey === nextItem.cartKey);
       const next = existing
-        ? prev.map((item) => (item.id === product.id ? { ...item, quantity: item.quantity + 1 } : item))
-        : [...prev, { ...product, quantity: 1 }];
+        ? prev.map((item) =>
+            item.cartKey === nextItem.cartKey
+              ? { ...item, quantity: item.quantity + nextItem.quantity }
+              : item,
+          )
+        : [...prev, nextItem];
       queueSyncItems(tabId, next);
       return next;
     });
   };
 
-  const updateQuantity = (id: string, delta: number) => {
+  const updateQuantity = (cartKey: string, delta: number) => {
     if (saleMode === 'quick') {
       setCart((prev) =>
         prev
           .map((item) => {
-            if (item.id !== id) return item;
+            if (item.cartKey !== cartKey) return item;
             return { ...item, quantity: Math.max(0, item.quantity + delta) };
           })
           .filter((item) => item.quantity > 0),
@@ -869,7 +1117,7 @@ export default function PDVPage() {
     setCart((prev) => {
       const next = prev
         .map((item) => {
-          if (item.id !== id) return item;
+          if (item.cartKey !== cartKey) return item;
           return { ...item, quantity: Math.max(0, item.quantity + delta) };
         })
         .filter((item) => item.quantity > 0);
@@ -896,6 +1144,15 @@ export default function PDVPage() {
 
   const subtotal = cart.reduce((sum, item) => sum + item.price * item.quantity, 0);
   const total = formatMoneyValue(subtotal - appliedDiscount + appliedSurcharge + appliedDeliveryFee);
+  const customizeSelectedOptions = customizeProduct ? getSelectedCustomizeOptions() : [];
+  const customizeUnitTotal = customizeProduct
+    ? roundMoney(
+        customizeProduct.price +
+          customizeSelectedOptions.reduce((sum, option) => sum + Number(option.priceAddition || 0), 0),
+      )
+    : 0;
+  const customizeTotal = roundMoney(customizeUnitTotal * customizeQuantity);
+  const customizeCanConfirm = Boolean(customizeProduct) && customizeGroups.length > 0 && !customizeLoading && !getInvalidCustomizeGroup();
   const activePaymentMethods = paymentMethods.length > 0 ? paymentMethods : PAYMENT_OPTIONS;
   const checkoutPaymentsTotal = roundMoney(
     checkoutPayments.reduce((sum, line) => {
@@ -1170,7 +1427,12 @@ export default function PDVPage() {
           surchargeAmount: appliedSurcharge,
           deliveryFeeAmount: appliedDeliveryFee,
           type: 'pickup',
-          items: cart.map((item) => ({ productId: item.id, quantity: item.quantity })),
+          items: cart.map((item) => ({
+            productId: item.id,
+            quantity: item.quantity,
+            selectedOptionIds: item.selectedOptions.map((option) => option.id),
+            notes: item.notes,
+          })),
         }),
       });
       const data = await response.json();
@@ -1320,7 +1582,7 @@ export default function PDVPage() {
               {renderedProducts.map((product) => (
                 <button
                   key={product.id}
-                  onClick={() => addToCart(product)}
+                  onClick={() => handleProductClick(product)}
                   disabled={saleMode === 'tab' ? !selectedTabId : false}
                   className={cn(
                     'bg-white border border-slate-200 p-4 rounded-2xl shadow-sm text-left transition-all group',
@@ -1334,7 +1596,11 @@ export default function PDVPage() {
                       <ShoppingCart className="w-8 h-8 opacity-20 group-hover:scale-110 transition-transform" />
                     )}
                     <div className="absolute top-2 right-2 p-1.5 bg-brand-primary text-white rounded-lg opacity-0 group-hover:opacity-100 transition-opacity">
-                      <Plus className="w-4 h-4" />
+                      {saleMode === 'quick' && Number(product.optionGroupCount || 0) > 0 ? (
+                        <MoreHorizontal className="w-4 h-4" />
+                      ) : (
+                        <Plus className="w-4 h-4" />
+                      )}
                     </div>
                   </div>
                   <h4 className="font-bold text-slate-900 text-sm mb-1 leading-tight">{product.name}</h4>
@@ -1476,17 +1742,23 @@ export default function PDVPage() {
 
           <div className="flex-1 min-h-[96px] lg:min-h-[120px] max-h-[190px] lg:max-h-[220px] overflow-y-auto p-2.5 space-y-2.5">
             {cart.map((item) => (
-              <div key={item.id} className="flex items-center justify-between gap-4 group">
+              <div key={item.cartKey} className="flex items-start justify-between gap-3 group">
                 <div className="flex-1">
                   <p className="text-sm font-bold text-slate-900 leading-tight mb-0.5">{item.name}</p>
                   <p className="text-xs text-slate-500">{formatBrl(item.price)} / un</p>
+                  {item.selectedOptions.length > 0 ? (
+                    <p className="mt-1 text-[11px] leading-snug text-slate-500">
+                      {item.selectedOptions.map((option) => option.name).join(', ')}
+                    </p>
+                  ) : null}
+                  {item.notes ? <p className="mt-1 text-[11px] leading-snug text-slate-500">Obs.: {item.notes}</p> : null}
                 </div>
                 <div className="flex items-center gap-3">
-                  <button onClick={() => updateQuantity(item.id, -1)} className="p-1 rounded-md bg-slate-100 text-slate-500 hover:bg-slate-200">
+                  <button onClick={() => updateQuantity(item.cartKey, -1)} className="p-1 rounded-md bg-slate-100 text-slate-500 hover:bg-slate-200">
                     <Minus className="w-3 h-3" />
                   </button>
                   <span className="text-sm font-bold text-slate-900 w-4 text-center">{item.quantity}</span>
-                  <button onClick={() => updateQuantity(item.id, 1)} className="p-1 rounded-md bg-slate-100 text-slate-500 hover:bg-slate-200">
+                  <button onClick={() => updateQuantity(item.cartKey, 1)} className="p-1 rounded-md bg-slate-100 text-slate-500 hover:bg-slate-200">
                     <Plus className="w-3 h-3" />
                   </button>
                 </div>
@@ -1661,6 +1933,143 @@ export default function PDVPage() {
           </div>
         </div>
       </div>
+      {customizeProduct ? (
+        <div className="fixed inset-0 z-50 flex justify-end">
+          <button type="button" className="absolute inset-0 bg-slate-950/45" onClick={resetCustomization} />
+          <aside className="relative z-10 flex h-full w-full max-w-[430px] flex-col bg-white shadow-2xl">
+            <div className="flex items-start justify-between border-b border-slate-200 px-5 py-4">
+              <div className="min-w-0">
+                <p className="text-xs font-bold uppercase tracking-wide text-brand-primary">Complementos</p>
+                <h3 className="mt-1 truncate text-lg font-black text-slate-950">{customizeProduct.name}</h3>
+                <p className="mt-0.5 text-sm font-semibold text-slate-500">{formatBrl(customizeProduct.price)}</p>
+              </div>
+              <button type="button" className="rounded-lg p-2 text-slate-500 hover:bg-slate-100" onClick={resetCustomization}>
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+
+            <div className="flex-1 overflow-y-auto bg-slate-50/70">
+              {customizeLoading ? (
+                <div className="flex h-full flex-col items-center justify-center gap-3 text-sm font-semibold text-slate-500">
+                  <Loader2 className="h-6 w-6 animate-spin text-brand-primary" />
+                  Carregando complementos...
+                </div>
+              ) : (
+                <div className="space-y-3 p-3">
+                  {customizeGroups.map((group) => {
+                    const selectedIds = customizeSelectedByGroup[group.id] || [];
+                    const requiredCount = getRequiredOptionCount(group);
+                    const selectedCount = selectedIds.length;
+                    return (
+                      <section key={group.id} className="overflow-hidden rounded-xl border border-slate-200 bg-white">
+                        <div className="flex items-center justify-between gap-3 bg-slate-100 px-3 py-2">
+                          <div className="min-w-0">
+                            <h4 className="truncate text-sm font-black text-slate-900">{group.name}</h4>
+                            <p className="text-[11px] text-slate-500">
+                              {requiredCount > 0 ? `Escolha pelo menos ${requiredCount} opcao(oes).` : `Escolha ate ${group.maxSelect} opcao(oes).`}
+                            </p>
+                          </div>
+                          <div className="flex shrink-0 items-center gap-1.5">
+                            <span className="rounded-md bg-slate-950 px-2 py-1 text-xs font-black text-white">
+                              {selectedCount}/{group.maxSelect}
+                            </span>
+                            {requiredCount > 0 ? (
+                              <span className="rounded-md bg-slate-950 px-2 py-1 text-[10px] font-black uppercase text-white">
+                                Obrigatorio
+                              </span>
+                            ) : null}
+                          </div>
+                        </div>
+
+                        <div className="divide-y divide-slate-100">
+                          {group.options.map((option) => {
+                            const checked = selectedIds.includes(option.id);
+                            return (
+                              <button
+                                key={option.id}
+                                type="button"
+                                onClick={() => toggleCustomizeOption(group, option)}
+                                className={cn(
+                                  'flex w-full items-center gap-3 px-3 py-3 text-left transition',
+                                  checked ? 'bg-brand-primary/5' : 'hover:bg-slate-50',
+                                )}
+                              >
+                                {option.imageUrl ? (
+                                  <span className="relative h-10 w-10 shrink-0 overflow-hidden rounded-lg bg-slate-100">
+                                    <AppImage src={option.imageUrl} alt={option.name} fill sizes="40px" className="object-cover" />
+                                  </span>
+                                ) : null}
+                                <span className="min-w-0 flex-1">
+                                  <span className="block truncate text-sm font-semibold text-slate-900">{option.name}</span>
+                                  {option.priceAddition > 0 ? (
+                                    <span className="block text-xs font-semibold text-brand-primary">+ {formatBrl(option.priceAddition)}</span>
+                                  ) : null}
+                                </span>
+                                <span
+                                  className={cn(
+                                    'flex h-8 w-8 shrink-0 items-center justify-center rounded-full border text-sm font-black',
+                                    checked
+                                      ? 'border-rose-200 bg-rose-50 text-rose-600'
+                                      : 'border-brand-primary/30 bg-white text-brand-primary',
+                                  )}
+                                >
+                                  {checked ? <Minus className="h-4 w-4" /> : <Plus className="h-4 w-4" />}
+                                </span>
+                              </button>
+                            );
+                          })}
+                        </div>
+                      </section>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+
+            <div className="border-t border-slate-200 bg-white p-4">
+              <div className="mb-3 flex items-center justify-between gap-3">
+                <div className="flex items-center rounded-xl border border-slate-200 bg-white">
+                  <button
+                    type="button"
+                    className="p-2 text-slate-500 hover:text-slate-900 disabled:opacity-40"
+                    disabled={customizeQuantity <= 1}
+                    onClick={() => setCustomizeQuantity((current) => Math.max(1, current - 1))}
+                  >
+                    <Minus className="h-4 w-4" />
+                  </button>
+                  <span className="w-10 text-center text-sm font-black text-slate-950">{customizeQuantity}</span>
+                  <button
+                    type="button"
+                    className="p-2 text-slate-500 hover:text-slate-900"
+                    onClick={() => setCustomizeQuantity((current) => current + 1)}
+                  >
+                    <Plus className="h-4 w-4" />
+                  </button>
+                </div>
+                <div className="text-right">
+                  <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Total</p>
+                  <p className="text-lg font-black text-brand-primary">{formatBrl(customizeTotal)}</p>
+                </div>
+              </div>
+              <textarea
+                value={customizeNotes}
+                onChange={(event) => setCustomizeNotes(event.target.value)}
+                className="mb-3 h-16 w-full resize-none rounded-xl border border-slate-200 px-3 py-2 text-sm outline-none focus:border-brand-primary"
+                placeholder="Observacao"
+              />
+              {customizeError ? <p className="mb-3 text-xs font-semibold text-rose-600">{customizeError}</p> : null}
+              <button
+                type="button"
+                disabled={!customizeCanConfirm}
+                onClick={confirmCustomization}
+                className="w-full rounded-xl bg-brand-primary px-4 py-3 text-sm font-black uppercase text-white shadow-md transition hover:bg-brand-primary/90 disabled:bg-slate-300 disabled:shadow-none"
+              >
+                Adicionar {formatBrl(customizeTotal)}
+              </button>
+            </div>
+          </aside>
+        </div>
+      ) : null}
       {checkoutModalOpen ? (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
           <button type="button" className="absolute inset-0 bg-slate-950/45" onClick={() => setCheckoutModalOpen(false)} />

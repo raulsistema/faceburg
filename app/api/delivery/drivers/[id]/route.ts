@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import { query } from '@/lib/db';
 import { type DeliveryDriverStatus, hashDeliveryPin, verifyDeliveryPin } from '@/lib/delivery-auth';
-import { getValidatedTenantSession } from '@/lib/tenant-auth';
+import { requireTenantSession } from '@/lib/tenant-auth';
 
 export const dynamic = 'force-dynamic';
 
@@ -33,10 +33,8 @@ async function pinAlreadyInUse(tenantId: string, pin: string, exceptDriverId: st
 }
 
 export async function PATCH(request: Request, { params }: { params: Promise<{ id: string }> }) {
-  const session = await getValidatedTenantSession();
-  if (!session) {
-    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-  }
+  const { session, response } = await requireTenantSession(['admin']);
+  if (response) return response;
 
   const { id } = await params;
   const body = (await request.json().catch(() => ({}))) as {

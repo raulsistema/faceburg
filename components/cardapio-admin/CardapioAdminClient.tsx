@@ -22,6 +22,7 @@ import {
 } from 'lucide-react';
 import DashboardShell from '@/components/layout/DashboardShell';
 import AppImage from '@/components/ui/AppImage';
+import { imageFileToWebpDataUrl } from '@/lib/client-image-webp';
 import { parseMoneyInput } from '@/lib/finance-utils';
 import { cn } from '@/lib/utils';
 
@@ -586,11 +587,8 @@ function fromMenuStory(story: MenuStory): MenuStoryDraft {
 }
 
 function fileToDataUrl(file: File) {
-  return new Promise<string>((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(String(reader.result || ''));
-    reader.onerror = () => reject(new Error('Falha ao ler imagem.'));
-    reader.readAsDataURL(file);
+  return imageFileToWebpDataUrl(file, {
+    maxOutputBytes: MAX_IMAGE_BYTES,
   });
 }
 
@@ -1150,7 +1148,7 @@ export default function CardapioAdminPage() {
     try {
       const dataUrl = await fileToDataUrl(file);
       updateMenuStory(index, { imageUrl: dataUrl });
-      setSuccessMessage('Imagem do story carregada.');
+      setSuccessMessage('Imagem do story convertida para WebP.');
     } catch {
       setError('Falha ao carregar imagem do story.');
     } finally {
@@ -1345,7 +1343,7 @@ export default function CardapioAdminPage() {
     try {
       const dataUrl = await fileToDataUrl(file);
       setProductDraft((current) => ({ ...current, imageUrl: dataUrl }));
-      setSuccessMessage('Imagem carregada no banco (ate 5 MB).');
+      setSuccessMessage('Imagem convertida para WebP e carregada no banco.');
     } catch {
       setError('Falha ao carregar imagem.');
     } finally {
@@ -1365,7 +1363,7 @@ export default function CardapioAdminPage() {
     try {
       const dataUrl = await fileToDataUrl(file);
       setSettings((current) => ({ ...current, coverImageUrl: dataUrl }));
-      setSuccessMessage('Capa carregada no banco (ate 5 MB).');
+      setSuccessMessage('Capa convertida para WebP e carregada no banco.');
     } catch {
       setError('Falha ao carregar imagem da capa.');
     } finally {
@@ -1386,7 +1384,7 @@ export default function CardapioAdminPage() {
     try {
       const dataUrl = await fileToDataUrl(file);
       updateOptionInGroup(groupIndex, optionIndex, { imageUrl: dataUrl });
-      setSuccessMessage('Imagem do complemento carregada.');
+      setSuccessMessage('Imagem do complemento convertida para WebP.');
     } catch {
       setError('Falha ao carregar imagem do complemento.');
     } finally {
@@ -2713,7 +2711,7 @@ export default function CardapioAdminPage() {
                               </button>
                             </div>
                             <p className="text-xs text-slate-500">
-                              {storyImageUploadingKey === index ? 'Carregando imagem...' : 'Use arte vertical ou quadrada para chamar mais atencao no topo do catalogo.'}
+                              {storyImageUploadingKey === index ? 'Convertendo para WebP...' : 'Use arte vertical ou quadrada para chamar mais atencao no topo do catalogo.'}
                             </p>
                           </div>
 
@@ -2826,10 +2824,10 @@ export default function CardapioAdminPage() {
                     <div className="flex flex-col gap-3 border-t border-slate-200 bg-white p-4 sm:flex-row sm:items-center sm:justify-between">
                       <div className="text-xs text-slate-500">
                         {coverImageUploading
-                          ? 'Carregando imagem da capa...'
+                          ? 'Convertendo capa para WebP...'
                           : settings.coverImageUrl
                             ? 'Capa pronta para salvar.'
-                            : 'Selecione uma imagem de ate 5 MB.'}
+                            : 'Selecione uma imagem de ate 5 MB. Ela sera convertida para WebP.'}
                       </div>
                       <div className="flex flex-wrap gap-2">
                         <label className="inline-flex cursor-pointer items-center justify-center rounded-2xl border border-slate-200 px-4 py-2 text-sm font-semibold text-slate-700 transition hover:border-orange-200 hover:bg-orange-50">
@@ -3586,8 +3584,8 @@ export default function CardapioAdminPage() {
                           <div className="mt-3 flex flex-wrap items-center justify-between gap-3">
                             <p className="text-xs text-slate-500">
                               {imageUploading
-                                ? 'Carregando imagem...'
-                                : 'Selecione uma imagem de ate 5 MB.'}
+                                ? 'Convertendo para WebP...'
+                                : 'Selecione uma imagem de ate 5 MB. Ela sera convertida para WebP.'}
                             </p>
                             <button
                               type="button"
@@ -3983,7 +3981,7 @@ export default function CardapioAdminPage() {
                                               <div className="min-w-0 flex-1">
                                                 <div className="text-xs text-slate-500">
                                                   {optionImageUploadingKey === `${groupIndex}:${optionIndex}`
-                                                    ? 'Carregando imagem...'
+                                                    ? 'Convertendo para WebP...'
                                                     : option.imageUrl
                                                       ? 'Imagem pronta para o cardapio.'
                                                       : 'A foto ajuda o cliente a visualizar o adicional.'}

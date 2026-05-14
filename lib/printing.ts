@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { query } from '@/lib/db';
 import type { DbExecutor } from '@/lib/db';
+import { formatBusinessDate, formatBusinessTime } from '@/lib/business-time';
 import {
   DEFAULT_PRINT_WIDTH,
   getEffectiveReceiptWidth,
@@ -92,6 +93,7 @@ type AgentConfigRow = {
 type PrepareOrderPrintJobsOptions = {
   ignoreAgentEnabled?: boolean;
   requireActiveHub?: boolean;
+  initialDelaySeconds?: number;
 };
 
 type OrderStatusRow = {
@@ -629,18 +631,12 @@ export async function buildOrderPrintText(
   lines.push('');
   lines.push(`Venda: ${orderCode}`);
   lines.push(
-    `Data: ${createdAt.toLocaleDateString('pt-BR')} ${createdAt.toLocaleTimeString('pt-BR', {
-      hour: '2-digit',
-      minute: '2-digit',
-    })}`,
+    `Data: ${formatBusinessDate(createdAt)} ${formatBusinessTime(createdAt)}`,
   );
 
   if (order.type === 'delivery' || order.type === 'pickup') {
     lines.push(
-      `${typeToForecastLabel(order.type)} ${estimatedAt.toLocaleTimeString('pt-BR', {
-        hour: '2-digit',
-        minute: '2-digit',
-      })}`,
+      `${typeToForecastLabel(order.type)} ${formatBusinessTime(estimatedAt)}`,
     );
   }
 
@@ -842,6 +838,7 @@ export async function enqueueOrderPrintJob(
   const jobs = await prepareOrderPrintJobs(tenantId, orderId, eventType, executor, options);
   if (!jobs.length) return false;
 
+  const initialDelaySeconds = Math.min(300, Math.max(0, Math.round(options.initialDelaySeconds || 0)));
   let insertedCount = 0;
   for (const job of jobs) {
     const dedupeKey =
@@ -850,12 +847,14 @@ export async function enqueueOrderPrintJob(
         : `${orderId}:${eventType}:${job.copyIndex}`;
     const result = await executor.query(
       `INSERT INTO print_jobs
-        (id, tenant_id, order_id, event_type, payload_text, status, attempt_count, dedupe_key, created_at, updated_at)
+        (id, tenant_id, order_id, event_type, payload_text, status, attempt_count, dedupe_key, next_retry_at, created_at, updated_at)
        VALUES
-        ($1, $2, $3, $4, $5, 'queued', 0, $6, NOW(), NOW())
+        ($1, $2, $3, $4, $5, 'queued', 0, $6,
+         CASE WHEN $7::int > 0 THEN NOW() + ($7::int * INTERVAL '1 second') ELSE NULL END,
+         NOW(), NOW())
        ON CONFLICT DO NOTHING
        RETURNING id`,
-      [job.id, tenantId, orderId, eventType, job.payloadText, dedupeKey],
+      [job.id, tenantId, orderId, eventType, job.payloadText, dedupeKey, initialDelaySeconds],
     );
     insertedCount += result.rowCount || 0;
   }

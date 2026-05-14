@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { query } from '@/lib/db';
+import { sanitizePublicImageSource } from '@/lib/image-safety';
 
 type ProductRow = {
   id: string;
@@ -115,7 +116,7 @@ export async function GET(_: Request, { params }: { params: Promise<{ slug: stri
       options: (optionsByGroup.get(group.id) || []).map((option) => ({
         id: option.id,
         name: option.name,
-        imageUrl: option.image_url,
+        imageUrl: sanitizePublicImageSource(option.image_url),
         priceAddition: Number(option.price_addition || 0),
       })),
     }));

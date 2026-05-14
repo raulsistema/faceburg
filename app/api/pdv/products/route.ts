@@ -16,6 +16,7 @@ type ProductRow = {
   image_url: string | null;
   available: boolean;
   product_type: string;
+  option_group_count: number;
 };
 
 export async function GET() {
@@ -50,9 +51,20 @@ export async function GET() {
          p.category_id,
          p.image_url,
          p.available,
-         p.product_type
+         p.product_type,
+         COALESCE(option_counts.option_group_count, 0)::int AS option_group_count
        FROM products p
        INNER JOIN categories c ON c.id = p.category_id
+       LEFT JOIN LATERAL (
+         SELECT COUNT(DISTINCT pog.id)::int AS option_group_count
+         FROM product_option_groups pog
+         INNER JOIN product_options po
+            ON po.group_id = pog.id
+           AND po.tenant_id = pog.tenant_id
+           AND po.active = TRUE
+         WHERE pog.tenant_id = p.tenant_id
+           AND pog.product_id = p.id
+       ) option_counts ON TRUE
        WHERE p.tenant_id = $1
          AND p.available = TRUE
          AND p.product_type <> 'ingredient'
@@ -75,6 +87,7 @@ export async function GET() {
       categoryId: product.category_id,
       imageUrl: product.image_url,
       available: product.available,
+      optionGroupCount: Number(product.option_group_count || 0),
     })),
   });
 }

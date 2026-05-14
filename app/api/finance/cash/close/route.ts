@@ -4,13 +4,13 @@ import { getCashSessionFinanceSummary } from '@/lib/cash-summary';
 import { ensureFinanceSchema } from '@/lib/finance-schema';
 import { parseMoneyInput } from '@/lib/finance-utils';
 import { ensureStoreHoursSchema } from '@/lib/store-hours';
-import { getValidatedTenantSession } from '@/lib/tenant-auth';
+import { requireTenantSession } from '@/lib/tenant-auth';
 
 export async function POST(request: Request) {
   await ensureFinanceSchema();
   await ensureStoreHoursSchema();
-  const session = await getValidatedTenantSession();
-  if (!session) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+  const { session, response } = await requireTenantSession(['admin', 'staff']);
+  if (response) return response;
 
   const body = await request.json();
   const closingAmountReported = parseMoneyInput(body.closingAmountReported);

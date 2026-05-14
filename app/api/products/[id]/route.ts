@@ -1,8 +1,14 @@
 ﻿import { NextResponse } from 'next/server';
 import pool, { query } from '@/lib/db';
 import { parseMoneyInput } from '@/lib/finance-utils';
-import { fetchProductOptionGroups, normalizeProductOptionGroups, syncProductOptionGroups } from '@/lib/product-options';
-import { getValidatedTenantSession } from '@/lib/tenant-auth';
+import { validateImageSource } from '@/lib/image-safety';
+import {
+  fetchProductOptionGroups,
+  normalizeProductOptionGroups,
+  syncProductOptionGroups,
+  validateProductOptionGroupImages,
+} from '@/lib/product-options';
+import { getValidatedTenantSession, requireTenantSession } from '@/lib/tenant-auth';
 
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
 const PRODUCT_TYPES = ['prepared', 'packaged', 'size_based', 'ingredient', 'special'] as const;
@@ -50,21 +56,8 @@ function hasOwn(body: Record<string, unknown>, key: string) {
   return Object.prototype.hasOwnProperty.call(body, key);
 }
 
-function estimateDataUrlBytes(value: string) {
-  const commaIndex = value.indexOf(',');
-  if (commaIndex === -1) return 0;
-  const base64 = value.slice(commaIndex + 1);
-  return Math.floor((base64.length * 3) / 4);
-}
-
 function validateImagePayload(imageUrl: string) {
-  if (!imageUrl) return null;
-  if (!imageUrl.startsWith('data:image/')) return null;
-  const bytes = estimateDataUrlBytes(imageUrl);
-  if (!bytes || bytes > MAX_IMAGE_BYTES) {
-    return 'Imagem deve ter no maximo 5 MB.';
-  }
-  return null;
+  return validateImageSource(imageUrl, MAX_IMAGE_BYTES);
 }
 
 function normalizeProductType(value: unknown, fallback: ProductType): ProductType {
@@ -138,10 +131,8 @@ export async function GET(_request: Request, { params }: { params: Promise<{ id:
 }
 
 export async function PATCH(request: Request, { params }: { params: Promise<{ id: string }> }) {
-  const session = await getValidatedTenantSession();
-  if (!session) {
-    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-  }
+  const { session, response } = await requireTenantSession(['admin']);
+  if (response) return response;
 
   const { id } = await params;
   const currentResult = await query<ProductRow>(PRODUCT_SELECT_SQL, [id, session.tenantId]);
@@ -159,6 +150,12 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
   const imageValidationError = validateImagePayload(payload.imageUrl);
   if (imageValidationError) {
     return NextResponse.json({ error: imageValidationError }, { status: 400 });
+  }
+  if (payload.optionGroups) {
+    const optionImageValidationError = validateProductOptionGroupImages(payload.optionGroups, MAX_IMAGE_BYTES);
+    if (optionImageValidationError) {
+      return NextResponse.json({ error: optionImageValidationError }, { status: 400 });
+    }
   }
 
   const categoryCheck = await query<{ id: string; product_type: string }>(

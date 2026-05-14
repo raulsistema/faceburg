@@ -25,6 +25,7 @@ import {
 import { cn } from '@/lib/utils';
 import { useZipCodeAutofill } from '@/hooks/use-zip-code-autofill';
 import AppImage from '@/components/ui/AppImage';
+import { formatBusinessDateTime } from '@/lib/business-time';
 import { parseMoneyInput } from '@/lib/finance-utils';
 
 type Tenant = {
@@ -3023,7 +3024,7 @@ export default function PublicMenuClient({ tenantSlug, initialData }: PublicMenu
                       <div className="grid gap-2 text-sm text-slate-600 md:grid-cols-2">
                         <p><strong className="text-slate-900">Tipo:</strong> {orderTypeLabel(latestPortalOrder.type)}</p>
                         <p><strong className="text-slate-900">Total:</strong> {brl(latestPortalOrder.total)}</p>
-                        <p><strong className="text-slate-900">Data:</strong> {new Date(latestPortalOrder.createdAt).toLocaleString('pt-BR')}</p>
+                        <p><strong className="text-slate-900">Data:</strong> {formatBusinessDateTime(latestPortalOrder.createdAt)}</p>
                         <p><strong className="text-slate-900">Pagamento:</strong> {formatPaymentMethodLabel(latestPortalOrder.paymentMethod)}</p>
                       </div>
                       {latestPortalOrder.deliveryAddress ? (
@@ -3049,7 +3050,7 @@ export default function PublicMenuClient({ tenantSlug, initialData }: PublicMenu
                           <div className="flex flex-wrap items-center justify-between gap-3">
                             <div>
                               <p className="font-bold text-slate-900">Pedido #{order.id.slice(0, 8).toUpperCase()}</p>
-                              <p className="text-xs text-slate-500">{new Date(order.createdAt).toLocaleString('pt-BR')}</p>
+                              <p className="text-xs text-slate-500">{formatBusinessDateTime(order.createdAt)}</p>
                             </div>
                             <span className={cn('inline-flex rounded-full border px-3 py-1 text-xs font-bold', orderStatusTone(order.status))}>
                               {orderStatusLabel(order.status)}
@@ -3116,7 +3117,7 @@ export default function PublicMenuClient({ tenantSlug, initialData }: PublicMenu
                 </div>
               </div>
               <div className="flex items-center justify-between gap-3 bg-white px-5 py-4 text-sm text-slate-500">
-                <span>{activeStory.expiresAt ? `Valido ate ${new Date(activeStory.expiresAt).toLocaleString('pt-BR')}` : 'Sem expiracao definida'}</span>
+                <span>{activeStory.expiresAt ? `Valido ate ${formatBusinessDateTime(activeStory.expiresAt)}` : 'Sem expiracao definida'}</span>
                 <button
                   onClick={() => setActiveStory(null)}
                   className="rounded-xl border border-slate-200 px-4 py-2 font-semibold text-slate-700 transition hover:bg-slate-50"

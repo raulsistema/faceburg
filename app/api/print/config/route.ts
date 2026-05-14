@@ -10,7 +10,7 @@ import {
   normalizeReceiptText,
   normalizeReceiptWidth,
 } from '@/lib/print-settings';
-import { getValidatedTenantSession } from '@/lib/tenant-auth';
+import { requireTenantSession } from '@/lib/tenant-auth';
 
 type ConfigRow = {
   tenant_id: string;
@@ -35,10 +35,9 @@ function buildAgentKey() {
 }
 
 export async function GET() {
-  const session = await getValidatedTenantSession();
-  if (!session) {
-    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-  }
+  const { session, response } = await requireTenantSession(['admin', 'staff']);
+  if (response) return response;
+  const canManageAgent = session?.role === 'admin';
 
   const result = await query<ConfigRow>(
     `SELECT tenant_id,
@@ -66,7 +65,7 @@ export async function GET() {
   return NextResponse.json({
     enabled: row?.enabled || false,
     hasAgentKey: Boolean(row?.agent_key),
-    agentKey: row?.agent_key || '',
+    agentKey: canManageAgent ? row?.agent_key || '' : '',
     connectionStatus: row?.connection_status || 'disconnected',
     printerName: row?.printer_name || '',
     receiptWidth: normalizeReceiptWidth(row?.receipt_width),
@@ -83,10 +82,8 @@ export async function GET() {
 }
 
 export async function PATCH(request: Request) {
-  const session = await getValidatedTenantSession();
-  if (!session) {
-    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-  }
+  const { session, response } = await requireTenantSession(['admin']);
+  if (response) return response;
 
   let body: Record<string, unknown> = {};
   try {

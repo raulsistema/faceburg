@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { query } from '@/lib/db';
 import type { DbExecutor } from '@/lib/db';
+import { formatBusinessDate, formatBusinessTime } from '@/lib/business-time';
 import { buildTrackingUrl } from '@/lib/delivery-tracking';
 import { notifyAgentJobAvailable } from '@/lib/realtime';
 
@@ -268,10 +269,7 @@ function buildNewOrderMessage(order: OrderHeaderRow, items: OrderItemRow[]) {
     'Pedido recebido com sucesso.',
     '',
     `*Codigo:* #${order.id.slice(0, 8).toUpperCase()}`,
-    `*Data:* ${createdAt.toLocaleDateString('pt-BR')} ${createdAt.toLocaleTimeString('pt-BR', {
-      hour: '2-digit',
-      minute: '2-digit',
-    })}`,
+    `*Data:* ${formatBusinessDate(createdAt)} ${formatBusinessTime(createdAt)}`,
     `*Cliente:* ${text(order.customer_name) || 'Sem nome'}`,
     `*Contato:* ${formatPhone(order.customer_phone) || text(order.customer_phone) || 'Nao informado'}`,
     `*Pagamento:* ${paymentSentence(order.type, order.payment_method, order.payment_method_names)}`,
@@ -394,19 +392,32 @@ export async function enqueueOrderWhatsappJob(
   orderId: string,
   eventType: 'new_order' | 'status_update',
   executor: DbExecutor = { query },
+  options: { initialDelaySeconds?: number } = {},
 ) {
   await ensureWhatsappJobSchema(executor);
   const prepared = await prepareOrderWhatsappJob(tenantId, orderId, eventType, executor);
   if (!prepared) return false;
 
+  const initialDelaySeconds = Math.min(300, Math.max(0, Math.round(options.initialDelaySeconds || 0)));
   const result = await executor.query(
     `INSERT INTO whatsapp_jobs
-      (id, tenant_id, order_id, target_phone, event_type, payload_text, status, attempt_count, dedupe_key, created_at, updated_at)
+      (id, tenant_id, order_id, target_phone, event_type, payload_text, status, attempt_count, dedupe_key, next_retry_at, created_at, updated_at)
      VALUES
-      ($1, $2, $3, $4, $5, $6, 'queued', 0, $7, NOW(), NOW())
+      ($1, $2, $3, $4, $5, $6, 'queued', 0, $7,
+       CASE WHEN $8::int > 0 THEN NOW() + ($8::int * INTERVAL '1 second') ELSE NULL END,
+       NOW(), NOW())
      ON CONFLICT DO NOTHING
      RETURNING id`,
-    [prepared.id, tenantId, orderId, prepared.targetPhone, eventType, prepared.payloadText, `${orderId}:${eventType}`],
+    [
+      prepared.id,
+      tenantId,
+      orderId,
+      prepared.targetPhone,
+      eventType,
+      prepared.payloadText,
+      `${orderId}:${eventType}`,
+      initialDelaySeconds,
+    ],
   );
   if ((result.rowCount || 0) > 0) {
     await notifyAgentJobAvailable(tenantId, 'whatsapp', executor);

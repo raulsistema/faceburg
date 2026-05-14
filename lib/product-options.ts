@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type { QueryResult, QueryResultRow } from 'pg';
 import { query } from '@/lib/db';
 import { parseMoneyInput } from '@/lib/finance-utils';
+import { validateImageSource } from '@/lib/image-safety';
 
 type QueryExecutor = {
   query: <T extends QueryResultRow = QueryResultRow>(text: string, values?: unknown[]) => Promise<QueryResult<T>>;
@@ -136,6 +137,19 @@ export function normalizeProductOptionGroups(value: unknown): ProductOptionGroup
   }
 
   return normalizedGroups;
+}
+
+export function validateProductOptionGroupImages(groups: ProductOptionGroupPayload[], maxBytes?: number) {
+  for (const group of groups) {
+    for (const option of group.options) {
+      const imageValidationError = validateImageSource(option.imageUrl || '', maxBytes);
+      if (imageValidationError) {
+        return `Imagem do complemento "${option.name}": ${imageValidationError}`;
+      }
+    }
+  }
+
+  return null;
 }
 
 export async function fetchProductOptionGroups(

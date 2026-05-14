@@ -16,6 +16,7 @@ import {
   TestTube2,
 } from 'lucide-react';
 import AppImage from '@/components/ui/AppImage';
+import { formatBusinessDateTime } from '@/lib/business-time';
 import {
   DEFAULT_PRINT_EVENTS,
   DEFAULT_RECEIPT_OPTIONS,
@@ -74,6 +75,7 @@ type LocalAgentConfig = {
   terminalId?: string;
   printAgentKey?: string;
   whatsAppAgentKey?: string;
+  directRealtimeEnabled?: boolean;
   realtimeGatewayPort?: number;
   realtimeGatewayPath?: string;
   defaultPrinter?: string;
@@ -102,6 +104,7 @@ type LocalAgentHealth = {
   tenantSlug?: string;
   terminalId?: string;
   printerName?: string;
+  directRealtimeEnabled?: boolean;
   realtimeGatewayPort?: number;
   realtimeGatewayPath?: string;
   hasPrintAgentKey?: boolean;
@@ -347,9 +350,7 @@ function statusLabel(status?: string) {
 
 function formatDateTime(value?: string | null) {
   if (!value) return 'nunca';
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return 'nunca';
-  return date.toLocaleString('pt-BR');
+  return formatBusinessDateTime(value) || 'nunca';
 }
 
 export default function LocalAgentSettings({
@@ -572,6 +573,7 @@ export default function LocalAgentSettings({
       terminalId: terminalId.trim() || 'ATENDIMENTO',
       printAgentKey: printAgentKeyRef.current || agentConfig?.printAgentKey || '',
       whatsAppAgentKey: whatsappAgentKeyRef.current || agentConfig?.whatsAppAgentKey || '',
+      directRealtimeEnabled: false,
       realtimeGatewayPort: Number(agentConfig?.realtimeGatewayPort || 3001),
       realtimeGatewayPath: agentConfig?.realtimeGatewayPath || '/ws/agents',
       defaultPrinter: selectedPrinter.trim(),

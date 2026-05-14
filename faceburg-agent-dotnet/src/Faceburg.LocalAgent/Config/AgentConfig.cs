@@ -10,6 +10,7 @@ public sealed class AgentConfig
     public string TerminalId { get; set; } = Environment.MachineName;
     public string PrintAgentKey { get; set; } = "";
     public string WhatsAppAgentKey { get; set; } = "";
+    public bool DirectRealtimeEnabled { get; set; } = false;
     public int RealtimeGatewayPort { get; set; } = 3001;
     public string RealtimeGatewayPath { get; set; } = "/ws/agents";
     public string DefaultPrinter { get; set; } = "";

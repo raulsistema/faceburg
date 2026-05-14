@@ -1,5 +1,6 @@
 import { notFound } from 'next/navigation';
 import { Bike, CheckCircle2, Clock3, CookingPot, MapPin, PackageCheck } from 'lucide-react';
+import { formatBusinessDateTime } from '@/lib/business-time';
 import { getPublicDeliveryTracking } from '@/lib/delivery-tracking';
 import { cn } from '@/lib/utils';
 
@@ -8,9 +9,7 @@ export const revalidate = 0;
 
 function formatDateTime(value: string | null) {
   if (!value) return '';
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return '';
-  return date.toLocaleString('pt-BR', {
+  return formatBusinessDateTime(value, {
     day: '2-digit',
     month: '2-digit',
     hour: '2-digit',

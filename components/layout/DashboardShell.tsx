@@ -3,7 +3,7 @@
 import React, { useEffect, useState } from 'react';
 import { Menu, X } from 'lucide-react';
 import { usePathname, useRouter } from 'next/navigation';
-import LocalAutomationBridge from '@/components/local-automation/LocalAutomationBridge';
+
 import Sidebar from './Sidebar';
 
 type MeResponse = {
@@ -215,7 +215,6 @@ export default function DashboardShell({
             </div>
           </div>
           <div className="flex items-center gap-5">
-            <LocalAutomationBridge enabled={Boolean(data?.authenticated)} tenantId={data?.tenant?.id || ''} />
             <div className="text-right hidden sm:block">
               <div className="text-xs font-bold text-slate-900">{data?.user?.name || 'Usuario'}</div>
               <div className="text-[10px] text-slate-500 font-medium">{data?.user?.email || ''}</div>

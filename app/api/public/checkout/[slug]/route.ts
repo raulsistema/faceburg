@@ -5,15 +5,27 @@ import pool, { query } from '@/lib/db';
 import { ensureOrderDeliveryIdentifiers } from '@/lib/delivery-tracking';
 import { quoteDeliveryFee } from '@/lib/delivery-fee';
 import { parseMoneyInput } from '@/lib/finance-utils';
-import { getActiveLocalAutomationLease } from '@/lib/local-automation';
+
 import { getOrderAutomationConfig, initialOrderStatusForAutomation } from '@/lib/order-automation';
 import { assignOrderSequenceNumber, ensureOrderSequenceSchema } from '@/lib/order-sequence';
 import { enqueueOrderPrintJob } from '@/lib/printing';
+import { checkRateLimit } from '@/lib/rate-limit';
 import { notifyOrderEvent } from '@/lib/realtime';
 import { ensureStoreHoursSchema, isMenuOpenNow } from '@/lib/store-hours';
 import { enqueueOrderWhatsappJob } from '@/lib/whatsapp';
 
 class CheckoutValidationError extends Error {}
+
+const LOCAL_FALLBACK_QUEUE_DELAY_SECONDS = 90;
+
+class PublicCheckoutRateLimitError extends Error {
+  retryAfterSeconds: number;
+
+  constructor(message: string, retryAfterSeconds: number) {
+    super(message);
+    this.retryAfterSeconds = retryAfterSeconds;
+  }
+}
 
 type TenantRow = {
   id: string;
@@ -130,6 +142,41 @@ function getDatabaseErrorCode(error: unknown) {
 
 function isUniqueViolation(error: unknown) {
   return getDatabaseErrorCode(error) === '23505';
+}
+
+function getClientIp(request: Request) {
+  const forwardedFor = request.headers.get('x-forwarded-for') || '';
+  const firstForwardedIp = forwardedFor.split(',')[0]?.trim();
+  return (
+    firstForwardedIp ||
+    request.headers.get('x-real-ip') ||
+    request.headers.get('cf-connecting-ip') ||
+    'unknown'
+  );
+}
+
+async function enforcePublicCheckoutRateLimit(request: Request, tenantId: string, phoneDigits: string) {
+  const clientIp = getClientIp(request);
+  const checks = await Promise.all([
+    checkRateLimit({
+      key: `public-checkout:${tenantId}:ip:${clientIp}`,
+      limit: 30,
+      windowSeconds: 10 * 60,
+    }),
+    checkRateLimit({
+      key: `public-checkout:${tenantId}:phone:${phoneDigits}`,
+      limit: 8,
+      windowSeconds: 15 * 60,
+    }),
+  ]);
+
+  const blocked = checks.find((check) => !check.allowed);
+  if (blocked) {
+    throw new PublicCheckoutRateLimitError(
+      'Muitas tentativas de pedido em pouco tempo. Aguarde alguns minutos e tente novamente.',
+      blocked.retryAfterSeconds,
+    );
+  }
 }
 
 async function ensureCheckoutKeySchema() {
@@ -437,6 +484,8 @@ export async function POST(request: Request, { params }: { params: Promise<{ slu
     if (existingCheckoutOrder) {
       return serializeExistingCheckoutOrder(tenant.id, existingCheckoutOrder);
     }
+
+    await enforcePublicCheckoutRateLimit(request, tenant.id, customerPhoneDigits);
 
     const normalizedItems = items
       .map((item) => ({
@@ -1071,17 +1120,15 @@ export async function POST(request: Request, { params }: { params: Promise<{ slu
 
     await dbClient.query('COMMIT');
 
-    const localAutomationLease = await getActiveLocalAutomationLease(tenant.id).catch(() => null);
-    const localPrintActive = Boolean(localAutomationLease?.capabilities.print);
-    const localWhatsappActive = Boolean(localAutomationLease?.capabilities.whatsapp);
-    const localAutomationActive = localPrintActive || localWhatsappActive;
+    const queueOptions = { initialDelaySeconds: LOCAL_FALLBACK_QUEUE_DELAY_SECONDS };
+
     const orderEventDispatch = await Promise.allSettled([
       notifyOrderEvent(tenant.id, 'created', orderId),
-      localPrintActive ? Promise.resolve(false) : enqueueOrderPrintJob(tenant.id, orderId, 'new_order'),
-      !localPrintActive && initialOrderStatus === 'processing'
-        ? enqueueOrderPrintJob(tenant.id, orderId, 'status_update')
+      enqueueOrderPrintJob(tenant.id, orderId, 'new_order', undefined, queueOptions),
+      initialOrderStatus === 'processing'
+        ? enqueueOrderPrintJob(tenant.id, orderId, 'status_update', undefined, queueOptions)
         : Promise.resolve(false),
-      localWhatsappActive ? Promise.resolve(false) : enqueueOrderWhatsappJob(tenant.id, orderId, 'new_order'),
+      enqueueOrderWhatsappJob(tenant.id, orderId, 'new_order', undefined, queueOptions),
     ]);
     const realtimeNotified = orderEventDispatch[0]?.status === 'fulfilled';
     const printQueued =
@@ -1112,10 +1159,20 @@ export async function POST(request: Request, { params }: { params: Promise<{ slu
         kitchenPrintQueued,
         whatsappQueued,
         realtimeNotified,
-        localAutomationRequested: localAutomationActive,
       },
     });
   } catch (error) {
+    if (error instanceof PublicCheckoutRateLimitError) {
+      return NextResponse.json(
+        { error: error.message },
+        {
+          status: 429,
+          headers: {
+            'Retry-After': String(error.retryAfterSeconds),
+          },
+        },
+      );
+    }
     if (client) {
       try {
         await client.query('ROLLBACK');

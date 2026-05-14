@@ -3,7 +3,7 @@ import { NextResponse } from 'next/server';
 import { query } from '@/lib/db';
 import { ensureFinanceSchema } from '@/lib/finance-schema';
 import { normalizePaymentMethodType, parseIntegerInput, parseMoneyInput } from '@/lib/finance-utils';
-import { getValidatedTenantSession } from '@/lib/tenant-auth';
+import { getValidatedTenantSession, requireTenantSession } from '@/lib/tenant-auth';
 
 type PaymentMethodRow = {
   id: string;
@@ -88,10 +88,8 @@ export async function GET() {
 
 export async function POST(request: Request) {
   await ensureFinanceSchema();
-  const session = await getValidatedTenantSession();
-  if (!session) {
-    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-  }
+  const { session, response } = await requireTenantSession(['admin']);
+  if (response) return response;
 
   const body = (await request.json()) as Record<string, unknown>;
   const input = readPaymentMethodInput(body);
@@ -117,10 +115,8 @@ export async function POST(request: Request) {
 
 export async function PATCH(request: Request) {
   await ensureFinanceSchema();
-  const session = await getValidatedTenantSession();
-  if (!session) {
-    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-  }
+  const { session, response } = await requireTenantSession(['admin']);
+  if (response) return response;
 
   const body = (await request.json()) as Record<string, unknown>;
   const input = readPaymentMethodInput(body);

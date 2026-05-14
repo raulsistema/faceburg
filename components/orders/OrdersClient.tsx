@@ -2,9 +2,11 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import DashboardShell from '@/components/layout/DashboardShell';
+import LocalAutomationBridge from '@/components/local-automation/LocalAutomationBridge';
 import { AlertTriangle, Banknote, Clock, CreditCard, Hash, MapPin, MessageCircle, Search, Settings, ShoppingBag, Printer, RefreshCw, Menu, ChevronDown, Eye, Ban, X, Bike, Plus, Minus, Trash2, Volume2, VolumeX } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useRealtimeRefresh } from '@/hooks/use-realtime-refresh';
+import { formatBusinessDateTime } from '@/lib/business-time';
 import {
   DEFAULT_ORDER_NOTIFICATION_SOUND,
   ORDER_NOTIFICATION_SOUND_OPTIONS,
@@ -109,6 +111,14 @@ type PrintConfigResponse = {
   autoAcceptOrders?: boolean;
   lastError?: string;
   lastSeenAt?: string | null;
+  error?: string;
+};
+
+type AuthMeResponse = {
+  authenticated?: boolean;
+  tenant?: {
+    id?: string;
+  };
   error?: string;
 };
 
@@ -702,6 +712,7 @@ export default function PedidosPage() {
   const [cashLoading, setCashLoading] = useState(false);
   const [cashOpening, setCashOpening] = useState(false);
   const [cashCurrent, setCashCurrent] = useState<CashCurrentResponse['current']>(null);
+  const [tenantId, setTenantId] = useState('');
   const [cashOpeningAmount, setCashOpeningAmount] = useState('0');
   const [countdownNowMs, setCountdownNowMs] = useState(() => Date.now());
   const seenOrderIdsRef = useRef<Set<string>>(new Set());
@@ -805,6 +816,13 @@ export default function PedidosPage() {
 
     desktopPrintStartRef.current = (async () => {
       setDesktopAppAvailable(true);
+      if (desktopBridge.printDirect) {
+        setDesktopPrintRunning(true);
+        setPrintConnectionStatus('ready');
+        setPrintLastSeenAt(new Date().toISOString());
+        setDesktopPrintLastError('');
+        return true;
+      }
 
       const desktopState = await desktopBridge.getState().catch(() => null);
       if (desktopState?.print) {
@@ -1189,6 +1207,28 @@ export default function PedidosPage() {
   }, []);
 
   const { refreshNow } = useRealtimeRefresh({ load: loadOrders, fallbackRefreshMs: 0 });
+
+  useEffect(() => {
+    let active = true;
+    void fetch('/api/auth/me', {
+      cache: 'no-store',
+      headers: {
+        'cache-control': 'no-cache',
+      },
+    })
+      .then(async (response) => (response.ok ? ((await response.json().catch(() => ({}))) as AuthMeResponse) : null))
+      .then((data) => {
+        if (!active) return;
+        setTenantId(String(data?.tenant?.id || ''));
+      })
+      .catch(() => {
+        if (active) setTenantId('');
+      });
+
+    return () => {
+      active = false;
+    };
+  }, []);
 
   useEffect(() => {
     const desktopBridge = getFaceburgDesktopBridge();
@@ -2677,7 +2717,13 @@ export default function PedidosPage() {
           <h2 className="text-xl font-bold text-slate-900">Gerenciador de Pedidos</h2>
           <p className="text-sm text-slate-500">Pedidos do cardapio e PDV em tempo real.</p>
         </div>
-        <div className="flex flex-wrap justify-end gap-2">
+        <div className="flex flex-wrap items-center justify-end gap-2">
+          <LocalAutomationBridge
+            enabled={Boolean(tenantId && (printEnabled || whatsappEnabled))}
+            tenantId={tenantId}
+            printEnabled={printEnabled}
+            whatsappEnabled={whatsappEnabled}
+          />
           <button
             className="btn-secondary flex items-center gap-2"
             type="button"
@@ -3049,7 +3095,7 @@ export default function PedidosPage() {
                       <p className="text-sm text-slate-500">Consultando caixa...</p>
                     ) : cashCurrent ? (
                       <p className="text-sm text-emerald-700">
-                        Aberto desde {new Date(cashCurrent.openedAt).toLocaleString('pt-BR')} com {formatCurrency(cashCurrent.openingAmount)}.
+                        Aberto desde {formatBusinessDateTime(cashCurrent.openedAt)} com {formatCurrency(cashCurrent.openingAmount)}.
                       </p>
                     ) : (
                       <div className="mt-3 grid gap-3">
@@ -3428,7 +3474,7 @@ export default function PedidosPage() {
                         </p>
                         <p>
                           <strong className="text-slate-700">Data:</strong>{' '}
-                          {new Date(selectedOrderDetail.createdAt).toLocaleString('pt-BR')}
+                          {formatBusinessDateTime(selectedOrderDetail.createdAt)}
                         </p>
                         <p>
                           <strong className="text-slate-700">Pagamento:</strong>{' '}

@@ -2,26 +2,14 @@
 import { NextResponse } from 'next/server';
 import pool, { query } from '@/lib/db';
 import { parseMoneyInput } from '@/lib/finance-utils';
-import { normalizeProductOptionGroups, syncProductOptionGroups } from '@/lib/product-options';
-import { getValidatedTenantSession } from '@/lib/tenant-auth';
+import { validateImageSource } from '@/lib/image-safety';
+import { normalizeProductOptionGroups, syncProductOptionGroups, validateProductOptionGroupImages } from '@/lib/product-options';
+import { getValidatedTenantSession, requireTenantSession } from '@/lib/tenant-auth';
 
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
 
-function estimateDataUrlBytes(value: string) {
-  const commaIndex = value.indexOf(',');
-  if (commaIndex === -1) return 0;
-  const base64 = value.slice(commaIndex + 1);
-  return Math.floor((base64.length * 3) / 4);
-}
-
 function validateImagePayload(imageUrl: string) {
-  if (!imageUrl) return null;
-  if (!imageUrl.startsWith('data:image/')) return null;
-  const bytes = estimateDataUrlBytes(imageUrl);
-  if (!bytes || bytes > MAX_IMAGE_BYTES) {
-    return 'Imagem deve ter no maximo 5 MB.';
-  }
-  return null;
+  return validateImageSource(imageUrl, MAX_IMAGE_BYTES);
 }
 
 type ProductRow = {
@@ -73,10 +61,8 @@ export async function GET() {
 }
 
 export async function POST(request: Request) {
-  const session = await getValidatedTenantSession();
-  if (!session) {
-    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-  }
+  const { session, response } = await requireTenantSession(['admin']);
+  if (response) return response;
 
   const body = await request.json();
   const categoryId = String(body.categoryId || '').trim();
@@ -105,6 +91,10 @@ export async function POST(request: Request) {
   const imageValidationError = validateImagePayload(imageUrl);
   if (imageValidationError) {
     return NextResponse.json({ error: imageValidationError }, { status: 400 });
+  }
+  const optionImageValidationError = validateProductOptionGroupImages(optionGroups, MAX_IMAGE_BYTES);
+  if (optionImageValidationError) {
+    return NextResponse.json({ error: optionImageValidationError }, { status: 400 });
   }
 
   const categoryCheck = await query<{ id: string; product_type: string }>(

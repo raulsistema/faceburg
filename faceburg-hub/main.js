@@ -3,6 +3,8 @@ const { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage, safeStorage, shell
 const { fork, execFile } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
+const QRCode = require('qrcode');
+const { printTextWindows, sendCutCommandWindows } = require('./agents/native-printer');
 
 /* ─── constants ──────────────────────────────────────────────── */
 
@@ -254,7 +256,7 @@ async function openSystemWindow(preferredUrl = '') {
 }
 
 function pushLog(source, message) {
-  const entry = { ts: new Date().toLocaleTimeString('pt-BR'), source, message };
+  const entry = { ts: new Date().toLocaleTimeString('pt-BR', { timeZone: 'America/Sao_Paulo' }), source, message };
   logs.push(entry);
   if (logs.length > LOG_MAX) logs = logs.slice(-LOG_MAX);
   emit('agent:log', entry);
@@ -892,12 +894,235 @@ function stopAllAgents() {
   stopPrintWorker();
 }
 
-async function printDirectFromHub(payload) {
-  if (!printWorker) {
-    await startPrintWorker();
+function escapeHtml(value) {
+  return String(value || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function normalizeReceiptPayload(value) {
+  return String(value || '')
+    .replace(/\r\n/g, '\n')
+    .replace(/\r/g, '\n')
+    .replace(/\u00a0/g, ' ')
+    .trimEnd();
+}
+
+function normalizePrintFontSize(value) {
+  const parsed = Number(String(value || '').replace(',', '.'));
+  if (!Number.isFinite(parsed)) return 12.5;
+  return Math.min(24, Math.max(8, parsed));
+}
+
+function paperWidthMmForColumns(columns) {
+  const parsed = Number(columns || 32);
+  return parsed >= 48 || parsed === 80 ? 80 : 58;
+}
+
+function isDividerLine(value) {
+  const clean = String(value || '').trim();
+  return clean.length >= 6 && /^[-_=*]+$/.test(clean);
+}
+
+function isHeaderLine(value) {
+  const upper = String(value || '').trim().toUpperCase();
+  return (
+    upper === 'DELIVERY' ||
+    upper === 'RETIRADA' ||
+    upper === 'RETIRADA NA LOJA' ||
+    upper === 'BALCAO' ||
+    upper === 'MESA' ||
+    upper === 'COZINHA' ||
+    upper === 'PEDIDO' ||
+    upper.startsWith('PEDIDO #')
+  );
+}
+
+function stripReceiptTags(value) {
+  let current = String(value || '').trim();
+  const state = {
+    align: '',
+    bold: false,
+    big: false,
+  };
+  let changed = true;
+
+  while (changed) {
+    changed = false;
+    for (const tag of ['center', 'right', 'b', 'strong', 'big']) {
+      const pattern = new RegExp(`^\\s*<${tag}>\\s*([\\s\\S]*?)\\s*</${tag}>\\s*$`, 'i');
+      const match = current.match(pattern);
+      if (!match) continue;
+      if (tag === 'center') state.align = 'center';
+      if (tag === 'right') state.align = 'right';
+      if (tag === 'b' || tag === 'strong') state.bold = true;
+      if (tag === 'big') {
+        state.bold = true;
+        state.big = true;
+      }
+      current = String(match[1] || '').trim();
+      changed = true;
+    }
   }
-  if (!printWorker) throw new Error('Agente de impressao nao iniciou.');
-  return sendWorkerRequest(printWorker, 'print-direct', payload, 30000);
+
+  return { value: current, ...state };
+}
+
+async function renderReceiptHtml(payload) {
+  const text = normalizeReceiptPayload(payload?.payloadText);
+  if (!text.trim()) throw new Error('Conteudo de impressao vazio.');
+
+  const columns = Number(payload?.columns || 32);
+  const paperWidthMm = paperWidthMmForColumns(columns);
+  const fontSizePt = normalizePrintFontSize(payload?.printTextSize);
+  const qrWidth = paperWidthMm >= 80 ? 210 : 170;
+  const rows = [];
+
+  for (const rawLine of text.split('\n')) {
+    const line = rawLine.trimEnd();
+    const clean = line.trim();
+    if (!clean) {
+      rows.push('<div class="spacer"></div>');
+      continue;
+    }
+
+    const qrMatch = line.match(/^\s*(?:<qrcode>|<qr>|\[qrcode\]|\[qr\]|QR:)\s*(.*?)\s*(?:<\/qrcode>|<\/qr>|\[\/qrcode\]|\[\/qr\])?\s*$/i);
+    if (qrMatch && qrMatch[1]?.trim()) {
+      const qrDataUrl = await QRCode.toDataURL(qrMatch[1].trim(), {
+        margin: 1,
+        width: qrWidth,
+      });
+      rows.push(`<div class="qr"><img alt="" src="${qrDataUrl}"></div>`);
+      continue;
+    }
+
+    if (isDividerLine(clean)) {
+      rows.push('<div class="rule"></div>');
+      continue;
+    }
+
+    const parsed = stripReceiptTags(clean);
+    const leadingSpaces = line.length - line.trimStart().length;
+    const looksCentered = leadingSpaces >= 2 && clean.length <= Math.max(8, columns - (leadingSpaces * 2));
+    const header = isHeaderLine(parsed.value);
+    const total = parsed.value.trimStart().toUpperCase().startsWith('TOTAL:');
+    const classes = ['line'];
+    if (parsed.align === 'center' || looksCentered || header) classes.push('center');
+    if (parsed.align === 'right') classes.push('right');
+    if (parsed.bold || header || total) classes.push('bold');
+    if (parsed.big || header) classes.push('big');
+
+    rows.push(`<div class="${classes.join(' ')}">${escapeHtml(parsed.value)}</div>`);
+  }
+
+  return `<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <style>
+    @page { size: ${paperWidthMm}mm auto; margin: 0; }
+    html, body { margin: 0; padding: 0; background: #fff; color: #000; }
+    body {
+      width: ${paperWidthMm}mm;
+      box-sizing: border-box;
+      padding: ${paperWidthMm >= 80 ? '3mm 4mm' : '2mm 2.5mm'};
+      font-family: Consolas, "Courier New", "Lucida Console", monospace;
+      font-size: ${fontSizePt}pt;
+      line-height: 1.22;
+      -webkit-print-color-adjust: exact;
+      print-color-adjust: exact;
+    }
+    .line { white-space: pre-wrap; overflow-wrap: anywhere; }
+    .center { text-align: center; }
+    .right { text-align: right; }
+    .bold { font-weight: 700; }
+    .big { font-size: 1.2em; line-height: 1.18; margin: 1mm 0; }
+    .spacer { height: 3.2mm; }
+    .rule { border-top: 1px solid #000; margin: 1.4mm 0; height: 0; }
+    .qr { text-align: center; margin: 2mm 0; }
+    .qr img { width: ${qrWidth}px; height: ${qrWidth}px; }
+  </style>
+</head>
+<body>${rows.join('')}</body>
+</html>`;
+}
+
+async function printReceiptWithCss(payload) {
+  const html = await renderReceiptHtml(payload);
+  const settings = readSettings();
+  const printerName = String(payload?.printerName || settings.printerName || '').trim();
+  const printWindow = new BrowserWindow({
+    show: false,
+    width: 420,
+    height: 800,
+    webPreferences: {
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+    },
+  });
+
+  try {
+    await printWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`);
+    await new Promise((resolve, reject) => {
+      printWindow.webContents.print({
+        silent: true,
+        printBackground: true,
+        deviceName: printerName || undefined,
+        margins: { marginType: 'none' },
+      }, (success, failureReason) => {
+        if (success) {
+          resolve();
+          return;
+        }
+        reject(new Error(failureReason || 'Falha ao imprimir pelo Electron.'));
+      });
+    });
+    const cutResult = process.platform === 'win32'
+      ? await sendCutCommandWindows(printerName).catch((error) => ({
+          strategy: 'raw-command',
+          printerName,
+          skipped: true,
+          reason: error?.message || String(error || 'cut-failed'),
+        }))
+      : { skipped: true, reason: 'unsupported-platform' };
+    return {
+      strategy: 'electron-css',
+      printerName,
+      cut: cutResult,
+      local: true,
+    };
+  } finally {
+    if (!printWindow.isDestroyed()) {
+      printWindow.close();
+    }
+  }
+}
+
+async function printDirectFromHub(payload) {
+  const settings = readSettings();
+  const printerName = String(payload?.printerName || settings.printerName || '').trim();
+  try {
+    const result = await printReceiptWithCss({ ...payload, printerName });
+    const cutInfo = result.cut?.command === 'cut'
+      ? ' com corte'
+      : result.cut?.skipped
+        ? ' sem corte RAW'
+        : '';
+    pushLog('print', `Job local enviado via CSS${printerName ? ` (${printerName})` : ''}${cutInfo}.`);
+    return result;
+  } catch (error) {
+    const reason = error?.message || String(error || 'falha desconhecida');
+    pushLog('print', `Impressao CSS falhou, usando fallback nativo: ${reason}`);
+    const result = await printTextWindows(String(payload?.payloadText || ''), printerName);
+    return {
+      ...result,
+      local: true,
+    };
+  }
 }
 
 async function sendWhatsAppDirectFromHub(payload) {

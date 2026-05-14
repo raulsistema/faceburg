@@ -1,5 +1,6 @@
 import { query } from '@/lib/db';
 import { normalizeDeliveryFeeMode, normalizeDeliveryFeeTable, normalizeDeliveryMaxDistanceMeters } from '@/lib/delivery-fee';
+import { sanitizePublicImageSource } from '@/lib/image-safety';
 import { ensureStoreHoursSchema, isMenuOpenNow } from '@/lib/store-hours';
 
 type TenantRow = {
@@ -137,13 +138,14 @@ export type PublicMenuProductQuery = {
 };
 
 function publicTenantImageUrl(slug: string, kind: 'logo' | 'cover', value: string | null) {
-  if (!value) return null;
+  if (!sanitizePublicImageSource(value)) return null;
   return `/api/public/tenant-image/${encodeURIComponent(slug)}/${kind}`;
 }
 
 function publicProductImageUrl(slug: string, productId: string, value: string | null) {
-  if (!value) return null;
-  if (!value.startsWith('data:')) return value;
+  const safeValue = sanitizePublicImageSource(value);
+  if (!safeValue) return null;
+  if (!safeValue.startsWith('data:')) return safeValue;
   return `/api/public/product-image/${encodeURIComponent(slug)}/${encodeURIComponent(productId)}`;
 }
 
@@ -361,7 +363,7 @@ export async function getPublicMenuData(slug: string, productQuery: PublicMenuPr
         id: story.id,
         title: story.title,
         subtitle: story.subtitle || '',
-        imageUrl: story.image_url,
+        imageUrl: sanitizePublicImageSource(story.image_url) || '',
         displayOrder: Number(story.display_order || 0),
         expiresAt: story.expires_at,
       })),

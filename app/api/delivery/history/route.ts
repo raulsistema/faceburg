@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { query } from '@/lib/db';
+import { BUSINESS_TIME_ZONE, getBusinessDateKey } from '@/lib/business-time';
 import { getValidatedDeliveryAccess } from '@/lib/delivery-auth';
 
 export const dynamic = 'force-dynamic';
@@ -27,12 +28,11 @@ function normalizeDate(value: string, fallback: string) {
 }
 
 function todayIsoDate() {
-  return new Date().toISOString().slice(0, 10);
+  return getBusinessDateKey() || new Date().toISOString().slice(0, 10);
 }
 
 function firstDayOfCurrentMonth() {
-  const now = new Date();
-  return new Date(now.getFullYear(), now.getMonth(), 1).toISOString().slice(0, 10);
+  return `${todayIsoDate().slice(0, 8)}01`;
 }
 
 function numberFrom(value: unknown) {
@@ -80,8 +80,8 @@ export async function GET(request: Request) {
        AND o.delivery_driver_id = $2
        AND o.type = 'delivery'
        AND o.status = 'completed'
-       AND COALESCE(o.delivery_finished_at, o.updated_at)::date >= $3::date
-       AND COALESCE(o.delivery_finished_at, o.updated_at)::date <= $4::date
+       AND timezone('${BUSINESS_TIME_ZONE}', COALESCE(o.delivery_finished_at, o.updated_at))::date >= $3::date
+       AND timezone('${BUSINESS_TIME_ZONE}', COALESCE(o.delivery_finished_at, o.updated_at))::date <= $4::date
      ORDER BY COALESCE(o.delivery_finished_at, o.updated_at) DESC
      LIMIT 300`,
     [session.tenantId, driverId, dateFrom, dateTo],

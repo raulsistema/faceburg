@@ -24,7 +24,7 @@ function emit(payload) {
 }
 
 function log(message) {
-  process.stderr.write(`${new Date().toISOString()} ${message}\n`);
+  process.stderr.write(`${new Date().toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' })} ${message}\n`);
 }
 
 function setState(patch) {
@@ -108,24 +108,6 @@ function puppeteerArgs() {
 
 function cleanupBrowserProfileLocks(profilePath) {
   const resolved = path.resolve(profilePath);
-
-  if (process.platform === 'win32') {
-    const command = `
-$target = [System.IO.Path]::GetFullPath($args[0]).ToLowerInvariant()
-Get-CimInstance Win32_Process -Filter "name='chrome.exe' OR name='msedge.exe'" |
-  Where-Object { $_.CommandLine -and $_.CommandLine.ToLowerInvariant().Contains($target) } |
-  ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
-`;
-    try {
-      execFileSync('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', command, resolved], {
-        stdio: 'ignore',
-        timeout: 6000,
-        windowsHide: true,
-      });
-    } catch (error) {
-      log(`profile cleanup skipped: ${error instanceof Error ? error.message : error}`);
-    }
-  }
 
   for (const fileName of ['SingletonCookie', 'SingletonLock', 'SingletonSocket']) {
     try {

@@ -1,8 +1,9 @@
 import { randomUUID } from 'node:crypto';
 import { NextResponse } from 'next/server';
 import { query } from '@/lib/db';
+import { BUSINESS_CURRENT_DATE_SQL, BUSINESS_TIME_ZONE } from '@/lib/business-time';
 import { type DeliveryDriverStatus, hashDeliveryPin, verifyDeliveryPin } from '@/lib/delivery-auth';
-import { getValidatedTenantSession } from '@/lib/tenant-auth';
+import { getValidatedTenantSession, requireTenantSession } from '@/lib/tenant-auth';
 
 export const dynamic = 'force-dynamic';
 
@@ -74,19 +75,19 @@ async function loadDrivers(tenantId: string) {
             d.created_at,
             COUNT(o.id) FILTER (
               WHERE o.status = 'completed'
-                AND COALESCE(o.delivery_finished_at, o.updated_at) >= date_trunc('day', NOW())
+                AND timezone('${BUSINESS_TIME_ZONE}', COALESCE(o.delivery_finished_at, o.updated_at))::date = ${BUSINESS_CURRENT_DATE_SQL}
             )::int AS today_count,
             COALESCE(SUM(o.delivery_fee_amount) FILTER (
               WHERE o.status = 'completed'
-                AND COALESCE(o.delivery_finished_at, o.updated_at) >= date_trunc('day', NOW())
+                AND timezone('${BUSINESS_TIME_ZONE}', COALESCE(o.delivery_finished_at, o.updated_at))::date = ${BUSINESS_CURRENT_DATE_SQL}
             ), 0)::text AS today_total,
             COUNT(o.id) FILTER (
               WHERE o.status = 'completed'
-                AND COALESCE(o.delivery_finished_at, o.updated_at) >= date_trunc('month', NOW())
+                AND timezone('${BUSINESS_TIME_ZONE}', COALESCE(o.delivery_finished_at, o.updated_at)) >= date_trunc('month', timezone('${BUSINESS_TIME_ZONE}', NOW()))
             )::int AS month_count,
             COALESCE(SUM(o.delivery_fee_amount) FILTER (
               WHERE o.status = 'completed'
-                AND COALESCE(o.delivery_finished_at, o.updated_at) >= date_trunc('month', NOW())
+                AND timezone('${BUSINESS_TIME_ZONE}', COALESCE(o.delivery_finished_at, o.updated_at)) >= date_trunc('month', timezone('${BUSINESS_TIME_ZONE}', NOW()))
             ), 0)::text AS month_total,
             COUNT(o.id) FILTER (WHERE o.status = 'completed')::int AS lifetime_count,
             COALESCE(SUM(o.delivery_fee_amount) FILTER (WHERE o.status = 'completed'), 0)::text AS lifetime_total
@@ -128,10 +129,8 @@ export async function GET() {
 }
 
 export async function POST(request: Request) {
-  const session = await getValidatedTenantSession();
-  if (!session) {
-    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-  }
+  const { session, response } = await requireTenantSession(['admin']);
+  if (response) return response;
 
   const body = (await request.json().catch(() => ({}))) as {
     name?: unknown;

@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import { query } from '@/lib/db';
 import { claimLocalAutomationDispatch } from '@/lib/local-automation';
-import { getValidatedTenantSession } from '@/lib/tenant-auth';
+import { requireTenantSession } from '@/lib/tenant-auth';
 import { enqueueOrderPrintJob, prepareOrderPrintJobs } from '@/lib/printing';
 import { enqueueOrderWhatsappJob, prepareOrderWhatsappJob } from '@/lib/whatsapp';
 import type { PrintJobEventType } from '@/lib/print-settings';
@@ -14,10 +14,8 @@ const allowedPrintEvents = new Set<PrintJobEventType>(['new_order', 'status_upda
 const allowedWhatsappEvents = new Set(['new_order', 'status_update']);
 
 export async function POST(request: Request, { params }: { params: Promise<{ id: string }> }) {
-  const session = await getValidatedTenantSession();
-  if (!session) {
-    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-  }
+  const { session, response } = await requireTenantSession(['admin', 'staff']);
+  if (response) return response;
 
   const { id } = await params;
   const body = await request.json().catch(() => ({})) as {
@@ -25,6 +23,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
     printEventTypes?: string[];
     whatsappEventType?: string;
     preferLocalAgent?: boolean;
+    ackLocalDispatch?: boolean;
     localAutomationOwnerId?: string;
     localAutomationOwnerLabel?: string;
   };
@@ -51,6 +50,48 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
 
   if (!orderResult.rowCount) {
     return NextResponse.json({ error: 'Pedido nao encontrado.' }, { status: 404 });
+  }
+
+  if (body.ackLocalDispatch) {
+    const [printAcked, whatsappAcked] = await Promise.all([
+      shouldQueuePrint
+        ? query(
+            `UPDATE print_jobs
+             SET status = 'completed',
+                 last_error = NULL,
+                 lease_until = NULL,
+                 updated_at = NOW()
+             WHERE tenant_id = $1
+               AND order_id = $2
+               AND event_type = ANY($3::text[])
+               AND status IN ('queued', 'processing')
+             RETURNING id`,
+            [session.tenantId, id, printEventTypes],
+          ).then((result) => result.rowCount || 0)
+        : Promise.resolve(0),
+      shouldQueueWhatsapp
+        ? query(
+            `UPDATE whatsapp_jobs
+             SET status = 'completed',
+                 last_error = NULL,
+                 lease_until = NULL,
+                 updated_at = NOW()
+             WHERE tenant_id = $1
+               AND order_id = $2
+               AND event_type = $3
+               AND status IN ('queued', 'processing')
+             RETURNING id`,
+            [session.tenantId, id, whatsappEventType],
+          ).then((result) => result.rowCount || 0)
+        : Promise.resolve(0),
+    ]);
+
+    return NextResponse.json({
+      ok: true,
+      delivery: 'local_ack',
+      printAcked,
+      whatsappAcked,
+    });
   }
 
   if (body.preferLocalAgent) {
@@ -152,14 +193,14 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
     shouldQueuePrint
       ? Promise.all(printEventTypes.map((eventType) =>
         enqueueOrderPrintJob(session.tenantId, id, eventType).catch((error) => {
-          console.error('fallback print dispatch failed', error);
+          console.error('print dispatch failed', error);
           return false;
         })
       )).then((results) => results.some(Boolean))
       : Promise.resolve(false),
     shouldQueueWhatsapp
       ? enqueueOrderWhatsappJob(session.tenantId, id, whatsappEventType as 'new_order' | 'status_update').catch((error) => {
-        console.error('fallback whatsapp dispatch failed', error);
+        console.error('whatsapp dispatch failed', error);
         return false;
       })
       : Promise.resolve(false),

@@ -1,6 +1,6 @@
 import pool, { query } from '@/lib/db';
 import { NextResponse } from 'next/server';
-import { getValidatedTenantSession } from '@/lib/tenant-auth';
+import { getValidatedTenantSession, requireTenantSession } from '@/lib/tenant-auth';
 import { parseMoneyInput } from '@/lib/finance-utils';
 
 type TabRow = {
@@ -131,10 +131,8 @@ export async function GET(_: Request, { params }: { params: Promise<{ id: string
 }
 
 export async function PATCH(request: Request, { params }: { params: Promise<{ id: string }> }) {
-  const session = await getValidatedTenantSession();
-  if (!session) {
-    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-  }
+  const { session, response } = await requireTenantSession(['admin', 'staff']);
+  if (response) return response;
 
   const { id } = await params;
   const body = await request.json();
@@ -314,10 +312,8 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
 }
 
 export async function DELETE(_: Request, { params }: { params: Promise<{ id: string }> }) {
-  const session = await getValidatedTenantSession();
-  if (!session) {
-    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-  }
+  const { session, response } = await requireTenantSession(['admin', 'staff']);
+  if (response) return response;
 
   const { id } = await params;
   const client = await pool.connect();

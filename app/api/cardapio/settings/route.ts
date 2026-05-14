@@ -7,6 +7,7 @@ import {
   normalizeDeliveryOriginUseIssuer,
 } from '@/lib/delivery-fee';
 import { parseMoneyInput } from '@/lib/finance-utils';
+import { validateImageSource } from '@/lib/image-safety';
 import { normalizeOrderNotificationSound } from '@/lib/order-notification-sounds';
 import { ensureOrderSequenceSchema } from '@/lib/order-sequence';
 import {
@@ -17,7 +18,7 @@ import {
   type MenuHoursConfig,
   type MenuOpenMode,
 } from '@/lib/store-hours';
-import { getValidatedTenantSession } from '@/lib/tenant-auth';
+import { getValidatedTenantSession, requireTenantSession } from '@/lib/tenant-auth';
 
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
 
@@ -145,21 +146,8 @@ function hasOwn(body: Record<string, unknown>, key: string) {
   return Object.prototype.hasOwnProperty.call(body, key);
 }
 
-function estimateDataUrlBytes(value: string) {
-  const commaIndex = value.indexOf(',');
-  if (commaIndex === -1) return 0;
-  const base64 = value.slice(commaIndex + 1);
-  return Math.floor((base64.length * 3) / 4);
-}
-
 function validateImagePayload(imageUrl: string) {
-  if (!imageUrl) return null;
-  if (!imageUrl.startsWith('data:image/')) return null;
-  const bytes = estimateDataUrlBytes(imageUrl);
-  if (!bytes || bytes > MAX_IMAGE_BYTES) {
-    return 'Imagem deve ter no maximo 5 MB.';
-  }
-  return null;
+  return validateImageSource(imageUrl, MAX_IMAGE_BYTES);
 }
 
 function metersToKm(value: unknown) {
@@ -249,10 +237,8 @@ export async function GET() {
 export async function PATCH(request: Request) {
   await ensureOrderSequenceSchema();
   await ensureStoreHoursSchema();
-  const session = await getValidatedTenantSession();
-  if (!session) {
-    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-  }
+  const { session, response } = await requireTenantSession(['admin']);
+  if (response) return response;
 
   let body: Record<string, unknown> = {};
   try {

@@ -14,7 +14,7 @@ import {
   type ProductOptionDetail,
   type ProductOptionGroupDetail,
 } from '@/lib/product-options';
-import { getValidatedTenantSession } from '@/lib/tenant-auth';
+import { requireTenantSession } from '@/lib/tenant-auth';
 
 type ProductRow = {
   id: string;
@@ -79,10 +79,8 @@ function buildProductGroupMap(groups: ProductOptionGroupRow[], options: ProductO
 }
 
 export async function POST() {
-  const session = await getValidatedTenantSession();
-  if (!session) {
-    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-  }
+  const { session, response } = await requireTenantSession(['admin']);
+  if (response) return response;
 
   const [productsResult, groupsResult, optionsResult] = await Promise.all([
     query<ProductRow>(
