@@ -2,12 +2,20 @@
 const { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage, safeStorage, shell, session } = require('electron');
 const { fork, execFile } = require('node:child_process');
 const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
+const QRCode = require('qrcode');
+const { autoUpdater } = require('electron-updater');
+const electronLocalshortcut = require('electron-localshortcut');
+const numeroPorExtenso = require('numero-por-extenso');
+const { printTextWindows, sendCutCommandWindows } = require('./agents/native-printer');
 
 /* ─── constants ──────────────────────────────────────────────── */
 
+const DEFAULT_SERVER_URL = 'https://faceburg.vercel.app';
+
 const DEFAULT_SETTINGS = {
-  serverUrl: 'https://faceburg.vercel.app',
+  serverUrl: DEFAULT_SERVER_URL,
   slug: '',
   email: '',
   password: '',
@@ -36,15 +44,19 @@ let tray = null;
 let trayIcon = null;
 let forceQuit = false;
 let trayHintShown = false;
+let isSystemShutdown = false;
 
 let whatsWorker = null;
 let printWorker = null;
 let whatsWorkerRestartTimer = null;
 let printWorkerRestartTimer = null;
+let whatsStateSyncTimer = null;
 let whatsStopRequested = false;
 let printStopRequested = false;
 let whatsRestartRequested = false;
 let printRestartRequested = false;
+let whatsStartupProbeActive = false;
+let whatsStartupProbeBlocked = false;
 let whatsRestartDelayMs = 1500;
 let printRestartDelayMs = 1500;
 let whatsRestartReason = 'reinicio solicitado pelo hub';
@@ -54,8 +66,10 @@ let whatsState = { status: 'stopped', qrCode: '', phoneNumber: '', lastError: ''
 let printState = { status: 'stopped', lastError: '', lastJobAt: '' };
 let logs = [];
 let systemSessionSyncPromise = null;
+let systemLoadSyncTimer = null;
 let workerRequestSeq = 0;
 const pendingWorkerRequests = new Map();
+let settingsCache = null;
 
 const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) app.quit();
@@ -123,6 +137,7 @@ function migrateDefaultServerUrl(settings) {
 }
 
 function readSettings() {
+  if (settingsCache) return { ...settingsCache };
   try {
     const f = settingsFilePath();
     if (!fs.existsSync(f)) return { ...DEFAULT_SETTINGS };
@@ -131,10 +146,12 @@ function readSettings() {
       raw.passwordEncrypted
         ? decryptPassword(String(raw.passwordEncrypted))
         : String(raw.password || '');
-    return migrateDefaultServerUrl({
+    const result = migrateDefaultServerUrl({
       ...raw,
       password,
     });
+    settingsCache = result;
+    return { ...result };
   } catch {
     return { ...DEFAULT_SETTINGS };
   }
@@ -150,6 +167,7 @@ function saveSettings(s) {
   }
   delete serializable.password;
   fs.writeFileSync(settingsFilePath(), JSON.stringify(serializable, null, 2), 'utf8');
+  settingsCache = { ...s };
 }
 
 function persistLastSystemUrl(url) {
@@ -194,6 +212,36 @@ function getPreferredSystemUrl(preferredUrl = '') {
   return getSafeSystemUrl(preferredUrl || settings.lastSystemUrl, serverUrl);
 }
 
+function getWhatsAppRuntimeDir() {
+  const localAppData = String(process.env.LOCALAPPDATA || '').trim();
+  if (localAppData) return path.join(localAppData, 'Faceburg', 'whatsapp-agent');
+  return path.join(app.getPath('home'), '.faceburg', 'whatsapp-agent');
+}
+
+function getWhatsAppClientId(settings = readSettings()) {
+  const slug = String(settings.slug || '').trim().toLowerCase();
+  const agentKey = String(settings.whatsAgentKey || '');
+  if (slug) return slug;
+  if (!agentKey) return '';
+  return `tenant-${agentKey.slice(3, 11)}`;
+}
+
+function getWhatsAppAuthSessionDir(settings = readSettings()) {
+  const clientId = getWhatsAppClientId(settings);
+  if (!clientId) return '';
+  return path.join(getWhatsAppRuntimeDir(), 'auth', `session-${clientId}`);
+}
+
+function hasWhatsAppLocalSession(settings = readSettings()) {
+  const sessionDir = getWhatsAppAuthSessionDir(settings);
+  if (!sessionDir) return false;
+  try {
+    return fs.existsSync(sessionDir) && fs.readdirSync(sessionDir).length > 0;
+  } catch {
+    return false;
+  }
+}
+
 function isAllowedSystemUrl(url, allowedOrigin) {
   if (!url) return false;
   if (url === 'about:blank') return true;
@@ -202,6 +250,14 @@ function isAllowedSystemUrl(url, allowedOrigin) {
   } catch {
     return false;
   }
+}
+
+function scheduleSystemLoadAgentSync() {
+  if (systemLoadSyncTimer) clearTimeout(systemLoadSyncTimer);
+  systemLoadSyncTimer = setTimeout(() => {
+    systemLoadSyncTimer = null;
+    void syncAutoStartAgents();
+  }, 1500);
 }
 
 function bindMainWindowNavigation(targetUrl) {
@@ -235,6 +291,7 @@ function bindMainWindowNavigation(targetUrl) {
     const currentUrl = mainWindow?.webContents.getURL();
     if (!currentUrl || currentUrl === 'about:blank') return;
     persistLastSystemUrl(currentUrl);
+    scheduleSystemLoadAgentSync();
   });
 }
 
@@ -254,7 +311,7 @@ async function openSystemWindow(preferredUrl = '') {
 }
 
 function pushLog(source, message) {
-  const entry = { ts: new Date().toLocaleTimeString('pt-BR'), source, message };
+  const entry = { ts: new Date().toLocaleTimeString('pt-BR', { timeZone: 'America/Sao_Paulo' }), source, message };
   logs.push(entry);
   if (logs.length > LOG_MAX) logs = logs.slice(-LOG_MAX);
   emit('agent:log', entry);
@@ -341,6 +398,50 @@ async function fetchJsonWithStatus(url, options = {}) {
     status: response.status,
     data,
   };
+}
+
+function normalizeWhatsAppSessionStatus(status) {
+  const value = String(status || 'disconnected').trim().toLowerCase();
+  return ['disconnected', 'qr', 'ready', 'auth_failure', 'connecting'].includes(value)
+    ? value
+    : 'disconnected';
+}
+
+async function syncWhatsAppStateToServer(state = {}) {
+  const settings = readSettings();
+  if (!settings.serverUrl || !settings.whatsAgentKey) return;
+
+  const sessionStatus = normalizeWhatsAppSessionStatus(state.status || state.sessionStatus);
+  await fetchJsonWithTimeout(`${settings.serverUrl}/api/whatsapp/agent/state`, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      'x-agent-key': settings.whatsAgentKey,
+      'cache-control': 'no-cache',
+    },
+    body: JSON.stringify({
+      sessionStatus,
+      qrCode: sessionStatus === 'qr' ? String(state.rawQrCode || '') : '',
+      phoneNumber: String(state.phoneNumber || ''),
+      deviceName: os.hostname(),
+      appVersion: app.getVersion(),
+      lastError: String(state.lastError || ''),
+    }),
+  }, 3500);
+}
+
+function clearWhatsAppStateSyncTimer() {
+  if (!whatsStateSyncTimer) return;
+  clearInterval(whatsStateSyncTimer);
+  whatsStateSyncTimer = null;
+}
+
+function startWhatsAppStateSyncHeartbeat() {
+  clearWhatsAppStateSyncTimer();
+  whatsStateSyncTimer = setInterval(() => {
+    if (!whatsWorker) return;
+    void syncWhatsAppStateToServer(whatsState).catch(() => {});
+  }, 60000);
 }
 
 function getSystemSession() {
@@ -478,6 +579,11 @@ async function refreshAgentCredentialsIfPossible() {
   }
 
   if (!current.slug || !current.email || !current.password) {
+    // On cold boot, there's no web session yet; skip if we already have agent keys.
+    if (current.whatsAgentKey || current.printAgentKey) {
+      pushLog('system', 'Usando credenciais de agentes ja salvas (cold boot).');
+      return current;
+    }
     try {
       const synced = await refreshAgentCredentialsFromSystemSession({ silent: true });
       return synced.settings;
@@ -487,26 +593,27 @@ async function refreshAgentCredentialsIfPossible() {
   }
 
   try {
-    const printLogin = await fetchJson(`${current.serverUrl}/api/print/agent/login`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({
-        slug: current.slug,
-        email: current.email,
-        password: current.password,
-        printerName: current.printerName || '',
+    const [printLogin, whatsLogin] = await Promise.all([
+      fetchJson(`${current.serverUrl}/api/print/agent/login`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          slug: current.slug,
+          email: current.email,
+          password: current.password,
+          printerName: current.printerName || '',
+        }),
       }),
-    });
-
-    const whatsLogin = await fetchJson(`${current.serverUrl}/api/whatsapp/agent/login`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({
-        slug: current.slug,
-        email: current.email,
-        password: current.password,
+      fetchJson(`${current.serverUrl}/api/whatsapp/agent/login`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          slug: current.slug,
+          email: current.email,
+          password: current.password,
+        }),
       }),
-    });
+    ]);
 
     const next = {
       ...current,
@@ -525,40 +632,54 @@ async function refreshAgentCredentialsIfPossible() {
 }
 
 async function syncAutoStartAgents() {
-  let saved = await refreshAgentCredentialsIfPossible();
-  saved = readSettings();
-  if (!saved.serverUrl) return;
+  const startedAt = Date.now();
+  const STARTUP_WARN_MS = 10000;
+  const warnTimer = setTimeout(() => {
+    pushLog('system', 'Startup dos agentes ainda em andamento...');
+  }, STARTUP_WARN_MS);
 
-  if (saved.autoStartWhatsApp && saved.whatsAgentKey) {
-    const enabled = await checkServerAgentEnabled(saved.serverUrl, saved.whatsAgentKey, 'whatsapp');
-    if (enabled) {
-      try {
-        await startWhatsAppWorker();
-      } catch (err) {
-        pushLog('system', `Falha auto-start WhatsApp: ${err.message || err}`);
+  try {
+    const saved = await refreshAgentCredentialsIfPossible();
+    if (!saved.serverUrl) return;
+
+    const hasSavedWhatsSession = hasWhatsAppLocalSession(saved);
+    const shouldStartWhatsApp = Boolean(saved.autoStartWhatsApp || (hasSavedWhatsSession && !whatsStartupProbeBlocked));
+
+    if (saved.whatsAgentKey) {
+      const enabled = await checkServerAgentEnabled(saved.serverUrl, saved.whatsAgentKey, 'whatsapp');
+      if (enabled && shouldStartWhatsApp) {
+        try {
+          await startWhatsAppWorker({ startupProbe: !saved.autoStartWhatsApp });
+        } catch (err) {
+          pushLog('system', `Falha auto-start WhatsApp: ${err.message || err}`);
+        }
+      } else if (!enabled) {
+        pushLog('system', 'WhatsApp desativado no sistema. Mantendo agente parado.');
+        stopWhatsAppWorker();
+      } else if (!whatsWorker && !hasSavedWhatsSession) {
+        pushLog('system', 'WhatsApp sem sessao local salva. Aguardando operador abrir no Hub.');
       }
-    } else {
-      pushLog('system', 'WhatsApp desativado no sistema. Mantendo agente parado.');
-      stopWhatsAppWorker();
     }
-  } else {
-    stopWhatsAppWorker();
-  }
 
-  if (saved.autoStartPrint && saved.printAgentKey) {
-    const enabled = await checkServerAgentEnabled(saved.serverUrl, saved.printAgentKey, 'print');
-    if (enabled) {
-      try {
-        await startPrintWorker();
-      } catch (err) {
-        pushLog('system', `Falha auto-start impressao: ${err.message || err}`);
+    if (saved.autoStartPrint && saved.printAgentKey) {
+      const enabled = await checkServerAgentEnabled(saved.serverUrl, saved.printAgentKey, 'print');
+      if (enabled) {
+        try {
+          await startPrintWorker();
+        } catch (err) {
+          pushLog('system', `Falha auto-start impressao: ${err.message || err}`);
+        }
+      } else {
+        pushLog('system', 'Impressao desativada no sistema. Mantendo agente parado.');
+        stopPrintWorker();
       }
     } else {
-      pushLog('system', 'Impressao desativada no sistema. Mantendo agente parado.');
       stopPrintWorker();
     }
-  } else {
-    stopPrintWorker();
+  } finally {
+    clearTimeout(warnTimer);
+    const elapsed = Date.now() - startedAt;
+    pushLog('system', `Startup dos agentes concluido em ${Math.round(elapsed / 1000)}s.`);
   }
 }
 
@@ -581,8 +702,10 @@ function scheduleWhatsAppWorkerRestart(reason, delayMs = WORKER_RESTART_DELAY_MS
     if (forceQuit || whatsWorker) return;
 
     const settings = readSettings();
-    if (!settings.autoStartWhatsApp || !settings.whatsAgentKey || !settings.serverUrl) {
-      pushLog('whatsapp', 'Reinicio cancelado: auto-start do WhatsApp desativado.');
+    const hasSavedWhatsSession = hasWhatsAppLocalSession(settings);
+    const shouldRestartWhatsApp = Boolean(settings.autoStartWhatsApp || (hasSavedWhatsSession && !whatsStartupProbeBlocked));
+    if (!shouldRestartWhatsApp || !settings.whatsAgentKey || !settings.serverUrl) {
+      pushLog('whatsapp', 'Reinicio cancelado: WhatsApp aguardando operador ligar.');
       return;
     }
 
@@ -593,7 +716,7 @@ function scheduleWhatsAppWorkerRestart(reason, delayMs = WORKER_RESTART_DELAY_MS
     }
 
     try {
-      await startWhatsAppWorker();
+      await startWhatsAppWorker({ startupProbe: !settings.autoStartWhatsApp });
     } catch (err) {
       pushLog('whatsapp', `Falha ao reiniciar worker: ${err?.message || err}`);
       scheduleWhatsAppWorkerRestart('nova tentativa apos falha', delayMs);
@@ -658,7 +781,8 @@ function listPrintersWindows() {
 
 /* ─── WhatsApp worker ────────────────────────────────────────── */
 
-async function startWhatsAppWorker() {
+async function startWhatsAppWorker(options = {}) {
+  const startupProbe = Boolean(options.startupProbe);
   if (whatsWorker) {
     emit('whatsapp:state', whatsState);
     return;
@@ -675,21 +799,31 @@ async function startWhatsAppWorker() {
   }
 
   if (!settings.whatsAgentKey) throw new Error('Entre no sistema nesta janela antes de abrir o WhatsApp.');
+  if (startupProbe && !hasWhatsAppLocalSession(settings)) {
+    pushLog('whatsapp', 'Auto-inicio ignorado: nao existe sessao local do WhatsApp salva.');
+    return;
+  }
   clearWhatsAppWorkerRestartTimer();
   whatsStopRequested = false;
   whatsRestartRequested = false;
+  whatsStartupProbeActive = startupProbe;
+  if (!startupProbe) {
+    whatsStartupProbeBlocked = false;
+  }
 
   const workerPath = path.join(__dirname, 'agents', 'whatsapp-worker.js');
+  const workerEnv = {
+    ...process.env,
+    HUB_SERVER_URL: settings.serverUrl,
+    HUB_AGENT_KEY: settings.whatsAgentKey,
+    HUB_SLUG: settings.slug,
+  };
   whatsWorker = fork(workerPath, [], {
-    env: {
-      ...process.env,
-      HUB_SERVER_URL: settings.serverUrl,
-      HUB_AGENT_KEY: settings.whatsAgentKey,
-      HUB_SLUG: settings.slug,
-    },
+    env: workerEnv,
     silent: true,
   });
   const workerRef = whatsWorker;
+  startWhatsAppStateSyncHeartbeat();
 
   whatsWorker.stdout?.on('data', (d) => pushLog('whatsapp', d.toString().trim()));
   whatsWorker.stderr?.on('data', (d) => pushLog('whatsapp', `[ERR] ${d.toString().trim()}`));
@@ -700,6 +834,19 @@ async function startWhatsAppWorker() {
     if (msg.type === 'state') {
       whatsState = { ...whatsState, ...msg.data };
       emit('whatsapp:state', whatsState);
+      void syncWhatsAppStateToServer(whatsState).catch(() => {});
+      if (whatsStartupProbeActive) {
+        const status = String(whatsState.status || '').toLowerCase();
+        if (status === 'ready') {
+          whatsStartupProbeActive = false;
+          pushLog('whatsapp', 'Sessao local do WhatsApp encontrada. Agente mantido ligado.');
+        } else if (status === 'qr' || status === 'auth_failure' || (status === 'disconnected' && whatsState.lastError)) {
+          whatsStartupProbeActive = false;
+          whatsStartupProbeBlocked = true;
+          pushLog('whatsapp', 'WhatsApp nao iniciou automaticamente (sem sessao pronta). Aguardando operador abrir no Hub.');
+          stopWhatsAppWorker({ killDelayMs: 1000 });
+        }
+      }
     } else if (msg.type === 'log') {
       pushLog('whatsapp', msg.text);
     }
@@ -721,11 +868,14 @@ async function startWhatsAppWorker() {
     if (whatsWorker === workerRef) {
       whatsWorker = null;
     }
+    clearWhatsAppStateSyncTimer();
     rejectWorkerRequestsFor(workerRef, new Error('Agente WhatsApp encerrou antes de responder.'));
     whatsStopRequested = false;
     whatsRestartRequested = false;
+    whatsStartupProbeActive = false;
     whatsState.status = 'stopped';
     emit('whatsapp:state', whatsState);
+    void syncWhatsAppStateToServer({ status: 'disconnected', qrCode: '', phoneNumber: '', lastError: expectedStop ? '' : 'worker_exit' }).catch(() => {});
 
     if (restartAfterExit && !forceQuit) {
       scheduleWhatsAppWorkerRestart(whatsRestartReason, whatsRestartDelayMs);
@@ -744,12 +894,15 @@ async function startWhatsAppWorker() {
 
 function stopWhatsAppWorker(options = {}) {
   clearWhatsAppWorkerRestartTimer();
+  clearWhatsAppStateSyncTimer();
+  whatsStartupProbeActive = false;
   whatsStopRequested = true;
   whatsRestartRequested = Boolean(options.restartAfterExit);
   const ref = whatsWorker;
   if (!ref) {
     whatsState = { status: 'stopped', qrCode: '', phoneNumber: '', lastError: '' };
     emit('whatsapp:state', whatsState);
+    void syncWhatsAppStateToServer({ status: 'disconnected', qrCode: '', phoneNumber: '', lastError: '' }).catch(() => {});
     pushLog('whatsapp', options.restartAfterExit ? 'Reiniciando agente WhatsApp...' : 'Agente WhatsApp parado.');
     whatsStopRequested = false;
     whatsRestartRequested = false;
@@ -758,11 +911,9 @@ function stopWhatsAppWorker(options = {}) {
     }
     return;
   }
-  if (ref) {
-    try {
-      ref.send({ type: 'shutdown' });
-    } catch {}
-  }
+  try {
+    ref.send({ type: 'shutdown' });
+  } catch {}
   setTimeout(() => {
     if (ref && whatsWorker === ref && !ref.killed) {
       try { ref.kill('SIGTERM'); } catch {}
@@ -770,6 +921,7 @@ function stopWhatsAppWorker(options = {}) {
   }, Number(options.killDelayMs || WHATSAPP_STOP_GRACE_MS));
   whatsState = { status: 'stopped', qrCode: '', phoneNumber: '', lastError: '' };
   emit('whatsapp:state', whatsState);
+  void syncWhatsAppStateToServer({ status: 'disconnected', qrCode: '', phoneNumber: '', lastError: '' }).catch(() => {});
   pushLog('whatsapp', options.restartAfterExit ? 'Reiniciando agente WhatsApp...' : 'Agente WhatsApp parado.');
 }
 
@@ -872,11 +1024,9 @@ function stopPrintWorker(options = {}) {
     }
     return;
   }
-  if (ref) {
-    try {
-      ref.send({ type: 'shutdown' });
-    } catch {}
-  }
+  try {
+    ref.send({ type: 'shutdown' });
+  } catch {}
   setTimeout(() => {
     if (ref && printWorker === ref && !ref.killed) {
       try { ref.kill('SIGTERM'); } catch {}
@@ -892,17 +1042,240 @@ function stopAllAgents() {
   stopPrintWorker();
 }
 
-async function printDirectFromHub(payload) {
-  if (!printWorker) {
-    await startPrintWorker();
+function escapeHtml(value) {
+  return String(value || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function normalizeReceiptPayload(value) {
+  return String(value || '')
+    .replace(/\r\n/g, '\n')
+    .replace(/\r/g, '\n')
+    .replace(/\u00a0/g, ' ')
+    .trimEnd();
+}
+
+function normalizePrintFontSize(value) {
+  const parsed = Number(String(value || '').replace(',', '.'));
+  if (!Number.isFinite(parsed)) return 12.5;
+  return Math.min(24, Math.max(8, parsed));
+}
+
+function paperWidthMmForColumns(columns) {
+  const parsed = Number(columns || 32);
+  return parsed >= 48 || parsed === 80 ? 80 : 58;
+}
+
+function isDividerLine(value) {
+  const clean = String(value || '').trim();
+  return clean.length >= 6 && /^[-_=*]+$/.test(clean);
+}
+
+function isHeaderLine(value) {
+  const upper = String(value || '').trim().toUpperCase();
+  return (
+    upper === 'DELIVERY' ||
+    upper === 'RETIRADA' ||
+    upper === 'RETIRADA NA LOJA' ||
+    upper === 'BALCAO' ||
+    upper === 'MESA' ||
+    upper === 'COZINHA' ||
+    upper === 'PEDIDO' ||
+    upper.startsWith('PEDIDO #')
+  );
+}
+
+function stripReceiptTags(value) {
+  let current = String(value || '').trim();
+  const state = {
+    align: '',
+    bold: false,
+    big: false,
+  };
+  let changed = true;
+
+  while (changed) {
+    changed = false;
+    for (const tag of ['center', 'right', 'b', 'strong', 'big']) {
+      const pattern = new RegExp(`^\\s*<${tag}>\\s*([\\s\\S]*?)\\s*</${tag}>\\s*$`, 'i');
+      const match = current.match(pattern);
+      if (!match) continue;
+      if (tag === 'center') state.align = 'center';
+      if (tag === 'right') state.align = 'right';
+      if (tag === 'b' || tag === 'strong') state.bold = true;
+      if (tag === 'big') {
+        state.bold = true;
+        state.big = true;
+      }
+      current = String(match[1] || '').trim();
+      changed = true;
+    }
   }
-  if (!printWorker) throw new Error('Agente de impressao nao iniciou.');
-  return sendWorkerRequest(printWorker, 'print-direct', payload, 30000);
+
+  return { value: current, ...state };
+}
+
+async function renderReceiptHtml(payload) {
+  const text = normalizeReceiptPayload(payload?.payloadText);
+  if (!text.trim()) throw new Error('Conteudo de impressao vazio.');
+
+  const columns = Number(payload?.columns || 32);
+  const paperWidthMm = paperWidthMmForColumns(columns);
+  const fontSizePt = normalizePrintFontSize(payload?.printTextSize);
+  const qrWidth = paperWidthMm >= 80 ? 210 : 170;
+  const rows = [];
+
+  for (const rawLine of text.split('\n')) {
+    const line = rawLine.trimEnd();
+    const clean = line.trim();
+    if (!clean) {
+      rows.push('<div class="spacer"></div>');
+      continue;
+    }
+
+    const qrMatch = line.match(/^\s*(?:<qrcode>|<qr>|\[qrcode\]|\[qr\]|QR:)\s*(.*?)\s*(?:<\/qrcode>|<\/qr>|\[\/qrcode\]|\[\/qr\])?\s*$/i);
+    if (qrMatch && qrMatch[1]?.trim()) {
+      const qrDataUrl = await QRCode.toDataURL(qrMatch[1].trim(), {
+        margin: 1,
+        width: qrWidth,
+      });
+      rows.push(`<div class="qr"><img alt="" src="${qrDataUrl}"></div>`);
+      continue;
+    }
+
+    if (isDividerLine(clean)) {
+      rows.push('<div class="rule"></div>');
+      continue;
+    }
+
+    const parsed = stripReceiptTags(clean);
+    const leadingSpaces = line.length - line.trimStart().length;
+    const looksCentered = leadingSpaces >= 2 && clean.length <= Math.max(8, columns - (leadingSpaces * 2));
+    const header = isHeaderLine(parsed.value);
+    const total = parsed.value.trimStart().toUpperCase().startsWith('TOTAL:');
+    const classes = ['line'];
+    if (parsed.align === 'center' || looksCentered || header) classes.push('center');
+    if (parsed.align === 'right') classes.push('right');
+    if (parsed.bold || header || total) classes.push('bold');
+    if (parsed.big || header) classes.push('big');
+
+    rows.push(`<div class="${classes.join(' ')}">${escapeHtml(parsed.value)}</div>`);
+  }
+
+  return `<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <style>
+    @page { size: ${paperWidthMm}mm auto; margin: 0; }
+    html, body { margin: 0; padding: 0; background: #fff; color: #000; }
+    body {
+      width: ${paperWidthMm}mm;
+      box-sizing: border-box;
+      padding: ${paperWidthMm >= 80 ? '3mm 4mm' : '2mm 2.5mm'};
+      font-family: Consolas, "Courier New", "Lucida Console", monospace;
+      font-size: ${fontSizePt}pt;
+      line-height: 1.22;
+      -webkit-print-color-adjust: exact;
+      print-color-adjust: exact;
+    }
+    .line { white-space: pre-wrap; overflow-wrap: anywhere; }
+    .center { text-align: center; }
+    .right { text-align: right; }
+    .bold { font-weight: 700; }
+    .big { font-size: 1.2em; line-height: 1.18; margin: 1mm 0; }
+    .spacer { height: 3.2mm; }
+    .rule { border-top: 1px solid #000; margin: 1.4mm 0; height: 0; }
+    .qr { text-align: center; margin: 2mm 0; }
+    .qr img { width: ${qrWidth}px; height: ${qrWidth}px; }
+  </style>
+</head>
+<body>${rows.join('')}</body>
+</html>`;
+}
+
+async function printReceiptWithCss(payload) {
+  const html = await renderReceiptHtml(payload);
+  const settings = readSettings();
+  const printerName = String(payload?.printerName || settings.printerName || '').trim();
+  const printWindow = new BrowserWindow({
+    show: false,
+    width: 420,
+    height: 800,
+    webPreferences: {
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+    },
+  });
+
+  try {
+    await printWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`);
+    await new Promise((resolve, reject) => {
+      printWindow.webContents.print({
+        silent: true,
+        printBackground: true,
+        deviceName: printerName || undefined,
+        margins: { marginType: 'none' },
+      }, (success, failureReason) => {
+        if (success) {
+          resolve();
+          return;
+        }
+        reject(new Error(failureReason || 'Falha ao imprimir pelo Electron.'));
+      });
+    });
+    const cutResult = process.platform === 'win32'
+      ? await sendCutCommandWindows(printerName).catch((error) => ({
+          strategy: 'raw-command',
+          printerName,
+          skipped: true,
+          reason: error?.message || String(error || 'cut-failed'),
+        }))
+      : { skipped: true, reason: 'unsupported-platform' };
+    return {
+      strategy: 'electron-css',
+      printerName,
+      cut: cutResult,
+      local: true,
+    };
+  } finally {
+    if (!printWindow.isDestroyed()) {
+      printWindow.close();
+    }
+  }
+}
+
+async function printDirectFromHub(payload) {
+  const settings = readSettings();
+  const printerName = String(payload?.printerName || settings.printerName || '').trim();
+  try {
+    const result = await printReceiptWithCss({ ...payload, printerName });
+    const cutInfo = result.cut?.command === 'cut'
+      ? ' com corte'
+      : result.cut?.skipped
+        ? ' sem corte RAW'
+        : '';
+    pushLog('print', `Job local enviado via CSS${printerName ? ` (${printerName})` : ''}${cutInfo}.`);
+    return result;
+  } catch (error) {
+    const reason = error?.message || String(error || 'falha desconhecida');
+    pushLog('print', `Impressao CSS falhou, usando fallback nativo: ${reason}`);
+    const result = await printTextWindows(String(payload?.payloadText || ''), printerName);
+    return {
+      ...result,
+      local: true,
+    };
+  }
 }
 
 async function sendWhatsAppDirectFromHub(payload) {
   if (!whatsWorker) {
-    await startWhatsAppWorker();
+    throw new Error('WhatsApp nao esta ligado neste computador. Abra o WhatsApp no Hub antes de enviar.');
   }
   if (!whatsWorker) throw new Error('Agente WhatsApp nao iniciou.');
   if (whatsState.status !== 'ready') {
@@ -982,6 +1355,7 @@ function createMainWindow(preferredUrl = '') {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
+      backgroundThrottling: false,
       partition: SYSTEM_PARTITION,
     },
   });
@@ -1002,29 +1376,83 @@ function createMainWindow(preferredUrl = '') {
     }
   });
 
-  mainWindow.on('minimize', (event) => {
-    event.preventDefault();
-    mainWindow.hide();
-    mainWindow.setSkipTaskbar(true);
-  });
-
   mainWindow.on('closed', () => { mainWindow = null; });
+
+  electronLocalshortcut.register(mainWindow, 'F5', () => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.reload();
+    }
+  });
+}
+
+function initAutoUpdater() {
+  autoUpdater.on('update-available', () => {
+    pushLog('system', 'Nova atualizacao disponivel. Baixando...');
+    emit('system:update-available', {});
+  });
+  autoUpdater.on('download-progress', (progress) => {
+    emit('system:update-progress', progress);
+  });
+  autoUpdater.on('update-downloaded', () => {
+    pushLog('system', 'Atualizacao baixada. O app sera reiniciado em breve.');
+    emit('system:update-downloaded', {});
+    setTimeout(() => {
+      forceQuit = true;
+      stopAllAgents();
+      setTimeout(() => autoUpdater.quitAndInstall(false, true), 1000);
+    }, 5000);
+  });
+  
+  setTimeout(() => {
+    autoUpdater.checkForUpdatesAndNotify().catch(() => {});
+  }, 10000);
+  setInterval(() => {
+    autoUpdater.checkForUpdatesAndNotify().catch(() => {});
+  }, 4 * 60 * 60 * 1000);
 }
 
 /* ─── IPC handlers ───────────────────────────────────────────── */
 
-ipcMain.handle('hub:get-settings', () => ({
-  settings: readSettings(),
-  whatsState,
-  printState,
-  logs,
-  whatsRunning: !!whatsWorker,
-  printRunning: !!printWorker,
-}));
+ipcMain.handle('hub:get-settings', () => {
+  const settings = readSettings();
+  return {
+    settings,
+    whatsState,
+    printState,
+    logs,
+    whatsRunning: !!whatsWorker,
+    printRunning: !!printWorker,
+    hasLocalWhatsappSession: hasWhatsAppLocalSession(settings),
+  };
+});
 
 ipcMain.handle('hub:list-printers', async () => {
   if (process.platform === 'win32') return listPrintersWindows();
   return [];
+});
+
+ipcMain.handle('hub:get-agent-config', async () => {
+  const settings = readSettings();
+  const result = { print: null, whatsapp: null, printError: '', whatsappError: '' };
+  if (settings.serverUrl && settings.printAgentKey) {
+    try {
+      result.print = await fetchJson(`${settings.serverUrl}/api/print/agent/config`, {
+        headers: { 'x-agent-key': settings.printAgentKey },
+      });
+    } catch (error) {
+      result.printError = error?.message || String(error || 'Falha ao carregar impressao.');
+    }
+  }
+  if (settings.serverUrl && settings.whatsAgentKey) {
+    try {
+      result.whatsapp = await fetchJson(`${settings.serverUrl}/api/whatsapp/agent/config`, {
+        headers: { 'x-agent-key': settings.whatsAgentKey },
+      });
+    } catch (error) {
+      result.whatsappError = error?.message || String(error || 'Falha ao carregar WhatsApp.');
+    }
+  }
+  return result;
 });
 
 ipcMain.handle('hub:login', async (_ev, payload) => {
@@ -1095,15 +1523,82 @@ ipcMain.handle('hub:logout', async () => {
 
 ipcMain.handle('hub:update-printer', async (_ev, payload) => {
   const current = readSettings();
-  if (!current.printAgentKey) throw new Error('Faca login antes.');
   const printerName = String(payload.printerName || '').trim();
   const next = { ...current, printerName };
   saveSettings(next);
+  if (current.printAgentKey && current.serverUrl) {
+    await fetchJson(`${current.serverUrl}/api/print/agent/config`, {
+      method: 'PATCH',
+      headers: {
+        'content-type': 'application/json',
+        'x-agent-key': current.printAgentKey,
+      },
+      body: JSON.stringify({ printerName }),
+    });
+  }
   // If print agent is running, restart it with new printer
   if (printWorker) {
     restartPrintWorker('troca de impressora', 1500);
   }
   return next;
+});
+
+ipcMain.handle('hub:update-print-config', async (_ev, payload = {}) => {
+  const current = readSettings();
+  const next = { ...current };
+  const hasPrinterName = Object.prototype.hasOwnProperty.call(payload, 'printerName');
+  const hasEnabled = Object.prototype.hasOwnProperty.call(payload, 'enabled');
+  if (hasPrinterName) {
+    next.printerName = String(payload.printerName || '').trim();
+  }
+  saveSettings(next);
+
+  if (!current.printAgentKey || !current.serverUrl) {
+    if (hasEnabled) throw new Error('Entre no sistema pelo Hub antes de ativar a impressao.');
+    return next;
+  }
+
+  await fetchJson(`${current.serverUrl}/api/print/agent/config`, {
+    method: 'PATCH',
+    headers: {
+      'content-type': 'application/json',
+      'x-agent-key': current.printAgentKey,
+    },
+    body: JSON.stringify({
+      ...(hasPrinterName ? { printerName: next.printerName } : {}),
+      ...(hasEnabled ? { enabled: Boolean(payload.enabled) } : {}),
+    }),
+  });
+
+  if (hasEnabled && !payload.enabled) {
+    stopPrintWorker();
+  } else if (printWorker && hasPrinterName) {
+    restartPrintWorker('configuracao de impressora alterada', 1000);
+  }
+  return next;
+});
+
+ipcMain.handle('hub:update-whatsapp-config', async (_ev, payload = {}) => {
+  const current = readSettings();
+  if (!current.whatsAgentKey || !current.serverUrl) {
+    throw new Error('Entre no sistema pelo Hub antes de configurar o WhatsApp.');
+  }
+  const hasEnabled = Object.prototype.hasOwnProperty.call(payload, 'enabled');
+  if (!hasEnabled) return current;
+
+  await fetchJson(`${current.serverUrl}/api/whatsapp/agent/config`, {
+    method: 'PATCH',
+    headers: {
+      'content-type': 'application/json',
+      'x-agent-key': current.whatsAgentKey,
+    },
+    body: JSON.stringify({ enabled: Boolean(payload.enabled) }),
+  });
+
+  if (!payload.enabled) {
+    stopWhatsAppWorker();
+  }
+  return readSettings();
 });
 
 // Individual agent controls
@@ -1150,6 +1645,16 @@ ipcMain.handle('hub:whatsapp-send-direct', async (_ev, payload) => {
 ipcMain.handle('hub:open-system', async (_ev, payload) => {
   await openSystemWindow(String(payload?.url || ''));
   return { ok: true };
+});
+
+ipcMain.handle('hub:numero-por-extenso', (_ev, payload) => {
+  try {
+    const parsed = Number(String(payload).replace(',', '.'));
+    if (!Number.isFinite(parsed)) return String(payload);
+    return numeroPorExtenso.porExtenso(parsed);
+  } catch {
+    return String(payload);
+  }
 });
 
 ipcMain.handle('hub:sync-system-session', async () => {
@@ -1212,6 +1717,9 @@ app.whenReady().then(async () => {
   // Auto-start agents if logged in
   void syncAutoStartAgents();
 
+  // Initialize auto-updater
+  initAutoUpdater();
+
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {
       createMainWindow();
@@ -1226,11 +1734,24 @@ app.on('second-instance', () => showMainWindow());
 app.on('window-all-closed', () => { /* mantém na bandeja */ });
 
 app.on('before-quit', (event) => {
-  if (!forceQuit) {
-    event.preventDefault();
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.hide();
-      mainWindow.setSkipTaskbar(true);
-    }
+  if (forceQuit) return;
+
+  // Detect system shutdown / logoff: if the window is not visible,
+  // the user triggered quit from outside (e.g. system shutdown).
+  // Also, Electron sets app.isQuitting internally on some paths.
+  const windowHidden = !mainWindow || mainWindow.isDestroyed() || !mainWindow.isVisible();
+  if (windowHidden) {
+    // System shutdown — do graceful cleanup and let the app exit.
+    isSystemShutdown = true;
+    forceQuit = true;
+    stopAllAgents();
+    return;
+  }
+
+  // User closed the window — just hide to tray.
+  event.preventDefault();
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.hide();
+    mainWindow.setSkipTaskbar(true);
   }
 });

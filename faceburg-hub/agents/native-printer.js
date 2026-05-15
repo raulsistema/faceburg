@@ -8,6 +8,9 @@ const PRINT_MODE = String(process.env.HUB_PRINT_MODE || process.env.PRINT_MODE |
 const RAW_ENCODING = String(process.env.HUB_PRINT_RAW_ENCODING || process.env.PRINT_RAW_ENCODING || 'cp860').trim().toLowerCase();
 const RAW_APPEND_CUT = !['0', 'false', 'no', 'off'].includes(String(process.env.HUB_PRINT_RAW_CUT || process.env.PRINT_RAW_CUT || 'false').trim().toLowerCase());
 const RAW_INIT_PRINTER = !['0', 'false', 'no', 'off'].includes(String(process.env.HUB_PRINT_RAW_INIT || process.env.PRINT_RAW_INIT || 'true').trim().toLowerCase());
+// Windows visual printing should let the printer driver handle paper cutting.
+// Sending an extra RAW cut here makes many thermal printers fire the cutter twice.
+const CSS_CUT_MODE = String(process.env.HUB_PRINT_CSS_CUT || process.env.PRINT_CSS_CUT || 'driver').trim().toLowerCase();
 const POWERSHELL_TIMEOUT_MS = Number(process.env.HUB_PRINT_TIMEOUT_MS || process.env.PRINT_TIMEOUT_MS || 45000);
 
 const THERMAL_PRINTER_HINTS = [
@@ -71,6 +74,9 @@ function normalizeText(text) {
   return String(text || '')
     .replace(/\r\n/g, '\n')
     .replace(/\r/g, '\n')
+    .split('\n')
+    .map(line => '  ' + line) // Add left margin
+    .join('\n')
     .replace(/\u00a0/g, ' ')
     .trimEnd();
 }
@@ -96,15 +102,15 @@ function buildRawPayload(text) {
   return Buffer.concat(buffers);
 }
 
-async function printRawWindows(text, printerName) {
+async function sendRawBufferWindows(payload, printerName, documentName = 'Faceburg Hub') {
   const effectivePrinterName = String(printerName || '').trim() || await getDefaultPrinterNameWindows();
   if (!effectivePrinterName) {
     throw new Error('Nenhuma impressora configurada para impressao RAW.');
   }
 
-  const payload = buildRawPayload(text);
   const dataFile = buildTempPath('bin');
   const scriptFile = buildTempPath('ps1');
+  const safeDocumentName = escapePowerShellString(documentName);
 
   const script = `
 $printerName = '${escapePowerShellString(effectivePrinterName)}'
@@ -184,18 +190,97 @@ public static class RawPrinterHelper {
 "@
 
 $bytes = [System.IO.File]::ReadAllBytes($dataFile)
-[RawPrinterHelper]::SendBytesToPrinter($printerName, $bytes, 'Faceburg Hub')
+[RawPrinterHelper]::SendBytesToPrinter($printerName, $bytes, '${safeDocumentName}')
 `;
 
   try {
-    fs.writeFileSync(dataFile, payload);
+    fs.writeFileSync(dataFile, Buffer.isBuffer(payload) ? payload : Buffer.from(payload || []));
     fs.writeFileSync(scriptFile, script, 'utf8');
     await execPowerShell(['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', scriptFile]);
-    return { strategy: 'raw', printerName: effectivePrinterName };
+    return { printerName: effectivePrinterName };
   } finally {
     try { fs.unlinkSync(dataFile); } catch {}
     try { fs.unlinkSync(scriptFile); } catch {}
   }
+}
+
+let rawJobQueue = [];
+let rawJobTimer = null;
+
+async function flushRawQueue() {
+  if (rawJobQueue.length === 0) return;
+  const jobs = [...rawJobQueue];
+  rawJobQueue = [];
+  rawJobTimer = null;
+
+  const jobsByPrinter = {};
+  for (const job of jobs) {
+    const pName = job.printerName || 'default';
+    if (!jobsByPrinter[pName]) jobsByPrinter[pName] = [];
+    jobsByPrinter[pName].push(job);
+  }
+
+  for (const [pName, printerJobs] of Object.entries(jobsByPrinter)) {
+    try {
+      const buffers = [];
+      const actualPrinterName = pName === 'default' ? '' : pName;
+      
+      for (let i = 0; i < printerJobs.length; i++) {
+        buffers.push(printerJobs[i].payload);
+        if (i < printerJobs.length - 1) {
+          buffers.push(Buffer.from([0x1d, 0x56, 0x42, 0x00])); // Insert cut between separate jobs
+        }
+      }
+      
+      const combinedPayload = Buffer.concat(buffers);
+      const result = await sendRawBufferWindows(combinedPayload, actualPrinterName, 'Faceburg Hub Batch');
+      
+      for (const j of printerJobs) {
+        j.resolve({ strategy: 'raw', printerName: result.printerName });
+      }
+    } catch (err) {
+      for (const j of printerJobs) {
+        j.reject(err);
+      }
+    }
+  }
+}
+
+async function printRawWindows(text, printerName) {
+  return new Promise((resolve, reject) => {
+    const payload = buildRawPayload(text);
+    rawJobQueue.push({ payload, printerName, resolve, reject });
+    
+    if (!rawJobTimer) {
+      rawJobTimer = setTimeout(flushRawQueue, 800); // 800ms debounce window
+    }
+  });
+}
+
+async function sendCutCommandWindows(printerName) {
+  const effectivePrinterName = String(printerName || '').trim() || await getDefaultPrinterNameWindows();
+  if (!effectivePrinterName) {
+    throw new Error('Nenhuma impressora configurada para corte RAW.');
+  }
+
+  const forced = ['1', 'true', 'yes', 'y', 'on', 'always', 'raw'].includes(CSS_CUT_MODE);
+  const disabled = ['0', 'false', 'no', 'off', 'never', 'driver', 'windows', 'none'].includes(CSS_CUT_MODE);
+  const shouldCut = forced || (!disabled && isThermalPrinter(effectivePrinterName));
+  if (!shouldCut) {
+    return {
+      strategy: 'raw-command',
+      printerName: effectivePrinterName,
+      skipped: true,
+      reason: disabled ? 'driver-managed' : 'printer-not-thermal',
+    };
+  }
+
+  await sendRawBufferWindows(Buffer.from([0x1d, 0x56, 0x42, 0x00]), effectivePrinterName, 'Faceburg Hub Cut');
+  return {
+    strategy: 'raw-command',
+    printerName: effectivePrinterName,
+    command: 'cut',
+  };
 }
 
 async function printSpoolWindows(text, printerName) {
@@ -254,4 +339,5 @@ async function printTextWindows(text, printerName) {
 
 module.exports = {
   printTextWindows,
+  sendCutCommandWindows,
 };

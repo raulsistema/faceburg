@@ -46,7 +46,8 @@ public static class AdminPage
         <label>Slug</label><input id="tenantSlug">
         <label>Tenant ID opcional</label><input id="tenantId">
         <label>Impressora</label><select id="printer"></select>
-        <label>Colunas</label><select id="columns"><option>32</option><option>48</option></select>
+        <label>Papel da impressora</label><select id="columns"><option value="32">58 mm</option><option value="48">80 mm</option></select>
+        <label>Tamanho da letra</label><select id="printTextSize"></select>
         <label>Codepage</label><select id="codePage"><option>CP860</option><option>CP850</option><option>CP858</option><option>CP437</option></select>
         <label class="checkline"><input type="checkbox" id="cutPaper"> Cortar papel ao final</label>
         <label class="checkline"><input type="checkbox" id="startWithWindows"> Iniciar junto com o Windows</label>
@@ -85,16 +86,42 @@ R$ 10,00</textarea>
   </main>
   <script>
     let config = {};
+    const PRINT_TEXT_SIZES = Array.from({length: 65}, (_, index) => {
+      const size = 8 + (index * 0.25);
+      return size.toFixed(2).replace(/\.?0+$/, '');
+    });
     const log = (value) => document.getElementById('log').textContent = typeof value === 'string' ? value : JSON.stringify(value, null, 2);
     async function json(url, options){ const r = await fetch(url, options); const data = await r.json().catch(()=>({})); if(!r.ok) throw data; return data; }
+    function normalizePrintTextSize(value){
+      const clean = String(value || '').trim().toLowerCase();
+      if(clean === 'normal') return '10';
+      if(clean === 'large') return '12';
+      if(clean === 'extra_large') return '14';
+      if(!/^\d+(?:\.\d+)?$/.test(clean)) return '12.5';
+      const parsed = Number(clean);
+      if(!Number.isFinite(parsed)) return '12.5';
+      const rounded = Math.round(Math.min(24, Math.max(8, parsed)) * 4) / 4;
+      return rounded.toFixed(2).replace(/\.?0+$/, '');
+    }
+    function normalizePaperColumns(value){
+      const parsed = Number(value);
+      if(parsed === 58) return '32';
+      if(parsed === 80) return '48';
+      if(parsed === 40) return '48';
+      return parsed === 48 ? '48' : '32';
+    }
+    function fillPrintTextSizes(){
+      printTextSize.innerHTML = PRINT_TEXT_SIZES.map(size => `<option value="${size}">${size}</option>`).join('');
+    }
     async function loadAll(){
+      fillPrintTextSizes();
       const [health, cfg, printers, whats] = await Promise.all([
         json('/api/health'), json('/api/config'), json('/api/printers'), json('/api/whatsapp/status').catch(()=>({status:'stopped'}))
       ]);
       config = cfg;
       document.getElementById('health').textContent = health.online ? 'online' : 'offline';
       serverUrl.value = cfg.serverUrl || ''; tenantSlug.value = cfg.tenantSlug || ''; tenantId.value = cfg.tenantId || '';
-      columns.value = String(cfg.columns || 32); codePage.value = cfg.codePage || 'CP860'; whatsStatus.value = `${whats.status || ''} ${whats.phoneNumber || ''}`;
+      columns.value = normalizePaperColumns(cfg.columns); printTextSize.value = normalizePrintTextSize(cfg.printTextSize); codePage.value = cfg.codePage || 'CP860'; whatsStatus.value = `${whats.status || ''} ${whats.phoneNumber || ''}`;
       cutPaper.checked = Boolean(cfg.cutPaper);
       startWithWindows.checked = cfg.startWithWindows !== false;
       whatsAppHeadless.checked = cfg.whatsAppHeadless !== false;
@@ -103,7 +130,7 @@ R$ 10,00</textarea>
     }
     async function saveConfig(){
       config.serverUrl = serverUrl.value; config.tenantSlug = tenantSlug.value; config.tenantId = tenantId.value;
-      config.defaultPrinter = printer.value; config.columns = Number(columns.value); config.codePage = codePage.value;
+      config.defaultPrinter = printer.value; config.columns = Number(normalizePaperColumns(columns.value)); config.printTextSize = normalizePrintTextSize(printTextSize.value); config.codePage = codePage.value;
       config.cutPaper = cutPaper.checked;
       config.startWithWindows = startWithWindows.checked;
       config.whatsAppHeadless = whatsAppHeadless.checked;

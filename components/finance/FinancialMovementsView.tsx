@@ -1,7 +1,8 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { AlertTriangle, ArrowDownUp, CalendarDays, Filter, RotateCcw } from 'lucide-react';
+import { ArrowDownUp, CalendarDays, Filter, RotateCcw } from 'lucide-react';
+import { formatBusinessDateKey, formatBusinessDateTime } from '@/lib/business-time';
 
 type Summary = {
   totalFees: number;
@@ -87,7 +88,7 @@ function sourceLabel(source: Movement['source']) {
 
 function statusLabel(status: string) {
   if (status === 'completed') return 'Concluida';
-  if (status === 'pending') return 'Pendente';
+  if (status === 'pending') return 'A receber';
   if (status === 'paid') return 'Pago';
   if (status === 'received') return 'Recebido';
   if (status === 'posted') return 'Lancado';
@@ -102,19 +103,11 @@ function formatCurrency(value: number) {
 }
 
 function formatDateTime(value: string) {
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return '-';
-  return date.toLocaleString('pt-BR');
+  return formatBusinessDateTime(value) || '-';
 }
 
 function formatDateOnly(value: string) {
-  if (/^\d{4}-\d{2}-\d{2}$/.test(value)) {
-    const [year, month, day] = value.split('-');
-    return `${day}/${month}/${year}`;
-  }
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return '-';
-  return date.toLocaleDateString('pt-BR');
+  return formatBusinessDateKey(value) || '-';
 }
 
 function moneyClass(value: number, positiveClass = 'text-emerald-600') {
@@ -205,24 +198,6 @@ export default function FinancialMovementsView() {
 
       {error ? <p className="text-sm text-red-500">{error}</p> : null}
 
-      {summary.salesWithoutItemsCount > 0 ? (
-        <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4 shadow-sm">
-          <div className="flex flex-col gap-3 sm:flex-row sm:items-start">
-            <span className="inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-amber-100 text-amber-700">
-              <AlertTriangle className="h-5 w-5" aria-hidden="true" />
-            </span>
-            <div>
-              <p className="text-sm font-black uppercase tracking-[0.12em] text-amber-900">Conferencia financeira</p>
-              <p className="mt-1 text-sm leading-6 text-amber-900">
-                {summary.salesWithoutItemsCount} venda(s) concluida(s) sem itens entram neste filtro. Elas somam{' '}
-                <strong>{formatCurrency(summary.salesWithoutItemsAmount)}</strong> e geram{' '}
-                <strong>{formatCurrency(summary.salesWithoutItemsFees)}</strong> em taxas.
-              </p>
-            </div>
-          </div>
-        </div>
-      ) : null}
-
       <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-6">
         <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm xl:col-span-2">
           <p className="text-xs font-bold uppercase tracking-[0.18em] text-slate-400">Bruto vendido</p>
@@ -296,7 +271,7 @@ export default function FinancialMovementsView() {
               <option value="all">Todos</option>
               <option value="completed">Concluida</option>
               <option value="posted">Lancado</option>
-              <option value="pending">Pendente</option>
+              <option value="pending">A receber</option>
               <option value="received">Recebido</option>
               <option value="paid">Pago</option>
             </select>

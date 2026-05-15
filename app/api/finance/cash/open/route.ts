@@ -3,12 +3,12 @@ import { NextResponse } from 'next/server';
 import pool from '@/lib/db';
 import { ensureFinanceSchema } from '@/lib/finance-schema';
 import { parseMoneyInput } from '@/lib/finance-utils';
-import { getValidatedTenantSession } from '@/lib/tenant-auth';
+import { requireTenantSession } from '@/lib/tenant-auth';
 
 export async function POST(request: Request) {
   await ensureFinanceSchema();
-  const session = await getValidatedTenantSession();
-  if (!session) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+  const { session, response } = await requireTenantSession(['admin', 'staff']);
+  if (response) return response;
 
   const body = await request.json();
   const openingAmount = parseMoneyInput(body.openingAmount);

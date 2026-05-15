@@ -1,8 +1,14 @@
 ﻿import { NextResponse } from 'next/server';
 import pool, { query } from '@/lib/db';
 import { parseMoneyInput } from '@/lib/finance-utils';
-import { fetchProductOptionGroups, normalizeProductOptionGroups, syncProductOptionGroups } from '@/lib/product-options';
-import { getValidatedTenantSession } from '@/lib/tenant-auth';
+import { validateImageSource } from '@/lib/image-safety';
+import {
+  fetchProductOptionGroups,
+  normalizeProductOptionGroups,
+  syncProductOptionGroups,
+  validateProductOptionGroupImages,
+} from '@/lib/product-options';
+import { getValidatedTenantSession, requireTenantSession } from '@/lib/tenant-auth';
 
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
 const PRODUCT_TYPES = ['prepared', 'packaged', 'size_based', 'ingredient', 'special'] as const;
@@ -15,6 +21,7 @@ type ProductRow = {
   category_name: string;
   name: string;
   description: string | null;
+  print_description: boolean;
   price: string;
   image_url: string | null;
   available: boolean;
@@ -30,6 +37,7 @@ const PRODUCT_SELECT_SQL = `SELECT p.id,
        c.name AS category_name,
        p.name,
        p.description,
+       p.print_description,
        p.price::text,
        p.image_url,
        p.available,
@@ -48,21 +56,8 @@ function hasOwn(body: Record<string, unknown>, key: string) {
   return Object.prototype.hasOwnProperty.call(body, key);
 }
 
-function estimateDataUrlBytes(value: string) {
-  const commaIndex = value.indexOf(',');
-  if (commaIndex === -1) return 0;
-  const base64 = value.slice(commaIndex + 1);
-  return Math.floor((base64.length * 3) / 4);
-}
-
 function validateImagePayload(imageUrl: string) {
-  if (!imageUrl) return null;
-  if (!imageUrl.startsWith('data:image/')) return null;
-  const bytes = estimateDataUrlBytes(imageUrl);
-  if (!bytes || bytes > MAX_IMAGE_BYTES) {
-    return 'Imagem deve ter no maximo 5 MB.';
-  }
-  return null;
+  return validateImageSource(imageUrl, MAX_IMAGE_BYTES);
 }
 
 function normalizeProductType(value: unknown, fallback: ProductType): ProductType {
@@ -74,6 +69,9 @@ function normalizeProductPatch(body: Record<string, unknown>, current: ProductRo
   const categoryId = hasOwn(body, 'categoryId') ? String(body.categoryId ?? '').trim() : current.category_id;
   const name = hasOwn(body, 'name') ? String(body.name ?? '').trim() : current.name;
   const description = hasOwn(body, 'description') ? String(body.description ?? '').trim() : String(current.description || '');
+  const printDescription = hasOwn(body, 'printDescription')
+    ? body.printDescription !== false
+    : current.print_description !== false;
   const price = hasOwn(body, 'price') ? parseMoneyInput(body.price) : Number(current.price || 0);
   const imageUrl = hasOwn(body, 'imageUrl') ? String(body.imageUrl ?? '').trim() : String(current.image_url || '');
   const sku = hasOwn(body, 'sku') ? String(body.sku ?? '').trim() : String(current.sku || '');
@@ -97,6 +95,7 @@ function normalizeProductPatch(body: Record<string, unknown>, current: ProductRo
     categoryId,
     name,
     description,
+    printDescription,
     price,
     imageUrl,
     sku,
@@ -132,10 +131,8 @@ export async function GET(_request: Request, { params }: { params: Promise<{ id:
 }
 
 export async function PATCH(request: Request, { params }: { params: Promise<{ id: string }> }) {
-  const session = await getValidatedTenantSession();
-  if (!session) {
-    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-  }
+  const { session, response } = await requireTenantSession(['admin']);
+  if (response) return response;
 
   const { id } = await params;
   const currentResult = await query<ProductRow>(PRODUCT_SELECT_SQL, [id, session.tenantId]);
@@ -153,6 +150,12 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
   const imageValidationError = validateImagePayload(payload.imageUrl);
   if (imageValidationError) {
     return NextResponse.json({ error: imageValidationError }, { status: 400 });
+  }
+  if (payload.optionGroups) {
+    const optionImageValidationError = validateProductOptionGroupImages(payload.optionGroups, MAX_IMAGE_BYTES);
+    if (optionImageValidationError) {
+      return NextResponse.json({ error: optionImageValidationError }, { status: 400 });
+    }
   }
 
   const categoryCheck = await query<{ id: string; product_type: string }>(
@@ -179,13 +182,14 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
             SET category_id = $3,
                 name = $4,
                 description = NULLIF($5, ''),
-                price = $6,
-                image_url = NULLIF($7, ''),
-                available = $8,
-                sku = NULLIF($9, ''),
-                product_type = $10,
-                product_meta = $11::jsonb,
-                status = $12
+                print_description = $6,
+                price = $7,
+                image_url = NULLIF($8, ''),
+                available = $9,
+                sku = NULLIF($10, ''),
+                product_type = $11,
+                product_meta = $12::jsonb,
+                status = $13
           WHERE id = $1
             AND tenant_id = $2
         RETURNING id,
@@ -193,6 +197,7 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
                   ''::text AS category_name,
                   name,
                   description,
+                  print_description,
                   price::text,
                   image_url,
                   available,
@@ -207,6 +212,7 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
           payload.categoryId,
           payload.name,
           payload.description,
+          payload.printDescription,
           payload.price,
           payload.imageUrl,
           payload.available,

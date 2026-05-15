@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { query } from '@/lib/db';
+import { BUSINESS_CURRENT_DATE_SQL, BUSINESS_TIME_ZONE } from '@/lib/business-time';
 import { getValidatedTenantSession } from '@/lib/tenant-auth';
 
 export const dynamic = 'force-dynamic';
@@ -40,16 +41,16 @@ export async function GET() {
       `SELECT
         COALESCE(SUM(CASE
           WHEN o.status = 'completed'
-            AND timezone('America/Sao_Paulo', o.created_at)::date = timezone('America/Sao_Paulo', now())::date
+            AND timezone('${BUSINESS_TIME_ZONE}', o.created_at)::date = ${BUSINESS_CURRENT_DATE_SQL}
           THEN o.total ELSE 0 END), 0)::text AS sales_today,
         COUNT(CASE
           WHEN o.status = 'completed'
-            AND timezone('America/Sao_Paulo', o.created_at)::date = timezone('America/Sao_Paulo', now())::date
+            AND timezone('${BUSINESS_TIME_ZONE}', o.created_at)::date = ${BUSINESS_CURRENT_DATE_SQL}
           THEN 1 END)::text AS orders_today,
         COUNT(CASE WHEN o.status = 'pending' THEN 1 END)::text AS pending_orders,
         COALESCE(AVG(CASE
           WHEN o.status = 'completed'
-            AND timezone('America/Sao_Paulo', o.created_at)::date = timezone('America/Sao_Paulo', now())::date
+            AND timezone('${BUSINESS_TIME_ZONE}', o.created_at)::date = ${BUSINESS_CURRENT_DATE_SQL}
           THEN o.total END), 0)::text AS avg_ticket_today,
         AVG(CASE
           WHEN o.status IN ('delivering', 'completed')
@@ -82,7 +83,7 @@ export async function GET() {
        AND p.tenant_id = o.tenant_id
       WHERE o.tenant_id = $1
         AND o.status = 'completed'
-        AND timezone('America/Sao_Paulo', o.created_at)::date = timezone('America/Sao_Paulo', now())::date
+        AND timezone('${BUSINESS_TIME_ZONE}', o.created_at)::date = ${BUSINESS_CURRENT_DATE_SQL}
       GROUP BY oi.product_id, COALESCE(p.name, 'Produto removido')
       ORDER BY SUM(oi.quantity) DESC, COALESCE(p.name, 'Produto removido') ASC
       LIMIT 5`,

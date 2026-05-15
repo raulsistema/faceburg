@@ -1,7 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import { NextResponse } from 'next/server';
 import pool, { query } from '@/lib/db';
-import { getValidatedTenantSession } from '@/lib/tenant-auth';
+import { validateImageSource } from '@/lib/image-safety';
+import { getValidatedTenantSession, requireTenantSession } from '@/lib/tenant-auth';
 
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
 const MAX_STORIES = 12;
@@ -16,21 +17,9 @@ type MenuStoryRow = {
   expires_at: string | null;
 };
 
-function estimateDataUrlBytes(value: string) {
-  const commaIndex = value.indexOf(',');
-  if (commaIndex === -1) return 0;
-  const base64 = value.slice(commaIndex + 1);
-  return Math.floor((base64.length * 3) / 4);
-}
-
 function validateImagePayload(imageUrl: string) {
   if (!imageUrl) return 'Adicione uma imagem ao story.';
-  if (!imageUrl.startsWith('data:image/')) return null;
-  const bytes = estimateDataUrlBytes(imageUrl);
-  if (!bytes || bytes > MAX_IMAGE_BYTES) {
-    return 'Imagem deve ter no maximo 5 MB.';
-  }
-  return null;
+  return validateImageSource(imageUrl, MAX_IMAGE_BYTES);
 }
 
 function normalizeStoriesInput(rawStories: unknown[]) {
@@ -105,10 +94,8 @@ export async function GET() {
 }
 
 export async function PATCH(request: Request) {
-  const session = await getValidatedTenantSession();
-  if (!session) {
-    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-  }
+  const { session, response } = await requireTenantSession(['admin']);
+  if (response) return response;
 
   let body: Record<string, unknown> = {};
   try {

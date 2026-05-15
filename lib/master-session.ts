@@ -1,5 +1,6 @@
-import { createHmac } from 'node:crypto';
+import { createHmac, timingSafeEqual } from 'node:crypto';
 import { MASTER_SESSION_COOKIE_NAME, SESSION_DURATION_MS } from '@/lib/auth-constants';
+import { getSessionSecret } from '@/lib/session';
 
 export type MasterSession = {
   email: string;
@@ -7,7 +8,7 @@ export type MasterSession = {
 };
 
 function getSecret() {
-  return process.env.AUTH_SECRET || 'dev-only-auth-secret-change-me';
+  return getSessionSecret();
 }
 
 function sign(payload: string) {
@@ -28,7 +29,16 @@ export function parseMasterSession(token?: string | null) {
   if (!token) return null;
   const [payload, signature] = token.split('.');
   if (!payload || !signature) return null;
-  if (sign(payload) !== signature) return null;
+
+  const expected = sign(payload);
+  const expectedBuffer = Buffer.from(expected, 'utf8');
+  const signatureBuffer = Buffer.from(signature, 'utf8');
+  if (
+    expectedBuffer.length !== signatureBuffer.length
+    || !timingSafeEqual(expectedBuffer, signatureBuffer)
+  ) {
+    return null;
+  }
 
   try {
     const session = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8')) as MasterSession;

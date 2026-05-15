@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
+import { formatBusinessDateTime } from '@/lib/business-time';
 import { formatBrl } from '@/lib/finance-utils';
 
 type CashSession = {
@@ -206,7 +207,7 @@ export default function CashRegistersView() {
         setError(data.error || 'Falha ao fechar caixa.');
         return;
       }
-      setMessage('Caixa fechado com sucesso.');
+      setMessage('Caixa fechado com sucesso. Delivery do cardapio desligado.');
       await loadCurrent();
       await loadSessions();
     } catch {
@@ -308,7 +309,7 @@ export default function CashRegistersView() {
               </p>
               <p className="mt-2 text-sm text-slate-500">
                 {current
-                  ? `Aberto em ${new Date(current.openedAt).toLocaleString('pt-BR')}`
+                  ? `Aberto em ${formatBusinessDateTime(current.openedAt)}`
                   : 'Sem caixa aberto no momento. O sistema nao deve concluir vendas enquanto o caixa estiver fechado.'}
               </p>
             </div>
@@ -481,7 +482,7 @@ export default function CashRegistersView() {
                       <p className={movement.amount >= 0 ? 'font-semibold text-emerald-600' : 'font-semibold text-rose-600'}>
                         {formatBrl(movement.amount)}
                       </p>
-                      <p className="text-slate-500">{new Date(movement.createdAt).toLocaleString('pt-BR')}</p>
+                      <p className="text-slate-500">{formatBusinessDateTime(movement.createdAt)}</p>
                     </div>
                   </div>
                 ))}
@@ -502,11 +503,11 @@ export default function CashRegistersView() {
                         {session.status === 'open' ? 'Aberto' : 'Fechado'} - {session.id.slice(0, 8)}
                       </p>
                       <p className="text-slate-500">
-                        Abertura: {new Date(session.openedAt).toLocaleString('pt-BR')} - Inicial: {formatBrl(session.openingAmount)}
+                        Abertura: {formatBusinessDateTime(session.openedAt)} - Inicial: {formatBrl(session.openingAmount)}
                       </p>
                       {session.closedAt ? (
                         <p className="text-slate-500">
-                          Fechamento: {new Date(session.closedAt).toLocaleString('pt-BR')} - Esperado: {formatBrl(session.closingAmountExpected || 0)} - Informado: {formatBrl(session.closingAmountReported || 0)}
+                          Fechamento: {formatBusinessDateTime(session.closedAt)} - Esperado: {formatBrl(session.closingAmountExpected || 0)} - Informado: {formatBrl(session.closingAmountReported || 0)}
                         </p>
                       ) : null}
                     </div>

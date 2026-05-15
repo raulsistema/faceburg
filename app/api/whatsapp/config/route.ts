@@ -1,7 +1,7 @@
 import { randomBytes } from 'node:crypto';
 import { NextResponse } from 'next/server';
 import { query } from '@/lib/db';
-import { getValidatedTenantSession } from '@/lib/tenant-auth';
+import { requireTenantSession } from '@/lib/tenant-auth';
 
 type ConfigRow = {
   tenant_id: string;
@@ -69,10 +69,9 @@ function serializeConfig(row: ConfigRow | null | undefined, enabledOverride?: bo
 }
 
 export async function GET() {
-  const session = await getValidatedTenantSession();
-  if (!session) {
-    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-  }
+  const { session, response } = await requireTenantSession(['admin', 'staff']);
+  if (response) return response;
+  const canManageAgent = session?.role === 'admin';
 
   const result = await query<ConfigRow>(
     `SELECT tenant_id, enabled, agent_key, session_status, qr_code, phone_number, device_name, app_version, last_error, last_seen_at
@@ -85,8 +84,11 @@ export async function GET() {
   const row = result.rows[0] || null;
   const activationPending = Boolean(row?.enabled) && !isDesktopAppConnected(row || undefined);
 
+  const serializedConfig = serializeConfig(row);
+
   return NextResponse.json({
-    ...serializeConfig(row),
+    ...serializedConfig,
+    agentKey: canManageAgent ? serializedConfig.agentKey : '',
     activationPending,
     requiresHubSetup: activationPending,
     requiresLocalAgentSetup: activationPending,
@@ -94,10 +96,8 @@ export async function GET() {
 }
 
 export async function PATCH(request: Request) {
-  const session = await getValidatedTenantSession();
-  if (!session) {
-    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-  }
+  const { session, response } = await requireTenantSession(['admin']);
+  if (response) return response;
 
   let body: Record<string, unknown> = {};
   try {
@@ -105,8 +105,8 @@ export async function PATCH(request: Request) {
   } catch {
     body = {};
   }
-  const desiredEnabled = Boolean(body.enabled);
   const rotateKey = Boolean(body.rotateKey);
+  const hasBodyField = (field: string) => Object.prototype.hasOwnProperty.call(body, field);
 
   const currentResult = await query<ConfigRow>(
     `SELECT tenant_id, enabled, agent_key, session_status, qr_code, phone_number, device_name, app_version, last_error, last_seen_at
@@ -117,7 +117,7 @@ export async function PATCH(request: Request) {
   );
   const current = currentResult.rows[0];
   const nextKey = rotateKey || !current?.agent_key ? buildAgentKey() : current.agent_key;
-  const enabled = desiredEnabled;
+  const enabled = hasBodyField('enabled') ? Boolean(body.enabled) : Boolean(current?.enabled);
   const nextRowSeed: ConfigRow = {
     tenant_id: session.tenantId,
     enabled,
@@ -168,7 +168,7 @@ export async function PATCH(request: Request) {
   const message = !enabled
     ? 'WhatsApp automatico desativado.'
     : activationPending
-      ? 'WhatsApp ativado. No agente local deste computador, abra o WhatsApp e conecte a conta da empresa para concluir.'
+      ? 'WhatsApp ativado. No Hub local deste computador, abra o WhatsApp e conecte a conta da empresa para concluir.'
       : 'WhatsApp ativado e conectado.';
 
   return NextResponse.json({

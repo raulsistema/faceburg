@@ -2,26 +2,14 @@
 import { NextResponse } from 'next/server';
 import pool, { query } from '@/lib/db';
 import { parseMoneyInput } from '@/lib/finance-utils';
-import { normalizeProductOptionGroups, syncProductOptionGroups } from '@/lib/product-options';
-import { getValidatedTenantSession } from '@/lib/tenant-auth';
+import { validateImageSource } from '@/lib/image-safety';
+import { normalizeProductOptionGroups, syncProductOptionGroups, validateProductOptionGroupImages } from '@/lib/product-options';
+import { getValidatedTenantSession, requireTenantSession } from '@/lib/tenant-auth';
 
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
 
-function estimateDataUrlBytes(value: string) {
-  const commaIndex = value.indexOf(',');
-  if (commaIndex === -1) return 0;
-  const base64 = value.slice(commaIndex + 1);
-  return Math.floor((base64.length * 3) / 4);
-}
-
 function validateImagePayload(imageUrl: string) {
-  if (!imageUrl) return null;
-  if (!imageUrl.startsWith('data:image/')) return null;
-  const bytes = estimateDataUrlBytes(imageUrl);
-  if (!bytes || bytes > MAX_IMAGE_BYTES) {
-    return 'Imagem deve ter no maximo 5 MB.';
-  }
-  return null;
+  return validateImageSource(imageUrl, MAX_IMAGE_BYTES);
 }
 
 type ProductRow = {
@@ -30,6 +18,7 @@ type ProductRow = {
   category_name: string;
   name: string;
   description: string | null;
+  print_description: boolean;
   price: string;
   image_url: string | null;
   available: boolean;
@@ -52,6 +41,7 @@ export async function GET() {
             c.name AS category_name,
             p.name,
             p.description,
+            p.print_description,
             p.price::text,
             p.image_url,
             p.available,
@@ -71,15 +61,14 @@ export async function GET() {
 }
 
 export async function POST(request: Request) {
-  const session = await getValidatedTenantSession();
-  if (!session) {
-    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-  }
+  const { session, response } = await requireTenantSession(['admin']);
+  if (response) return response;
 
   const body = await request.json();
   const categoryId = String(body.categoryId || '').trim();
   const name = String(body.name || '').trim();
   const description = String(body.description || '').trim();
+  const printDescription = body.printDescription !== false;
   const price = parseMoneyInput(body.price);
   const imageUrl = String(body.imageUrl || '').trim();
   const sku = String(body.sku || '').trim();
@@ -102,6 +91,10 @@ export async function POST(request: Request) {
   const imageValidationError = validateImagePayload(imageUrl);
   if (imageValidationError) {
     return NextResponse.json({ error: imageValidationError }, { status: 400 });
+  }
+  const optionImageValidationError = validateProductOptionGroupImages(optionGroups, MAX_IMAGE_BYTES);
+  if (optionImageValidationError) {
+    return NextResponse.json({ error: optionImageValidationError }, { status: 400 });
   }
 
   const categoryCheck = await query<{ id: string; product_type: string }>(
@@ -126,16 +119,17 @@ export async function POST(request: Request) {
       const productId = randomUUID();
       const result = await client.query<ProductRow>(
         `INSERT INTO products
-         (id, tenant_id, category_id, name, description, price, image_url, available, sku, product_type, product_meta, status, display_order)
+         (id, tenant_id, category_id, name, description, print_description, price, image_url, available, sku, product_type, product_meta, status, display_order)
          VALUES
-         ($1, $2, $3, $4, NULLIF($5, ''), $6, NULLIF($7, ''), $8, NULLIF($9, ''), $10, $11::jsonb, $12, 0)
-         RETURNING id, category_id, ''::text AS category_name, name, description, price::text, image_url, available, sku, product_type, product_meta, status, display_order`,
+         ($1, $2, $3, $4, NULLIF($5, ''), $6, $7, NULLIF($8, ''), $9, NULLIF($10, ''), $11, $12::jsonb, $13, 0)
+         RETURNING id, category_id, ''::text AS category_name, name, description, print_description, price::text, image_url, available, sku, product_type, product_meta, status, display_order`,
         [
           productId,
           session.tenantId,
           categoryId,
           name,
           description,
+          printDescription,
           price,
           imageUrl,
           available,

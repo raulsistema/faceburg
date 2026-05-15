@@ -2,23 +2,44 @@ import { randomUUID } from 'node:crypto';
 import type { PoolClient } from 'pg';
 import { NextResponse } from 'next/server';
 import pool, { query } from '@/lib/db';
+import { ensureOrderDeliveryIdentifiers } from '@/lib/delivery-tracking';
 import { quoteDeliveryFee } from '@/lib/delivery-fee';
 import { parseMoneyInput } from '@/lib/finance-utils';
+
+import { getOrderAutomationConfig, initialOrderStatusForAutomation } from '@/lib/order-automation';
+import { assignOrderSequenceNumber, ensureOrderSequenceSchema } from '@/lib/order-sequence';
 import { enqueueOrderPrintJob } from '@/lib/printing';
+import { checkRateLimit } from '@/lib/rate-limit';
 import { notifyOrderEvent } from '@/lib/realtime';
+import { ensureStoreHoursSchema, isMenuOpenNow } from '@/lib/store-hours';
 import { enqueueOrderWhatsappJob } from '@/lib/whatsapp';
 
 class CheckoutValidationError extends Error {}
+
+const LOCAL_FALLBACK_QUEUE_DELAY_SECONDS = 90;
+
+class PublicCheckoutRateLimitError extends Error {
+  retryAfterSeconds: number;
+
+  constructor(message: string, retryAfterSeconds: number) {
+    super(message);
+    this.retryAfterSeconds = retryAfterSeconds;
+  }
+}
 
 type TenantRow = {
   id: string;
   slug: string;
   status: string;
   store_open: boolean;
+  menu_open_mode: string | null;
+  menu_hours: unknown;
   delivery_fee_base: string;
   delivery_fee_mode: string;
   delivery_fee_per_km: string;
   delivery_fee_table: unknown;
+  delivery_max_distance_meters: number | string | null;
+  delivery_min_order_amount: string | null;
   issuer_street: string | null;
   issuer_number: string | null;
   issuer_neighborhood: string | null;
@@ -45,12 +66,16 @@ type PaymentMethodRow = {
 
 type CustomerRow = {
   id: string;
+  name: string;
 };
 
 type ExistingCheckoutOrderRow = {
   id: string;
   total: string;
   delivery_fee_amount: string;
+  type: string | null;
+  delivery_tracking_token: string | null;
+  order_sequence_number: number | string | null;
 };
 
 type AddressRow = {
@@ -118,6 +143,41 @@ function getDatabaseErrorCode(error: unknown) {
 
 function isUniqueViolation(error: unknown) {
   return getDatabaseErrorCode(error) === '23505';
+}
+
+function getClientIp(request: Request) {
+  const forwardedFor = request.headers.get('x-forwarded-for') || '';
+  const firstForwardedIp = forwardedFor.split(',')[0]?.trim();
+  return (
+    firstForwardedIp ||
+    request.headers.get('x-real-ip') ||
+    request.headers.get('cf-connecting-ip') ||
+    'unknown'
+  );
+}
+
+async function enforcePublicCheckoutRateLimit(request: Request, tenantId: string, phoneDigits: string) {
+  const clientIp = getClientIp(request);
+  const checks = await Promise.all([
+    checkRateLimit({
+      key: `public-checkout:${tenantId}:ip:${clientIp}`,
+      limit: 30,
+      windowSeconds: 10 * 60,
+    }),
+    checkRateLimit({
+      key: `public-checkout:${tenantId}:phone:${phoneDigits}`,
+      limit: 8,
+      windowSeconds: 15 * 60,
+    }),
+  ]);
+
+  const blocked = checks.find((check) => !check.allowed);
+  if (blocked) {
+    throw new PublicCheckoutRateLimitError(
+      'Muitas tentativas de pedido em pouco tempo. Aguarde alguns minutos e tente novamente.',
+      blocked.retryAfterSeconds,
+    );
+  }
 }
 
 async function ensureCheckoutKeySchema() {
@@ -245,6 +305,13 @@ function roundMoney(value: number) {
   return Number(value.toFixed(2));
 }
 
+function formatMoneyPtBr(value: number) {
+  return new Intl.NumberFormat('pt-BR', {
+    style: 'currency',
+    currency: 'BRL',
+  }).format(value);
+}
+
 function normalizeOrderType(value: string) {
   const type = value.trim().toLowerCase();
   if (type === 'delivery' || type === 'pickup' || type === 'table') {
@@ -254,7 +321,58 @@ function normalizeOrderType(value: string) {
 }
 
 function normalizePhone(value: string) {
-  return value.replace(/\D/g, '');
+  let digits = value.replace(/\D/g, '');
+  if (digits.startsWith('00')) {
+    digits = digits.slice(2);
+  }
+  if (digits.startsWith('55') && digits.length >= 12) {
+    digits = digits.slice(2);
+  }
+  return digits.replace(/^0+/, '');
+}
+
+function normalizeLookupName(value: string) {
+  return value
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function customerNameMatches(storedName: string, inputName: string) {
+  const stored = normalizeLookupName(storedName);
+  const input = normalizeLookupName(inputName);
+  if (!stored || !input || input.replace(/\s/g, '').length < 2) {
+    return false;
+  }
+  if (stored === input) {
+    return true;
+  }
+
+  const storedTokens = stored.split(' ').filter(Boolean);
+  const inputTokens = input.split(' ').filter(Boolean);
+  if (!storedTokens.length || !inputTokens.length) {
+    return false;
+  }
+
+  const storedFirstToken = storedTokens[0];
+  const inputFirstToken = inputTokens[0];
+  const firstTokenMatches =
+    storedFirstToken === inputFirstToken ||
+    (inputFirstToken.length >= 3 && storedFirstToken.startsWith(inputFirstToken)) ||
+    (storedFirstToken.length >= 3 && inputFirstToken.startsWith(storedFirstToken));
+
+  if (inputTokens.length === 1) {
+    return firstTokenMatches;
+  }
+
+  if (!firstTokenMatches) {
+    return false;
+  }
+
+  return true;
 }
 
 function normalizeCheckoutKey(value: unknown) {
@@ -272,9 +390,14 @@ function formatAddressLine(address: AddressRow) {
 
 async function findExistingCheckoutOrder(tenantId: string, checkoutKey: string) {
   if (!checkoutKey) return null;
-  await ensureCheckoutKeySchema();
+  await Promise.all([ensureCheckoutKeySchema(), ensureOrderSequenceSchema()]);
   const result = await query<ExistingCheckoutOrderRow>(
-    `SELECT id, total::text, delivery_fee_amount::text
+    `SELECT id,
+            total::text,
+            delivery_fee_amount::text,
+            type,
+            delivery_tracking_token,
+            order_sequence_number
      FROM orders
      WHERE tenant_id = $1
        AND public_checkout_key = $2
@@ -284,12 +407,29 @@ async function findExistingCheckoutOrder(tenantId: string, checkoutKey: string) 
   return result.rows[0] || null;
 }
 
-function serializeExistingCheckoutOrder(row: ExistingCheckoutOrderRow) {
+function buildPublicTrackingPath(token: string | null | undefined) {
+  const normalizedToken = String(token || '').trim();
+  return normalizedToken ? `/acompanhar/${encodeURIComponent(normalizedToken)}` : '';
+}
+
+async function serializeExistingCheckoutOrder(tenantId: string, row: ExistingCheckoutOrderRow) {
+  let trackingToken = row.delivery_tracking_token || '';
+  if (row.type === 'delivery' && !trackingToken) {
+    const identifiers = await ensureOrderDeliveryIdentifiers(tenantId, row.id);
+    trackingToken = identifiers.token;
+  }
+
   return NextResponse.json({
     ok: true,
     orderId: row.id,
+    trackingToken,
+    trackingUrl: buildPublicTrackingPath(trackingToken),
     total: roundMoney(Number(row.total || 0)),
     deliveryFeeAmount: roundMoney(Number(row.delivery_fee_amount || 0)),
+    orderSequenceNumber:
+      row.order_sequence_number !== null && row.order_sequence_number !== undefined
+        ? Number(row.order_sequence_number)
+        : null,
     reused: true,
     message: 'Pedido recebido com sucesso.',
     communication: {
@@ -298,10 +438,6 @@ function serializeExistingCheckoutOrder(row: ExistingCheckoutOrderRow) {
       realtimeNotified: false,
     },
   });
-}
-
-function wasJobQueued(result: PromiseSettledResult<boolean>) {
-  return result.status === 'fulfilled' && result.value === true;
 }
 
 export async function POST(request: Request, { params }: { params: Promise<{ slug: string }> }) {
@@ -351,7 +487,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ slu
     const changeFor = Number.isFinite(changeForRaw) && changeForRaw > 0 ? changeForRaw : null;
     const items = (body.items || []) as CheckoutItemInput[];
 
-    if (!customerName || customerPhoneDigits.length < 10) {
+    if (normalizeLookupName(customerName).replace(/\s/g, '').length < 2 || customerPhoneDigits.length < 10) {
       return NextResponse.json({ error: 'Nome e celular sao obrigatorios.' }, { status: 400 });
     }
 
@@ -367,8 +503,9 @@ export async function POST(request: Request, { params }: { params: Promise<{ slu
       return NextResponse.json({ error: 'Carrinho vazio.' }, { status: 400 });
     }
 
+    await ensureStoreHoursSchema();
     const tenantResult = await query<TenantRow>(
-      `SELECT id, slug, status, store_open, delivery_fee_base::text, delivery_fee_mode, delivery_fee_per_km::text, delivery_fee_table, issuer_street, issuer_number, issuer_neighborhood, issuer_city, issuer_state, issuer_zip_code, delivery_origin_use_issuer, delivery_origin_street, delivery_origin_number, delivery_origin_complement, delivery_origin_neighborhood, delivery_origin_city, delivery_origin_state, delivery_origin_zip_code
+      `SELECT id, slug, status, store_open, menu_open_mode, menu_hours, delivery_fee_base::text, delivery_fee_mode, delivery_fee_per_km::text, delivery_fee_table, delivery_max_distance_meters, delivery_min_order_amount::text, issuer_street, issuer_number, issuer_neighborhood, issuer_city, issuer_state, issuer_zip_code, delivery_origin_use_issuer, delivery_origin_street, delivery_origin_number, delivery_origin_complement, delivery_origin_neighborhood, delivery_origin_city, delivery_origin_state, delivery_origin_zip_code
        FROM tenants
        WHERE slug = $1
        LIMIT 1`,
@@ -383,15 +520,17 @@ export async function POST(request: Request, { params }: { params: Promise<{ slu
     if (tenant.status !== 'active') {
       return NextResponse.json({ error: 'Empresa inativa.' }, { status: 403 });
     }
-    if (!tenant.store_open) {
+    if (!isMenuOpenNow({ manualOpen: Boolean(tenant.store_open), mode: tenant.menu_open_mode, hours: tenant.menu_hours })) {
       return NextResponse.json({ error: 'Delivery indisponivel no momento. Tente novamente mais tarde.' }, { status: 403 });
     }
 
-    await ensureCheckoutKeySchema();
+    await Promise.all([ensureCheckoutKeySchema(), ensureOrderSequenceSchema()]);
     const existingCheckoutOrder = await findExistingCheckoutOrder(tenant.id, checkoutKey);
     if (existingCheckoutOrder) {
-      return serializeExistingCheckoutOrder(existingCheckoutOrder);
+      return serializeExistingCheckoutOrder(tenant.id, existingCheckoutOrder);
     }
+
+    await enforcePublicCheckoutRateLimit(request, tenant.id, customerPhoneDigits);
 
     const normalizedItems = items
       .map((item) => ({
@@ -633,6 +772,13 @@ export async function POST(request: Request, { params }: { params: Promise<{ slu
     }
 
     const subtotalAmount = roundMoney(total);
+    const deliveryMinOrderAmount = roundMoney(Math.max(0, Number(tenant.delivery_min_order_amount || 0)));
+    if (orderType === 'delivery' && deliveryMinOrderAmount > 0 && subtotalAmount < deliveryMinOrderAmount) {
+      const remainingAmount = roundMoney(deliveryMinOrderAmount - subtotalAmount);
+      throw new CheckoutValidationError(
+        `Pedido minimo para entrega: ${formatMoneyPtBr(deliveryMinOrderAmount)}. Faltam ${formatMoneyPtBr(remainingAmount)}.`,
+      );
+    }
     let selectedPaymentMethod: PaymentMethodRow | null = null;
     if (paymentMethodId) {
       const byId = await query<PaymentMethodRow>(
@@ -683,38 +829,50 @@ export async function POST(request: Request, { params }: { params: Promise<{ slu
     await dbClient.query('BEGIN');
 
     const existingCustomerResult = await dbClient.query<CustomerRow>(
-      `SELECT id
+      `SELECT id, name
        FROM customers
        WHERE tenant_id = $1
          AND regexp_replace(phone, '\D', '', 'g') = $2
        ORDER BY created_at ASC
-       LIMIT 1`,
+       LIMIT 25`,
       [tenant.id, customerPhoneDigits],
     );
 
+    const matchingCustomer = existingCustomerResult.rows.find((customer) => customerNameMatches(customer.name, customerName)) || null;
+    const existingPhoneCustomer = existingCustomerResult.rows[0] || null;
     let customerId = '';
-    if (existingCustomerResult.rowCount) {
-      customerId = existingCustomerResult.rows[0].id;
+    let allowSavedCustomerAddress = false;
+    if (matchingCustomer) {
+      customerId = matchingCustomer.id;
+      allowSavedCustomerAddress = true;
       await dbClient.query(
         `UPDATE customers
-         SET name = $3,
-             phone = $4,
-             email = NULLIF($5, ''),
-             is_company = $6,
-             company_name = NULLIF($7, ''),
-             document_number = NULLIF($8, ''),
+         SET phone = $3,
+             email = NULLIF($4, ''),
+             is_company = $5,
+             company_name = NULLIF($6, ''),
+             document_number = NULLIF($7, ''),
              status = 'active'
          WHERE id = $1 AND tenant_id = $2`,
         [
           customerId,
           tenant.id,
-          customerName,
           customerPhoneDigits,
           customerEmail,
           customerIsCompany,
           customerCompanyName,
           customerDocumentNumber,
         ],
+      );
+    } else if (existingPhoneCustomer) {
+      customerId = existingPhoneCustomer.id;
+      await dbClient.query(
+        `UPDATE customers
+         SET phone = $3,
+             email = COALESCE(NULLIF($4, ''), email),
+             status = 'active'
+         WHERE id = $1 AND tenant_id = $2`,
+        [customerId, tenant.id, customerPhoneDigits, customerEmail],
       );
     } else {
       customerId = randomUUID();
@@ -750,6 +908,9 @@ export async function POST(request: Request, { params }: { params: Promise<{ slu
       | null = null;
     if (orderType === 'delivery') {
       if (selectedAddressId) {
+        if (!allowSavedCustomerAddress) {
+          throw new CheckoutValidationError('Confirme nome e celular do cadastro antes de usar endereco salvo.');
+        }
         const selectedAddressResult = await dbClient.query<AddressRow>(
           `SELECT id, label, street, number, complement, neighborhood, city, state, zip_code, reference, is_default
            FROM customer_addresses
@@ -886,12 +1047,17 @@ export async function POST(request: Request, { params }: { params: Promise<{ slu
               deliveryFeeMode: tenant.delivery_fee_mode,
               deliveryFeePerKm: tenant.delivery_fee_per_km,
               deliveryFeeTable: tenant.delivery_fee_table,
+              deliveryMaxDistanceMeters: tenant.delivery_max_distance_meters,
             },
             resolvedDeliveryAddressInput || {
               freeform: resolvedDeliveryAddress,
             },
           )
         : null;
+
+    if (deliveryFeeQuote?.isDeliveryAvailable === false) {
+      throw new CheckoutValidationError(deliveryFeeQuote.deliveryUnavailableReason || 'Endereco fora da area de entrega da loja.');
+    }
 
     const deliveryFeeAmount = orderType === 'delivery' ? deliveryFeeQuote?.deliveryFeeAmount ?? roundMoney(Number(tenant.delivery_fee_base || 0)) : 0;
     const baseTotal = roundMoney(subtotalAmount + deliveryFeeAmount);
@@ -909,7 +1075,24 @@ export async function POST(request: Request, { params }: { params: Promise<{ slu
       throw new CheckoutValidationError('Troco deve ser maior ou igual ao total.');
     }
 
+    const automationConfig = await getOrderAutomationConfig(tenant.id, dbClient);
+    const initialOrderStatus = initialOrderStatusForAutomation(automationConfig);
+
+    const openCashResult = await dbClient.query<{ id: string }>(
+      `SELECT id FROM cash_register_sessions
+       WHERE tenant_id = $1 AND status = 'open'
+       ORDER BY opened_at DESC LIMIT 1`,
+      [tenant.id],
+    );
+    const openCashSessionId = openCashResult.rows[0]?.id || null;
+    let checkoutCashSessionId: string | null = null;
+    if (automationConfig.autoAcceptOrders) {
+      checkoutCashSessionId = openCashSessionId;
+    }
+
     const orderId = randomUUID();
+    let orderSequenceNumber: number | null = null;
+    let trackingToken = '';
     await dbClient.query(
       `INSERT INTO orders
        (
@@ -937,7 +1120,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ slu
        )
        VALUES
        (
-        $1, $2, $3, $4, NULLIF($5, ''), $6, $7, $8, 0, 0, $9, $10, $11, $12, $13, 'pending', $14, 'pending', $15, NULLIF($16, ''), NOW()
+        $1, $2, $3, $4, NULLIF($5, ''), $6, $7, $8, 0, 0, $9, $10, $11, $12, $13, $14, $15, 'pending', $16, NULLIF($17, ''), NOW()
        )`,
       [
         orderId,
@@ -953,11 +1136,22 @@ export async function POST(request: Request, { params }: { params: Promise<{ slu
         paymentNetAmount,
         changeFor,
         orderTotal,
+        initialOrderStatus,
         orderType,
-        null,
+        checkoutCashSessionId,
         checkoutKey,
       ],
     );
+
+    const sequenceCashSessionId = checkoutCashSessionId || openCashSessionId;
+    if (sequenceCashSessionId) {
+      orderSequenceNumber = await assignOrderSequenceNumber(tenant.id, orderId, sequenceCashSessionId, dbClient);
+    }
+
+    if (orderType === 'delivery') {
+      const identifiers = await ensureOrderDeliveryIdentifiers(tenant.id, orderId, dbClient);
+      trackingToken = identifiers.token;
+    }
 
     for (const item of resolvedItems) {
       await dbClient.query(
@@ -967,17 +1161,47 @@ export async function POST(request: Request, { params }: { params: Promise<{ slu
       );
     }
 
+    await dbClient.query(
+      `INSERT INTO order_payments
+       (id, tenant_id, order_id, payment_method_id, method_type, method_name, gross_amount, fee_amount, net_amount)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+      [
+        randomUUID(),
+        tenant.id,
+        orderId,
+        selectedPaymentMethod.id,
+        selectedPaymentMethod.method_type,
+        selectedPaymentMethod.name,
+        orderTotal,
+        paymentFeeAmount,
+        paymentNetAmount,
+      ],
+    );
+
     await dbClient.query('COMMIT');
 
-    const [printDispatch, whatsappDispatch, orderEventDispatch] = await Promise.allSettled([
-      enqueueOrderPrintJob(tenant.id, orderId, 'new_order'),
-      enqueueOrderWhatsappJob(tenant.id, orderId, 'new_order'),
+    const queueOptions = { initialDelaySeconds: LOCAL_FALLBACK_QUEUE_DELAY_SECONDS };
+
+    const orderEventDispatch = await Promise.allSettled([
       notifyOrderEvent(tenant.id, 'created', orderId),
+      enqueueOrderPrintJob(tenant.id, orderId, 'new_order', undefined, queueOptions),
+      enqueueOrderWhatsappJob(tenant.id, orderId, 'new_order', undefined, queueOptions),
     ]);
+    const realtimeNotified = orderEventDispatch[0]?.status === 'fulfilled';
+    const printQueued =
+      orderEventDispatch[1]?.status === 'fulfilled' && Boolean(orderEventDispatch[1].value);
+    const kitchenPrintQueued = printQueued;
+    const whatsappQueued =
+      orderEventDispatch[2]?.status === 'fulfilled' && Boolean(orderEventDispatch[2].value);
 
     return NextResponse.json({
       ok: true,
       orderId,
+      trackingToken,
+      trackingUrl: buildPublicTrackingPath(trackingToken),
+      orderSequenceNumber,
+      status: initialOrderStatus,
+      autoAccepted: automationConfig.autoAcceptOrders,
       total: orderTotal,
       deliveryFeeAmount,
       distanceKm: deliveryFeeQuote?.distanceKm ?? null,
@@ -987,12 +1211,24 @@ export async function POST(request: Request, { params }: { params: Promise<{ slu
       paymentFeeAmount,
       message: 'Pedido recebido com sucesso.',
       communication: {
-        printQueued: wasJobQueued(printDispatch),
-        whatsappQueued: wasJobQueued(whatsappDispatch),
-        realtimeNotified: orderEventDispatch.status === 'fulfilled',
+        printQueued,
+        kitchenPrintQueued,
+        whatsappQueued,
+        realtimeNotified,
       },
     });
   } catch (error) {
+    if (error instanceof PublicCheckoutRateLimitError) {
+      return NextResponse.json(
+        { error: error.message },
+        {
+          status: 429,
+          headers: {
+            'Retry-After': String(error.retryAfterSeconds),
+          },
+        },
+      );
+    }
     if (client) {
       try {
         await client.query('ROLLBACK');
@@ -1006,7 +1242,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ slu
     if (checkoutTenantId && checkoutKey && isUniqueViolation(error)) {
       const existingCheckoutOrder = await findExistingCheckoutOrder(checkoutTenantId, checkoutKey).catch(() => null);
       if (existingCheckoutOrder) {
-        return serializeExistingCheckoutOrder(existingCheckoutOrder);
+        return serializeExistingCheckoutOrder(checkoutTenantId, existingCheckoutOrder);
       }
     }
     console.error('[public-checkout] failed to finalize order', error);

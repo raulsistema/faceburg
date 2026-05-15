@@ -2,6 +2,7 @@
 
 import { ChangeEvent, FormEvent, useEffect, useState } from 'react';
 import AppImage from '@/components/ui/AppImage';
+import { imageFileToWebpDataUrl } from '@/lib/client-image-webp';
 
 type IssuerForm = {
   logoUrl: string;
@@ -138,18 +139,17 @@ export default function EmitenteSettings({ initialData }: { initialData?: Partia
     setMessage('');
 
     try {
-      const dataUrl = await new Promise<string>((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onload = () => resolve(String(reader.result || ''));
-        reader.onerror = () => reject(new Error('Falha ao ler a imagem.'));
-        reader.readAsDataURL(file);
+      const dataUrl = await imageFileToWebpDataUrl(file, {
+        maxWidth: 512,
+        maxHeight: 512,
+        maxOutputBytes: 2 * 1024 * 1024,
       });
 
       setForm((current) => ({
         ...current,
         logoUrl: dataUrl,
       }));
-      setMessage('Logo carregada e pronta para salvar no banco.');
+      setMessage('Logo convertida para WebP e pronta para salvar no banco.');
     } catch {
       setError('Nao foi possivel carregar a logo.');
     } finally {
@@ -255,7 +255,7 @@ export default function EmitenteSettings({ initialData }: { initialData?: Partia
                   </button>
                 </div>
                 <p className="text-xs text-slate-500">
-                  Selecione a imagem da logo para gravar no banco. Formatos aceitos: PNG, JPG e WebP ate 2 MB.
+                  Selecione a imagem da logo para gravar no banco. PNG, JPG e WebP sao convertidos para WebP ate 2 MB.
                 </p>
                 {readingLogo ? <p className="text-xs text-sky-600">Carregando imagem...</p> : null}
               </div>

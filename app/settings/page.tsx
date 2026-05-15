@@ -1,10 +1,13 @@
 import DashboardShell from '@/components/layout/DashboardShell';
 import { query } from '@/lib/db';
-import { normalizePrintCopies, normalizePrintEvents, normalizeReceiptOptions, normalizeReceiptText, normalizeReceiptWidth } from '@/lib/print-settings';
+import { ensureOrderSequenceSchema } from '@/lib/order-sequence';
+import { ensureStoreHoursSchema, isMenuOpenNow } from '@/lib/store-hours';
 import { getValidatedTenantSession } from '@/lib/tenant-auth';
-import LocalAgentSettings from './LocalAgentSettings';
 import EmitenteSettings from './EmitenteSettings';
+import HubAutomationSettings from './HubAutomationSettings';
+import MenuHoursSettings from './MenuHoursSettings';
 import OrderSoundSettings from './OrderSoundSettings';
+import OrderSequenceSettings from './OrderSequenceSettings';
 
 type TenantRow = {
   id: string;
@@ -16,7 +19,10 @@ type TenantRow = {
   prep_time_minutes: number;
   delivery_fee_base: string;
   store_open: boolean;
+  menu_open_mode: string | null;
+  menu_hours: unknown;
   order_notification_sound: string | null;
+  order_sequence_start: number | null;
   whatsapp_phone: string | null;
   issuer_name: string | null;
   issuer_trade_name: string | null;
@@ -33,93 +39,50 @@ type TenantRow = {
   issuer_state: string | null;
 };
 
-type PrintAgentRow = {
-  enabled: boolean;
-  agent_key: string | null;
-  printer_name: string | null;
-  receipt_width: number | null;
-  print_copies: number | null;
-  print_events: unknown | null;
-  receipt_options: unknown | null;
-  receipt_header: string | null;
-  receipt_footer: string | null;
-  last_seen_at: string | null;
-};
-
-type WhatsAppAgentRow = {
-  enabled: boolean;
-  agent_key: string | null;
-  session_status: string | null;
-  qr_code: string | null;
-  phone_number: string | null;
-  last_seen_at: string | null;
-};
-
 export default async function SettingsPage() {
   const session = await getValidatedTenantSession();
+  if (session) {
+    await Promise.all([ensureOrderSequenceSchema(), ensureStoreHoursSchema()]);
+  }
 
-  const [tenantResult, printResult, whatsappResult] = session
-    ? await Promise.all([
-        query<TenantRow>(
-          `SELECT
-            id,
-            name,
-            slug,
-            plan,
-            status,
-            logo_url,
-            prep_time_minutes,
-            delivery_fee_base::text,
-            store_open,
-            order_notification_sound,
-            whatsapp_phone,
-            issuer_name,
-            issuer_trade_name,
-            issuer_document,
-            issuer_state_registration,
-            issuer_email,
-            issuer_phone,
-            issuer_zip_code,
-            issuer_street,
-            issuer_number,
-            issuer_complement,
-            issuer_neighborhood,
-            issuer_city,
-            issuer_state
-           FROM tenants
-           WHERE id = $1
-           LIMIT 1`,
-          [session.tenantId],
-        ),
-        query<PrintAgentRow>(
-          `SELECT enabled,
-                  agent_key,
-                  printer_name,
-                  receipt_width,
-                  print_copies,
-                  print_events,
-                  receipt_options,
-                  receipt_header,
-                  receipt_footer,
-                  last_seen_at
-           FROM printer_agents
-           WHERE tenant_id = $1
-           LIMIT 1`,
-          [session.tenantId],
-        ),
-        query<WhatsAppAgentRow>(
-          `SELECT enabled, agent_key, session_status, qr_code, phone_number, last_seen_at
-           FROM whatsapp_agents
-           WHERE tenant_id = $1
-           LIMIT 1`,
-          [session.tenantId],
-        ),
-      ])
-    : [null, null, null];
+  const tenantResult = session
+    ? await query<TenantRow>(
+        `SELECT
+          id,
+          name,
+          slug,
+          plan,
+          status,
+          logo_url,
+          prep_time_minutes,
+          delivery_fee_base::text,
+          store_open,
+          menu_open_mode,
+          menu_hours,
+          order_notification_sound,
+          order_sequence_start,
+          whatsapp_phone,
+          issuer_name,
+          issuer_trade_name,
+          issuer_document,
+          issuer_state_registration,
+          issuer_email,
+          issuer_phone,
+          issuer_zip_code,
+          issuer_street,
+          issuer_number,
+          issuer_complement,
+          issuer_neighborhood,
+          issuer_city,
+          issuer_state
+         FROM tenants
+         WHERE id = $1
+         LIMIT 1`,
+        [session.tenantId],
+      )
+    : null;
 
   const tenant = tenantResult?.rows[0] || null;
-  const printAgent = printResult?.rows[0] || null;
-  const whatsappAgent = whatsappResult?.rows[0] || null;
 
   const shellData = session && tenant
     ? {
@@ -168,31 +131,26 @@ export default async function SettingsPage() {
       }
     : null;
 
-  const printInitialData = tenant
+  const menuHoursInitialData = tenant
     ? {
-        enabled: Boolean(printAgent?.enabled),
-        hasAgentKey: Boolean(printAgent?.agent_key),
-        agentKey: printAgent?.agent_key || '',
-        printerName: printAgent?.printer_name || '',
-        receiptWidth: normalizeReceiptWidth(printAgent?.receipt_width),
-        printCopies: normalizePrintCopies(printAgent?.print_copies),
-        printEvents: normalizePrintEvents(printAgent?.print_events),
-        receiptOptions: normalizeReceiptOptions(printAgent?.receipt_options),
-        receiptHeader: normalizeReceiptText(printAgent?.receipt_header),
-        receiptFooter: normalizeReceiptText(printAgent?.receipt_footer),
-        lastSeenAt: printAgent?.last_seen_at || null,
+        storeOpen: Boolean(tenant.store_open),
+        effectiveStoreOpen: isMenuOpenNow({
+          manualOpen: Boolean(tenant.store_open),
+          mode: tenant.menu_open_mode,
+          hours: tenant.menu_hours,
+        }),
+        menuOpenMode: tenant.menu_open_mode === 'schedule' ? 'schedule' as const : 'manual' as const,
+        menuHours: tenant.menu_hours as
+          | {
+              days: Record<string, { enabled: boolean; open: string; close: string }>;
+            }
+          | undefined,
       }
     : null;
 
-  const whatsappInitialData = tenant
+  const orderSequenceInitialData = tenant
     ? {
-        enabled: Boolean(whatsappAgent?.enabled),
-        hasAgentKey: Boolean(whatsappAgent?.agent_key),
-        agentKey: whatsappAgent?.agent_key || '',
-        sessionStatus: whatsappAgent?.session_status || 'disconnected',
-        qrCode: whatsappAgent?.qr_code || '',
-        phoneNumber: whatsappAgent?.phone_number || '',
-        lastSeenAt: whatsappAgent?.last_seen_at || null,
+        orderSequenceStart: tenant.order_sequence_start ?? null,
       }
     : null;
 
@@ -227,13 +185,10 @@ export default async function SettingsPage() {
         </div>
 
         <EmitenteSettings initialData={emitenteInitialData} />
+        <MenuHoursSettings initialData={menuHoursInitialData} />
         <OrderSoundSettings initialData={orderSoundInitialData} />
-        <LocalAgentSettings
-          tenantId={tenant?.id || ''}
-          tenantSlug={tenant?.slug || ''}
-          initialPrintData={printInitialData}
-          initialWhatsAppData={whatsappInitialData}
-        />
+        <HubAutomationSettings />
+        <OrderSequenceSettings initialData={orderSequenceInitialData} />
       </div>
     </DashboardShell>
   );

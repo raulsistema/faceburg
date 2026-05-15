@@ -13,13 +13,14 @@
         <div class="brand-mark">F</div>
         <div class="brand-copy">
           <strong>Faceburg App</strong>
-          <span id="server-label">http://localhost:3000</span>
+          <span id="server-label">https://faceburg.vercel.app</span>
         </div>
       </div>
       <div class="topbar-actions">
         <button id="btn-system-back" class="btn btn-ghost" type="button">Voltar</button>
         <button id="btn-system-forward" class="btn btn-ghost" type="button">Avancar</button>
         <button id="btn-config-server" class="btn btn-ghost" type="button">Servidor</button>
+        <button id="btn-config-hub" class="btn btn-ghost" type="button">Config</button>
         <button id="btn-system-home" class="btn btn-ghost" type="button">Sistema</button>
         <button id="btn-system-reload" class="btn btn-ghost" type="button">Atualizar</button>
         <button id="btn-open-window" class="btn btn-ghost" type="button">Abrir em janela</button>
@@ -29,6 +30,7 @@
 
     <section class="status-bar">
       <span id="whats-status-chip" class="status-chip status-chip-off">WhatsApp desligado</span>
+      <span id="print-status-chip" class="status-chip status-chip-off">Impressao desligada</span>
       <span id="runtime-status" class="runtime-status">Entre no sistema normalmente nesta janela. Quando quiser, clique em Abrir WhatsApp.</span>
     </section>
 
@@ -41,6 +43,101 @@
       ></webview>
     </main>
   </div>
+
+  <section id="config-modal" class="modal hidden" aria-hidden="true">
+    <div class="modal-backdrop" data-close-config></div>
+    <div class="config-panel" role="dialog" aria-modal="true" aria-labelledby="config-title">
+      <header class="config-header">
+        <div>
+          <p class="config-kicker">Hub local</p>
+          <h2 id="config-title">Configurar ponte</h2>
+        </div>
+        <button id="btn-config-close" class="icon-btn" type="button" aria-label="Fechar configuracao">x</button>
+      </header>
+
+      <div class="config-body">
+        <section class="config-section">
+          <div class="section-heading">
+            <span class="section-icon">S</span>
+            <div>
+              <h3>Servidor</h3>
+              <p>Origem usada pelo Hub para abrir o sistema e sincronizar as chaves locais.</p>
+            </div>
+          </div>
+          <label class="field-label" for="config-server-url">URL do sistema</label>
+          <input id="config-server-url" class="field-input" type="text" autocomplete="off" />
+        </section>
+
+        <section class="config-section">
+          <div class="section-heading">
+            <span class="section-icon">P</span>
+            <div>
+              <h3>Impressao</h3>
+              <p>Impressora usada por este computador quando o pedido chegar no Hub.</p>
+            </div>
+          </div>
+          <label class="field-label" for="config-printer">Impressora</label>
+          <div class="inline-row">
+            <select id="config-printer" class="field-input"></select>
+            <button id="btn-refresh-printers" class="btn btn-ghost" type="button">Buscar</button>
+          </div>
+          <label class="toggle-row">
+            <input id="config-print-enabled" type="checkbox" />
+            <span>Impressao ativa no sistema</span>
+          </label>
+          <label class="toggle-row">
+            <input id="config-auto-print" type="checkbox" />
+            <span>Ligar impressao ao abrir o Hub</span>
+          </label>
+          <div class="action-row">
+            <button id="btn-print-start" class="btn btn-ghost" type="button">Ligar impressao</button>
+            <button id="btn-print-stop" class="btn btn-ghost" type="button">Parar</button>
+          </div>
+        </section>
+
+        <section class="config-section">
+          <div class="section-heading">
+            <span class="section-icon">W</span>
+            <div>
+              <h3>WhatsApp</h3>
+              <p>Sessao local usada pelo computador que esta com o Hub aberto.</p>
+            </div>
+          </div>
+          <label class="toggle-row">
+            <input id="config-whatsapp-enabled" type="checkbox" />
+            <span>WhatsApp ativo no sistema</span>
+          </label>
+          <label class="toggle-row">
+            <input id="config-auto-whatsapp" type="checkbox" />
+            <span>Ligar WhatsApp ao abrir o Hub</span>
+          </label>
+          <div class="action-row">
+            <button id="btn-whatsapp-start" class="btn btn-whatsapp" type="button">Abrir WhatsApp</button>
+            <button id="btn-whatsapp-stop" class="btn btn-ghost" type="button">Parar</button>
+          </div>
+        </section>
+
+        <section class="config-section">
+          <div class="section-heading">
+            <span class="section-icon">H</span>
+            <div>
+              <h3>Inicializacao</h3>
+              <p>Controle se o Hub acompanha o Windows neste computador.</p>
+            </div>
+          </div>
+          <label class="toggle-row">
+            <input id="config-start-windows" type="checkbox" />
+            <span>Abrir Hub junto com o Windows</span>
+          </label>
+        </section>
+      </div>
+
+      <footer class="config-footer">
+        <span id="config-message" class="config-message"></span>
+        <button id="btn-config-save" class="btn btn-whatsapp" type="button">Salvar config</button>
+      </footer>
+    </div>
+  </section>
 
   <script src="renderer.js"></script>
 </body>

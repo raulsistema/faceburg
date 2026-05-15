@@ -29,7 +29,10 @@ contextBridge.exposeInMainWorld('hub', {
 
   // Printer
   listPrinters: () => ipcRenderer.invoke('hub:list-printers'),
+  getAgentConfig: () => ipcRenderer.invoke('hub:get-agent-config'),
   updatePrinter: (payload) => ipcRenderer.invoke('hub:update-printer', payload),
+  updatePrintConfig: (payload) => ipcRenderer.invoke('hub:update-print-config', payload),
+  updateWhatsAppConfig: (payload) => ipcRenderer.invoke('hub:update-whatsapp-config', payload),
 
   // Individual agent controls
   startWhatsApp: () => ipcRenderer.invoke('hub:start-whatsapp'),
@@ -52,6 +55,12 @@ contextBridge.exposeInMainWorld('hub', {
   onWhatsAppState: (cb) => subscribe('whatsapp:state', cb),
   onPrintState: (cb) => subscribe('print:state', cb),
   onAgentLog: (cb) => subscribe('agent:log', cb),
+  
+  // Updates and formatting
+  onSystemUpdateAvailable: (cb) => subscribe('system:update-available', cb),
+  onSystemUpdateProgress: (cb) => subscribe('system:update-progress', cb),
+  onSystemUpdateDownloaded: (cb) => subscribe('system:update-downloaded', cb),
+  numeroPorExtenso: (payload) => ipcRenderer.invoke('hub:numero-por-extenso', payload),
 });
 
 contextBridge.exposeInMainWorld('faceburgDesktop', {
@@ -62,13 +71,17 @@ contextBridge.exposeInMainWorld('faceburgDesktop', {
       isDesktopApp: true,
       whatsRunning: Boolean(current?.whatsRunning),
       printRunning: Boolean(current?.printRunning),
+      hasLocalWhatsappSession: Boolean(current?.hasLocalWhatsappSession),
       whatsapp: current?.whatsState || null,
       print: current?.printState || null,
     };
   },
   syncSession: syncSystemSession,
   listPrinters: () => ipcRenderer.invoke('hub:list-printers'),
+  getAgentConfig: () => ipcRenderer.invoke('hub:get-agent-config'),
   updatePrinter: (payload) => ipcRenderer.invoke('hub:update-printer', payload),
+  updatePrintConfig: (payload) => ipcRenderer.invoke('hub:update-print-config', payload),
+  updateWhatsAppConfig: (payload) => ipcRenderer.invoke('hub:update-whatsapp-config', payload),
   startWhatsApp: () => ipcRenderer.invoke('hub:start-whatsapp'),
   stopWhatsApp: () => ipcRenderer.invoke('hub:stop-whatsapp'),
   restartWhatsApp: () => ipcRenderer.invoke('hub:restart-whatsapp'),

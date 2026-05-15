@@ -1,11 +1,11 @@
 import { NextResponse } from 'next/server';
 import { query } from '@/lib/db';
+import { BUSINESS_TIME_ZONE, getBusinessDateKey } from '@/lib/business-time';
 import { getValidatedTenantSession } from '@/lib/tenant-auth';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
 
-const BUSINESS_TZ = 'America/Sao_Paulo';
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
 const MAX_RANGE_DAYS = 180;
 
@@ -73,7 +73,7 @@ function isValidIsoDate(value: string | null) {
 }
 
 function normalizeRange(startRaw: string | null, endRaw: string | null) {
-  const today = formatDateInTimezone(new Date(), BUSINESS_TZ);
+  const today = getBusinessDateKey() || formatDateInTimezone(new Date(), BUSINESS_TIME_ZONE);
   const defaultEnd = today;
   const defaultStart = addDays(defaultEnd, -29);
 
@@ -132,7 +132,7 @@ export async function GET(request: Request) {
            payment_net_amount
          FROM orders
          WHERE tenant_id = $1
-           AND timezone('${BUSINESS_TZ}', created_at)::date BETWEEN $2::date AND $3::date
+           AND timezone('${BUSINESS_TIME_ZONE}', created_at)::date BETWEEN $2::date AND $3::date
        )
        SELECT
          COALESCE(SUM(CASE WHEN status = 'completed' THEN total ELSE 0 END), 0)::text AS gross_sales,
@@ -151,12 +151,12 @@ export async function GET(request: Request) {
        ),
        filtered_orders AS (
          SELECT
-           timezone('${BUSINESS_TZ}', created_at)::date AS created_day,
+           timezone('${BUSINESS_TIME_ZONE}', created_at)::date AS created_day,
            status,
            total
          FROM orders
          WHERE tenant_id = $1
-           AND timezone('${BUSINESS_TZ}', created_at)::date BETWEEN $2::date AND $3::date
+           AND timezone('${BUSINESS_TIME_ZONE}', created_at)::date BETWEEN $2::date AND $3::date
        )
        SELECT
          to_char(d.day, 'YYYY-MM-DD') AS day,
@@ -181,7 +181,7 @@ export async function GET(request: Request) {
          FROM orders
          WHERE tenant_id = $1
            AND status = 'completed'
-           AND timezone('${BUSINESS_TZ}', created_at)::date BETWEEN $2::date AND $3::date
+           AND timezone('${BUSINESS_TIME_ZONE}', created_at)::date BETWEEN $2::date AND $3::date
        ),
        payment_lines AS (
          SELECT
@@ -252,7 +252,7 @@ export async function GET(request: Request) {
        FROM orders
        WHERE tenant_id = $1
          AND status = 'completed'
-         AND timezone('${BUSINESS_TZ}', created_at)::date BETWEEN $2::date AND $3::date
+         AND timezone('${BUSINESS_TIME_ZONE}', created_at)::date BETWEEN $2::date AND $3::date
        GROUP BY type
        ORDER BY SUM(total) DESC`,
       [session.tenantId, startDate, endDate],
@@ -271,7 +271,7 @@ export async function GET(request: Request) {
          ON p.id = oi.product_id
         AND p.tenant_id = o.tenant_id
        WHERE o.status = 'completed'
-         AND timezone('${BUSINESS_TZ}', o.created_at)::date BETWEEN $2::date AND $3::date
+         AND timezone('${BUSINESS_TIME_ZONE}', o.created_at)::date BETWEEN $2::date AND $3::date
        GROUP BY oi.product_id, COALESCE(p.name, 'Produto removido')
        ORDER BY SUM(oi.quantity) DESC, COALESCE(p.name, 'Produto removido') ASC
        LIMIT 10`,

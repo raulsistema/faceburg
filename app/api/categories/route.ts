@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { NextResponse } from 'next/server';
 import { query } from '@/lib/db';
-import { getValidatedTenantSession } from '@/lib/tenant-auth';
+import { getValidatedTenantSession, requireTenantSession } from '@/lib/tenant-auth';
 
 const PRODUCT_TYPES = ['prepared', 'packaged', 'size_based', 'ingredient', 'special'] as const;
 type ProductType = (typeof PRODUCT_TYPES)[number];
@@ -49,10 +49,8 @@ export async function GET() {
 }
 
 export async function POST(request: Request) {
-  const session = await getValidatedTenantSession();
-  if (!session) {
-    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-  }
+  const { session, response } = await requireTenantSession(['admin']);
+  if (response) return response;
 
   const body = await request.json();
   const name = String(body.name || '').trim();

@@ -1,11 +1,14 @@
 import { after, NextResponse } from 'next/server';
 import pool from '@/lib/db';
 import { ensureFinanceSchema } from '@/lib/finance-schema';
-import { getValidatedTenantSession } from '@/lib/tenant-auth';
+import { getValidatedDeliveryAccess, isActiveDeliveryAccess } from '@/lib/delivery-auth';
+import { buildDeliveryDriverCode, buildDeliveryTrackingToken } from '@/lib/delivery-tracking';
 import { enqueueOrderPrintJob, prepareOrderPrintJobs } from '@/lib/printing';
 import { notifyOrderEvent } from '@/lib/realtime';
-import { enqueueOrderWhatsappJob, prepareOrderWhatsappJob } from '@/lib/whatsapp';
+import { enqueueOrderWhatsappJob, prepareOrderWhatsappJob, type OrderWhatsappEventType } from '@/lib/whatsapp';
 import { isCashPaymentType } from '@/lib/cash-summary';
+import { BUSINESS_CURRENT_DATE_SQL } from '@/lib/business-time';
+import { assignOrderSequenceNumber, ensureOrderSequenceSchema } from '@/lib/order-sequence';
 import { randomUUID } from 'node:crypto';
 
 const allowedStatus = new Set(['pending', 'processing', 'delivering', 'completed', 'cancelled']);
@@ -20,6 +23,8 @@ type OrderFinanceRow = {
   payment_fee_amount: string | null;
   payment_net_amount: string | null;
   cash_session_id: string | null;
+  delivery_driver_id: string | null;
+  order_sequence_number: number | null;
 };
 
 type PaymentMethodRow = {
@@ -70,13 +75,19 @@ function canTransitionOrderStatus(currentStatus: string, nextStatus: string, ord
 
 export async function PATCH(request: Request, { params }: { params: Promise<{ id: string }> }) {
   await ensureFinanceSchema();
-  const session = await getValidatedTenantSession();
+  await ensureOrderSequenceSchema();
+  const session = await getValidatedDeliveryAccess(request);
   if (!session) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   }
 
   const { id } = await params;
-  const body = await request.json();
+  let body: Record<string, unknown> = {};
+  try {
+    body = (await request.json()) as Record<string, unknown>;
+  } catch {
+    return NextResponse.json({ error: 'Corpo da requisicao invalido.' }, { status: 400 });
+  }
   const status = String(body.status || '').trim();
   const cancelReason = String(body.cancelReason || '').trim();
   const preferLocalDispatch = Boolean(body.preferLocalDispatch || body.localDispatch);
@@ -84,8 +95,17 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
   if (!allowedStatus.has(status)) {
     return NextResponse.json({ error: 'Status invalido.' }, { status: 400 });
   }
+  if (session.source === 'driver' && status !== 'delivering' && status !== 'completed') {
+    return NextResponse.json({ error: 'Motoboy nao pode aplicar este status.' }, { status: 403 });
+  }
+  if (session.source === 'driver' && !isActiveDeliveryAccess(session)) {
+    return NextResponse.json({ error: 'Acesso do motoboy esta desativado.' }, { status: 403 });
+  }
   if (status === 'cancelled' && cancelReason.length < 3) {
     return NextResponse.json({ error: 'Motivo do cancelamento e obrigatorio.' }, { status: 400 });
+  }
+  if (status === 'cancelled' && cancelReason.length > 500) {
+    return NextResponse.json({ error: 'Motivo do cancelamento deve ter no maximo 500 caracteres.' }, { status: 400 });
   }
 
   const client = await pool.connect();
@@ -94,11 +114,22 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
     let shouldQueueWhatsapp = false;
     let orderEventKind: 'updated' | 'cancelled' = 'updated';
     let completionCashSessionId: string | null = null;
+    let orderSequenceNumber: number | null = null;
 
     await client.query('BEGIN');
 
     const orderFinance = await client.query<OrderFinanceRow>(
-      `SELECT id, status, type, total::text, payment_method, payment_method_id, payment_fee_amount::text, payment_net_amount::text, cash_session_id
+      `SELECT id,
+              status,
+              type,
+              total::text,
+              payment_method,
+              payment_method_id,
+              payment_fee_amount::text,
+              payment_net_amount::text,
+              cash_session_id,
+              delivery_driver_id,
+              order_sequence_number
        FROM orders
        WHERE id = $1 AND tenant_id = $2
        LIMIT 1
@@ -113,15 +144,27 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
     const currentOrder = orderFinance.rows[0];
     const wasAlreadyCompleted = currentOrder.status === 'completed';
     const wasCancelled = currentOrder.status === 'cancelled';
+    const statusChanged = currentOrder.status !== status;
 
     if (!canTransitionOrderStatus(currentOrder.status, status, currentOrder.type)) {
       await client.query('ROLLBACK');
       return NextResponse.json({ error: 'Transicao de status invalida para este pedido.' }, { status: 409 });
     }
+    if (session.source === 'driver' && currentOrder.delivery_driver_id && currentOrder.delivery_driver_id !== session.driverId) {
+      await client.query('ROLLBACK');
+      return NextResponse.json({ error: 'Este pedido ja esta com outro entregador.' }, { status: 409 });
+    }
+    if (session.source === 'driver' && status === 'completed' && currentOrder.status !== 'delivering') {
+      await client.query('ROLLBACK');
+      return NextResponse.json({ error: 'Inicie a entrega antes de finalizar.' }, { status: 409 });
+    }
 
     if (status === 'completed' || (status === 'cancelled' && wasAlreadyCompleted)) {
       await client.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [`cash-register:${session.tenantId}`]);
     }
+
+    const deliveryTrackingToken = status === 'delivering' ? buildDeliveryTrackingToken() : null;
+    const deliveryDriverCode = status === 'delivering' ? buildDeliveryDriverCode(id) : null;
 
     const result = await client.query<{ id: string }>(
       `UPDATE orders
@@ -132,10 +175,39 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
              WHEN $1 = 'cancelled' THEN 'cancelled'
              ELSE payment_status
            END,
+           delivery_tracking_token = CASE
+             WHEN $1 = 'delivering' THEN COALESCE(delivery_tracking_token, $5)
+             ELSE delivery_tracking_token
+           END,
+           delivery_driver_code = CASE
+             WHEN $1 = 'delivering' THEN COALESCE(delivery_driver_code, $6)
+             ELSE delivery_driver_code
+           END,
+           delivery_started_at = CASE
+             WHEN $1 = 'delivering' AND delivery_started_at IS NULL THEN NOW()
+             ELSE delivery_started_at
+           END,
+           delivery_driver_id = CASE
+             WHEN $1 = 'delivering' AND $8::text IS NOT NULL THEN COALESCE(delivery_driver_id, $8)
+             ELSE delivery_driver_id
+           END,
+           delivery_finished_at = CASE
+             WHEN $1 = 'completed' AND $7 = 'delivery' AND delivery_finished_at IS NULL THEN NOW()
+             ELSE delivery_finished_at
+           END,
            updated_at = NOW()
        WHERE id = $2 AND tenant_id = $3
        RETURNING id`,
-      [status, id, session.tenantId, cancelReason],
+      [
+        status,
+        id,
+        session.tenantId,
+        cancelReason,
+        deliveryTrackingToken,
+        deliveryDriverCode,
+        currentOrder.type,
+        session.source === 'driver' ? session.driverId : null,
+      ],
     );
 
     if (!result.rowCount) {
@@ -419,16 +491,21 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
                    gross_amount = $4,
                    fee_amount = $5,
                    net_amount = $6,
-                   due_date = (NOW()::date + $7::int),
-                   status = 'pending'
+                   due_date = (${BUSINESS_CURRENT_DATE_SQL} + $7::int),
+                   status = CASE WHEN $7::int <= 0 THEN 'received' ELSE 'pending' END,
+                   received_at = CASE WHEN $7::int <= 0 THEN NOW() ELSE NULL END
                WHERE id = $1 AND tenant_id = $2`,
               [receivable.rows[0].id, session.tenantId, selectedMethod.id, total, feeAmount, netAmount, selectedMethod.settlement_days],
             );
           } else {
             await client.query(
               `INSERT INTO receivables
-               (id, tenant_id, order_id, payment_method_id, gross_amount, fee_amount, net_amount, due_date, status)
-               VALUES ($1, $2, $3, $4, $5, $6, $7, (NOW()::date + $8::int), 'pending')`,
+               (id, tenant_id, order_id, payment_method_id, gross_amount, fee_amount, net_amount, due_date, status, received_at)
+               VALUES (
+                 $1, $2, $3, $4, $5, $6, $7, (${BUSINESS_CURRENT_DATE_SQL} + $8::int),
+                 CASE WHEN $8::int <= 0 THEN 'received' ELSE 'pending' END,
+                 CASE WHEN $8::int <= 0 THEN NOW() ELSE NULL END
+               )`,
               [randomUUID(), session.tenantId, id, selectedMethod.id, total, feeAmount, netAmount, selectedMethod.settlement_days],
             );
           }
@@ -436,8 +513,19 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
       }
     }
 
-    shouldQueuePrint = status === 'processing';
-    shouldQueueWhatsapp = status === 'delivering';
+    if (status === 'completed' && currentOrder.order_sequence_number == null) {
+      const cashSessionForSequence = completionCashSessionId || currentOrder.cash_session_id;
+      if (cashSessionForSequence) {
+        orderSequenceNumber = await assignOrderSequenceNumber(session.tenantId, id, cashSessionForSequence, client);
+      }
+    } else if (status === 'completed') {
+      orderSequenceNumber = currentOrder.order_sequence_number;
+    }
+
+    const whatsappEventType: OrderWhatsappEventType | null =
+      status === 'delivering' ? 'status_update' : status === 'cancelled' ? 'status_cancelled' : null;
+    shouldQueuePrint = statusChanged && status === 'processing';
+    shouldQueueWhatsapp = statusChanged && Boolean(whatsappEventType);
     orderEventKind = status === 'cancelled' ? 'cancelled' : 'updated';
 
     await client.query('COMMIT');
@@ -454,15 +542,15 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
       if (queuePrint && !useLocalDispatch) {
         sideEffects.push(enqueueOrderPrintJob(tenantId, orderId, 'status_update'));
       }
-      if (queueWhatsapp && !useLocalDispatch) {
-        sideEffects.push(enqueueOrderWhatsappJob(tenantId, orderId, 'status_update'));
+      if (queueWhatsapp && !useLocalDispatch && whatsappEventType) {
+        sideEffects.push(enqueueOrderWhatsappJob(tenantId, orderId, whatsappEventType));
       }
       sideEffects.push(notifyOrderEvent(tenantId, eventKind, orderId));
       return Promise.allSettled(sideEffects).then(() => undefined);
     });
 
     if (!useLocalDispatch) {
-      return NextResponse.json({ ok: true });
+      return NextResponse.json({ ok: true, orderSequenceNumber });
     }
 
     const localDispatch: {
@@ -486,9 +574,9 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
 
     if (queueWhatsapp) {
       try {
-        const whatsappJob = await prepareOrderWhatsappJob(tenantId, orderId, 'status_update', undefined, {
+        const whatsappJob = whatsappEventType ? await prepareOrderWhatsappJob(tenantId, orderId, whatsappEventType, undefined, {
           requireActiveHub: false,
-        });
+        }) : null;
         localDispatch.whatsappJobs = whatsappJob ? [whatsappJob] : [];
       } catch (error) {
         console.error('prepare local whatsapp dispatch failed', error);
@@ -501,7 +589,7 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
       localDispatch.errors = localDispatchErrors;
     }
 
-    return NextResponse.json({ ok: true, localDispatch });
+    return NextResponse.json({ ok: true, orderSequenceNumber, localDispatch });
   } catch (error) {
     await client.query('ROLLBACK');
     console.error('PATCH /api/orders/[id]/status failed', error);

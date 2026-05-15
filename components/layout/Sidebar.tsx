@@ -3,7 +3,7 @@
 import React, { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
-import { LayoutDashboard, ShoppingBag, Monitor, UtensilsCrossed, Users, Settings, LogOut, Landmark, X, BarChart3, ChevronDown } from 'lucide-react';
+import { LayoutDashboard, ShoppingBag, Monitor, UtensilsCrossed, Users, Settings, LogOut, Landmark, X, BarChart3, ChevronDown, Bike } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
 type NavLinkItem = {
@@ -21,6 +21,7 @@ type NavGroupItem = {
 const navItems: Array<NavLinkItem | NavGroupItem> = [
   { name: 'Dashboard', icon: LayoutDashboard, href: '/' },
   { name: 'Pedidos', icon: ShoppingBag, href: '/pedidos' },
+  { name: 'Entregadores', icon: Bike, href: '/entregadores' },
   { name: 'PDV / Caixa', icon: Monitor, href: '/pdv' },
   { name: 'Relatorios', icon: BarChart3, href: '/relatorios' },
   {

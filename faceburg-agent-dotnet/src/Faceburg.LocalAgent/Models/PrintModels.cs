@@ -10,6 +10,7 @@ public sealed class PrintJobRequest
     public string? PayloadText { get; set; }
     public string? RawEscPosBase64 { get; set; }
     public int? Columns { get; set; }
+    public string? PrintTextSize { get; set; }
     public string? CodePage { get; set; }
     public bool? CutPaper { get; set; }
     public bool? PulseDrawer { get; set; }

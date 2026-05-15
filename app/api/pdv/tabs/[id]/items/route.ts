@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import pool from '@/lib/db';
 import { NextResponse } from 'next/server';
-import { getValidatedTenantSession } from '@/lib/tenant-auth';
+import { requireTenantSession } from '@/lib/tenant-auth';
 
 type TabStatusRow = {
   id: string;
@@ -28,10 +28,8 @@ function clampDiscount(subtotal: number, discount: number) {
 }
 
 export async function PUT(request: Request, { params }: { params: Promise<{ id: string }> }) {
-  const session = await getValidatedTenantSession();
-  if (!session) {
-    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-  }
+  const { session, response } = await requireTenantSession(['admin', 'staff']);
+  if (response) return response;
 
   const { id } = await params;
   const body = await request.json();

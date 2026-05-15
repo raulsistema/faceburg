@@ -77,12 +77,6 @@ export default function LoginPage() {
             Criar conta SaaS
           </Link>
         </p>
-        <p className="text-xs text-slate-500 mt-2">
-          Login master?{' '}
-          <Link href="/master/login" className="text-emerald-400 font-semibold">
-            Gerenciar empresas
-          </Link>
-        </p>
       </div>
     </main>
   );

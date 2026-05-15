@@ -2,12 +2,16 @@ import { randomUUID } from 'node:crypto';
 import { NextResponse } from 'next/server';
 import pool from '@/lib/db';
 import { ensureFinanceSchema } from '@/lib/finance-schema';
-import { getValidatedTenantSession } from '@/lib/tenant-auth';
+import { requireTenantSession } from '@/lib/tenant-auth';
 import { enqueueOrderPrintJob } from '@/lib/printing';
 import { notifyOrderEvent } from '@/lib/realtime';
 import { getOpenCashSession } from '@/lib/cash-register';
 import { isCashPaymentType } from '@/lib/cash-summary';
+import { BUSINESS_CURRENT_DATE_SQL } from '@/lib/business-time';
 import { parseMoneyInput } from '@/lib/finance-utils';
+import { assignOrderSequenceNumber, ensureOrderSequenceSchema } from '@/lib/order-sequence';
+
+const LOCAL_FALLBACK_QUEUE_DELAY_SECONDS = 90;
 
 type TabRow = {
   id: string;
@@ -77,10 +81,9 @@ function normalizePositiveAmount(value: unknown) {
 
 export async function POST(request: Request, { params }: { params: Promise<{ id: string }> }) {
   await ensureFinanceSchema();
-  const session = await getValidatedTenantSession();
-  if (!session) {
-    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-  }
+  await ensureOrderSequenceSchema();
+  const { session, response } = await requireTenantSession(['admin', 'staff']);
+  if (response) return response;
 
   const { id } = await params;
   const body = await request.json();
@@ -235,6 +238,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
     const totalNetAmount = roundMoney(total - totalFeeAmount);
     const orderId = randomUUID();
     const singlePayment = resolvedPayments.length === 1 ? resolvedPayments[0] : null;
+    let orderSequenceNumber: number | null = null;
     await client.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [`cash-register:${session.tenantId}`]);
     const openCashSession = await getOpenCashSession(session.tenantId, client);
 
@@ -288,6 +292,8 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
         openCashSession.id,
       ],
     );
+
+    orderSequenceNumber = await assignOrderSequenceNumber(session.tenantId, orderId, openCashSession.id, client);
 
     for (const payment of resolvedPayments) {
       await client.query(
@@ -351,8 +357,12 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
 
       await client.query(
         `INSERT INTO receivables
-         (id, tenant_id, order_id, payment_method_id, gross_amount, fee_amount, net_amount, due_date, status)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, (NOW()::date + $8::int), 'pending')`,
+         (id, tenant_id, order_id, payment_method_id, gross_amount, fee_amount, net_amount, due_date, status, received_at)
+         VALUES (
+           $1, $2, $3, $4, $5, $6, $7, (${BUSINESS_CURRENT_DATE_SQL} + $8::int),
+           CASE WHEN $8::int <= 0 THEN 'received' ELSE 'pending' END,
+           CASE WHEN $8::int <= 0 THEN NOW() ELSE NULL END
+         )`,
         [
           randomUUID(),
           session.tenantId,
@@ -400,14 +410,17 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
 
     await client.query('COMMIT');
 
+    const printQueueOptions = { initialDelaySeconds: LOCAL_FALLBACK_QUEUE_DELAY_SECONDS };
+
     await Promise.allSettled([
-      enqueueOrderPrintJob(session.tenantId, orderId, 'new_order'),
+      enqueueOrderPrintJob(session.tenantId, orderId, 'new_order', undefined, printQueueOptions),
       notifyOrderEvent(session.tenantId, 'created', orderId),
     ]);
 
     return NextResponse.json({
       ok: true,
       orderId,
+      orderSequenceNumber,
       total,
       tableNumber: tab.table_number,
       payments: resolvedPayments.map((payment) => ({

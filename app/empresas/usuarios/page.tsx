@@ -1,6 +1,7 @@
 'use client';
 
 import { FormEvent, useCallback, useEffect, useState } from 'react';
+import { formatBusinessDate } from '@/lib/business-time';
 
 type Tenant = { id: string; name: string; slug: string };
 type TenantUser = {
@@ -144,7 +145,7 @@ export default function EmpresasUsuariosPage() {
                   <td className="px-4 py-3">{user.name}</td>
                   <td className="px-4 py-3">{user.email}</td>
                   <td className="px-4 py-3">{user.role}</td>
-                  <td className="px-4 py-3">{new Date(user.created_at).toLocaleDateString('pt-BR')}</td>
+                  <td className="px-4 py-3">{formatBusinessDate(user.created_at)}</td>
                   <td className="px-4 py-3">
                     <button className="px-3 py-1.5 rounded bg-rose-600 text-white text-xs font-semibold" onClick={() => void onDelete(user.id)}>
                       Excluir

@@ -1,0 +1,31 @@
+{
+  "name": "Faceburg Bot",
+  "locale": "pt",
+  "data": [
+    {
+      "intent": "greeting_morning",
+      "utterances": ["bom dia", "bomdia", "ola bom dia", "oi bom dia"],
+      "answers": ["Bom dia! Faça seu pedido pelo nosso cardápio: @LINK\n\nSe não conseguir, chame aqui que atendemos você."]
+    },
+    {
+      "intent": "greeting_afternoon",
+      "utterances": ["boa tarde", "boatarde", "ola boa tarde", "oi boa tarde"],
+      "answers": ["Boa tarde! Faça seu pedido pelo nosso cardápio: @LINK\n\nSe não conseguir, chame aqui que atendemos você."]
+    },
+    {
+      "intent": "greeting_night",
+      "utterances": ["boa noite", "boanoite", "ola boa noite", "oi boa noite"],
+      "answers": ["Boa noite! Faça seu pedido pelo nosso cardápio: @LINK\n\nSe não conseguir, chame aqui que atendemos você."]
+    },
+    {
+      "intent": "greeting",
+      "utterances": ["ola", "oie", "oi"],
+      "answers": ["Olá! Faça seu pedido pelo nosso cardápio: @LINK\n\nSe não conseguir, chame aqui que atendemos você."]
+    },
+    {
+      "intent": "menu",
+      "utterances": ["quero o cardapio", "menu", "fazer pedido", "cardapio"],
+      "answers": ["Acesse nosso cardápio para fazer seu pedido: @LINK\n\nSe não conseguir, chame aqui que atendemos você."]
+    }
+  ]
+}

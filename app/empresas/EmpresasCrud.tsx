@@ -2,6 +2,7 @@
 
 import { FormEvent, useMemo, useState } from 'react';
 import { Eye, EyeOff } from 'lucide-react';
+import { formatBusinessDate } from '@/lib/business-time';
 
 type Tenant = {
   id: string;
@@ -375,7 +376,7 @@ export default function EmpresasCrud({ initialTenants, baseUrl }: Props) {
                       tenant.status
                     )}
                   </td>
-                  <td className="px-4 py-3 text-slate-600">{new Date(tenant.created_at).toLocaleDateString('pt-BR')}</td>
+                  <td className="px-4 py-3 text-slate-600">{formatBusinessDate(tenant.created_at)}</td>
                   <td className="px-4 py-3">
                     <a
                       className="text-cyan-700 font-semibold hover:underline"

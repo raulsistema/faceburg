@@ -4,6 +4,7 @@ import { useCallback, useMemo, useRef, useState } from 'react';
 import DashboardShell from '@/components/layout/DashboardShell';
 import { Clock, RefreshCw, ShoppingBag, TrendingUp } from 'lucide-react';
 import { useRealtimeRefresh } from '@/hooks/use-realtime-refresh';
+import { formatBusinessTime } from '@/lib/business-time';
 
 type DashboardResponse = {
   stats: {
@@ -172,7 +173,7 @@ export default function DashboardPage() {
                   <div className="text-right">
                     <p className="font-bold text-slate-900">{brl(sale.total)}</p>
                     <p className="text-xs text-slate-500">
-                      {new Date(sale.createdAt).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}
+                      {formatBusinessTime(sale.createdAt)}
                     </p>
                   </div>
                 </div>

@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { NextResponse } from 'next/server';
 import { query } from '@/lib/db';
-import { getValidatedTenantSession } from '@/lib/tenant-auth';
+import { getValidatedTenantSession, requireTenantSession } from '@/lib/tenant-auth';
 
 type TabListRow = {
   id: string;
@@ -71,10 +71,8 @@ export async function GET() {
 }
 
 export async function POST(request: Request) {
-  const session = await getValidatedTenantSession();
-  if (!session) {
-    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-  }
+  const { session, response } = await requireTenantSession(['admin', 'staff']);
+  if (response) return response;
 
   const body = await request.json();
   const tableNumber = String(body.tableNumber || '').trim();

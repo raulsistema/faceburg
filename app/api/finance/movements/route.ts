@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { query } from '@/lib/db';
 import { ensureFinanceSchema } from '@/lib/finance-schema';
+import { BUSINESS_CURRENT_DATE_SQL, BUSINESS_TIME_ZONE } from '@/lib/business-time';
 import { getValidatedTenantSession } from '@/lib/tenant-auth';
 
 type SummaryRow = {
@@ -129,7 +130,13 @@ const ledgerCte = `
       'receivable'::text AS source,
       ('Recebivel #' || substring(r.order_id from 1 for 8))::text AS title,
       COALESCE(pm.name, 'Recebimento futuro')::text AS description,
-      r.status,
+      CASE
+        WHEN r.status = 'pending'
+         AND pm.id IS NOT NULL
+         AND COALESCE(pm.settlement_days, 0) <= 0
+        THEN 'received'
+        ELSE r.status
+      END AS status,
       r.net_amount AS amount,
       r.gross_amount AS gross_amount,
       0::numeric AS discount_amount,
@@ -152,8 +159,8 @@ const ledgerCte = `
     FROM ledger
     WHERE ($2::text IS NULL OR source = $2)
       AND ($3::text IS NULL OR status = $3)
-      AND ($4::date IS NULL OR created_at >= $4::date)
-      AND ($5::date IS NULL OR created_at < ($5::date + INTERVAL '1 day'))
+      AND ($4::date IS NULL OR timezone('${BUSINESS_TIME_ZONE}', created_at)::date >= $4::date)
+      AND ($5::date IS NULL OR timezone('${BUSINESS_TIME_ZONE}', created_at)::date <= $5::date)
   ),
   cash_scope AS (
     SELECT
@@ -194,8 +201,8 @@ const ledgerCte = `
     FROM cash_scope
     WHERE ($2::text IS NULL OR source = $2)
       AND ($3::text IS NULL OR status = $3)
-      AND ($4::date IS NULL OR created_at >= $4::date)
-      AND ($5::date IS NULL OR created_at < ($5::date + INTERVAL '1 day'))
+      AND ($4::date IS NULL OR timezone('${BUSINESS_TIME_ZONE}', created_at)::date >= $4::date)
+      AND ($5::date IS NULL OR timezone('${BUSINESS_TIME_ZONE}', created_at)::date <= $5::date)
   )
 `;
 
@@ -276,7 +283,7 @@ export async function GET(request: Request) {
          ) AS account_amount,
          (
            SELECT (
-             COALESCE(SUM(CASE WHEN source = 'receivable' AND (due_date IS NULL OR due_date <= CURRENT_DATE) THEN amount ELSE 0 END), 0)
+             COALESCE(SUM(CASE WHEN source = 'receivable' AND (due_date IS NULL OR due_date <= ${BUSINESS_CURRENT_DATE_SQL}) THEN amount ELSE 0 END), 0)
              +
              COALESCE((
                SELECT SUM(CASE
@@ -289,7 +296,7 @@ export async function GET(request: Request) {
            FROM filtered
          ) AS account_today,
          (
-           SELECT COALESCE(SUM(CASE WHEN source = 'receivable' AND due_date > CURRENT_DATE THEN amount ELSE 0 END), 0)::text
+           SELECT COALESCE(SUM(CASE WHEN source = 'receivable' AND due_date > ${BUSINESS_CURRENT_DATE_SQL} THEN amount ELSE 0 END), 0)::text
            FROM filtered
          ) AS account_future,
          (

@@ -1,9 +1,24 @@
 import { NextResponse } from 'next/server';
 import { query } from '@/lib/db';
-import { normalizeDeliveryFeeMode, normalizeDeliveryFeeTable, normalizeDeliveryOriginUseIssuer } from '@/lib/delivery-fee';
+import {
+  normalizeDeliveryFeeMode,
+  normalizeDeliveryFeeTable,
+  normalizeDeliveryMaxDistanceMeters,
+  normalizeDeliveryOriginUseIssuer,
+} from '@/lib/delivery-fee';
 import { parseMoneyInput } from '@/lib/finance-utils';
+import { validateImageSource } from '@/lib/image-safety';
 import { normalizeOrderNotificationSound } from '@/lib/order-notification-sounds';
-import { getValidatedTenantSession } from '@/lib/tenant-auth';
+import { ensureOrderSequenceSchema } from '@/lib/order-sequence';
+import {
+  ensureStoreHoursSchema,
+  isMenuOpenNow,
+  normalizeMenuHours,
+  normalizeMenuOpenMode,
+  type MenuHoursConfig,
+  type MenuOpenMode,
+} from '@/lib/store-hours';
+import { getValidatedTenantSession, requireTenantSession } from '@/lib/tenant-auth';
 
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
 
@@ -13,8 +28,13 @@ type TenantSettingsRow = {
   delivery_fee_mode: string;
   delivery_fee_per_km: string;
   delivery_fee_table: unknown;
+  delivery_max_distance_meters: number | string | null;
+  delivery_min_order_amount: string | null;
   store_open: boolean;
+  menu_open_mode: string | null;
+  menu_hours: unknown;
   order_notification_sound: string | null;
+  order_sequence_start: number | null;
   logo_url: string | null;
   menu_cover_image_url: string | null;
   whatsapp_phone: string | null;
@@ -47,8 +67,14 @@ type CardapioSettingsResponse = {
   deliveryFeeMode: 'fixed' | 'per_km' | 'distance_table';
   deliveryFeePerKm: number;
   deliveryFeeTable: Array<{ upToMeters: number; fee: number }>;
+  deliveryMaxDistanceKm: number;
+  deliveryMinOrderAmount: number;
   storeOpen: boolean;
+  effectiveStoreOpen: boolean;
+  menuOpenMode: MenuOpenMode;
+  menuHours: MenuHoursConfig;
   orderNotificationSound: string;
+  orderSequenceStart: number | null;
   logoUrl: string;
   coverImageUrl: string;
   whatsappPhone: string;
@@ -81,8 +107,13 @@ const SETTINGS_SELECT_SQL = `SELECT
   delivery_fee_mode,
   delivery_fee_per_km::text,
   delivery_fee_table,
+  delivery_max_distance_meters,
+  delivery_min_order_amount::text,
   store_open,
+  menu_open_mode,
+  menu_hours,
   order_notification_sound,
+  order_sequence_start,
   logo_url,
   menu_cover_image_url,
   whatsapp_phone,
@@ -115,21 +146,28 @@ function hasOwn(body: Record<string, unknown>, key: string) {
   return Object.prototype.hasOwnProperty.call(body, key);
 }
 
-function estimateDataUrlBytes(value: string) {
-  const commaIndex = value.indexOf(',');
-  if (commaIndex === -1) return 0;
-  const base64 = value.slice(commaIndex + 1);
-  return Math.floor((base64.length * 3) / 4);
+function validateImagePayload(imageUrl: string) {
+  return validateImageSource(imageUrl, MAX_IMAGE_BYTES);
 }
 
-function validateImagePayload(imageUrl: string) {
-  if (!imageUrl) return null;
-  if (!imageUrl.startsWith('data:image/')) return null;
-  const bytes = estimateDataUrlBytes(imageUrl);
-  if (!bytes || bytes > MAX_IMAGE_BYTES) {
-    return 'Imagem deve ter no maximo 5 MB.';
-  }
-  return null;
+function metersToKm(value: unknown) {
+  const meters = normalizeDeliveryMaxDistanceMeters(value);
+  return Number((meters / 1000).toFixed(2));
+}
+
+function parseDeliveryMaxDistanceMeters(value: unknown) {
+  const parsed = parseMoneyInput(value);
+  if (!Number.isFinite(parsed)) return Number.NaN;
+  if (parsed <= 0) return 0;
+  return Math.round(parsed * 1000);
+}
+
+function normalizeOrderSequenceStart(value: unknown) {
+  const raw = String(value ?? '').trim();
+  if (!raw) return null;
+  const parsed = Math.round(Number(raw));
+  if (!Number.isFinite(parsed)) return Number.NaN;
+  return parsed;
 }
 
 function serializeTenantSettings(row: TenantSettingsRow): CardapioSettingsResponse {
@@ -139,8 +177,18 @@ function serializeTenantSettings(row: TenantSettingsRow): CardapioSettingsRespon
     deliveryFeeMode: normalizeDeliveryFeeMode(row.delivery_fee_mode),
     deliveryFeePerKm: Number(row.delivery_fee_per_km || 0),
     deliveryFeeTable: normalizeDeliveryFeeTable(row.delivery_fee_table),
+    deliveryMaxDistanceKm: metersToKm(row.delivery_max_distance_meters),
+    deliveryMinOrderAmount: Number(row.delivery_min_order_amount || 0),
     storeOpen: Boolean(row.store_open),
+    effectiveStoreOpen: isMenuOpenNow({
+      manualOpen: Boolean(row.store_open),
+      mode: row.menu_open_mode,
+      hours: row.menu_hours,
+    }),
+    menuOpenMode: normalizeMenuOpenMode(row.menu_open_mode),
+    menuHours: normalizeMenuHours(row.menu_hours),
     orderNotificationSound: normalizeOrderNotificationSound(row.order_notification_sound),
+    orderSequenceStart: row.order_sequence_start ?? null,
     logoUrl: row.logo_url || '',
     coverImageUrl: row.menu_cover_image_url || '',
     whatsappPhone: row.whatsapp_phone || '',
@@ -169,6 +217,8 @@ function serializeTenantSettings(row: TenantSettingsRow): CardapioSettingsRespon
 }
 
 export async function GET() {
+  await ensureOrderSequenceSchema();
+  await ensureStoreHoursSchema();
   const session = await getValidatedTenantSession();
   if (!session) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
@@ -185,10 +235,10 @@ export async function GET() {
 }
 
 export async function PATCH(request: Request) {
-  const session = await getValidatedTenantSession();
-  if (!session) {
-    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-  }
+  await ensureOrderSequenceSchema();
+  await ensureStoreHoursSchema();
+  const { session, response } = await requireTenantSession(['admin']);
+  if (response) return response;
 
   let body: Record<string, unknown> = {};
   try {
@@ -218,12 +268,27 @@ export async function PATCH(request: Request) {
   const deliveryFeeTable = hasOwn(body, 'deliveryFeeTable')
     ? normalizeDeliveryFeeTable(body.deliveryFeeTable)
     : normalizeDeliveryFeeTable(current.delivery_fee_table);
+  const deliveryMaxDistanceMeters = hasOwn(body, 'deliveryMaxDistanceKm')
+    ? parseDeliveryMaxDistanceMeters(body.deliveryMaxDistanceKm)
+    : normalizeDeliveryMaxDistanceMeters(current.delivery_max_distance_meters);
+  const deliveryMinOrderAmount = hasOwn(body, 'deliveryMinOrderAmount')
+    ? parseMoneyInput(body.deliveryMinOrderAmount)
+    : Number(current.delivery_min_order_amount || 0);
   const storeOpen = hasOwn(body, 'storeOpen')
     ? Boolean(body.storeOpen)
     : Boolean(current.store_open);
+  const menuOpenMode = hasOwn(body, 'menuOpenMode')
+    ? normalizeMenuOpenMode(body.menuOpenMode)
+    : normalizeMenuOpenMode(current.menu_open_mode);
+  const menuHours = hasOwn(body, 'menuHours')
+    ? normalizeMenuHours(body.menuHours)
+    : normalizeMenuHours(current.menu_hours);
   const orderNotificationSound = hasOwn(body, 'orderNotificationSound')
     ? normalizeOrderNotificationSound(body.orderNotificationSound)
     : normalizeOrderNotificationSound(current.order_notification_sound);
+  const orderSequenceStart = hasOwn(body, 'orderSequenceStart')
+    ? normalizeOrderSequenceStart(body.orderSequenceStart)
+    : current.order_sequence_start;
   const logoUrl = hasOwn(body, 'logoUrl')
     ? String(body.logoUrl ?? '').trim()
     : String(current.logo_url || '').trim();
@@ -311,8 +376,17 @@ export async function PATCH(request: Request) {
   if (deliveryFeeMode === 'distance_table' && deliveryFeeTable.length === 0) {
     return NextResponse.json({ error: 'Cadastre pelo menos uma faixa de entrega.' }, { status: 400 });
   }
+  if (!Number.isFinite(deliveryMaxDistanceMeters) || deliveryMaxDistanceMeters < 0 || deliveryMaxDistanceMeters > 200_000) {
+    return NextResponse.json({ error: 'Raio maximo de entrega deve ficar entre 0 e 200 km.' }, { status: 400 });
+  }
+  if (!Number.isFinite(deliveryMinOrderAmount) || deliveryMinOrderAmount < 0 || deliveryMinOrderAmount > 999_999) {
+    return NextResponse.json({ error: 'Pedido minimo para entrega invalido.' }, { status: 400 });
+  }
+  if (orderSequenceStart !== null && (!Number.isFinite(orderSequenceStart) || orderSequenceStart < 1 || orderSequenceStart > 999_999)) {
+    return NextResponse.json({ error: 'Sequencia de pedidos deve comecar entre 1 e 999999.' }, { status: 400 });
+  }
   if (
-    deliveryFeeMode !== 'fixed' &&
+    (deliveryFeeMode !== 'fixed' || deliveryMaxDistanceMeters > 0) &&
     !deliveryOriginUseIssuer &&
     (!deliveryOriginStreet || !deliveryOriginCity || deliveryOriginState.length !== 2)
   ) {
@@ -337,41 +411,51 @@ export async function PATCH(request: Request) {
          delivery_fee_mode = $3,
          delivery_fee_per_km = $4,
          delivery_fee_table = $5::jsonb,
-         store_open = $6,
-         order_notification_sound = $7,
-         logo_url = NULLIF($8, ''),
-         menu_cover_image_url = NULLIF($9, ''),
-         whatsapp_phone = NULLIF($10, ''),
-         issuer_name = NULLIF($11, ''),
-         issuer_trade_name = NULLIF($12, ''),
-         issuer_document = NULLIF($13, ''),
-         issuer_state_registration = NULLIF($14, ''),
-         issuer_email = NULLIF($15, ''),
-         issuer_phone = NULLIF($16, ''),
-         issuer_zip_code = NULLIF($17, ''),
-         issuer_street = NULLIF($18, ''),
-         issuer_number = NULLIF($19, ''),
-         issuer_complement = NULLIF($20, ''),
-         issuer_neighborhood = NULLIF($21, ''),
-         issuer_city = NULLIF($22, ''),
-         issuer_state = NULLIF($23, ''),
-         delivery_origin_use_issuer = $24,
-         delivery_origin_zip_code = NULLIF($25, ''),
-         delivery_origin_street = NULLIF($26, ''),
-         delivery_origin_number = NULLIF($27, ''),
-         delivery_origin_complement = NULLIF($28, ''),
-         delivery_origin_neighborhood = NULLIF($29, ''),
-         delivery_origin_city = NULLIF($30, ''),
-         delivery_origin_state = NULLIF($31, '')
-     WHERE id = $32`,
+         delivery_max_distance_meters = $6,
+         delivery_min_order_amount = $7,
+         store_open = $8,
+         menu_open_mode = $9,
+         menu_hours = $10::jsonb,
+         order_notification_sound = $11,
+         order_sequence_start = $12,
+         logo_url = NULLIF($13, ''),
+         menu_cover_image_url = NULLIF($14, ''),
+         whatsapp_phone = NULLIF($15, ''),
+         issuer_name = NULLIF($16, ''),
+         issuer_trade_name = NULLIF($17, ''),
+         issuer_document = NULLIF($18, ''),
+         issuer_state_registration = NULLIF($19, ''),
+         issuer_email = NULLIF($20, ''),
+         issuer_phone = NULLIF($21, ''),
+         issuer_zip_code = NULLIF($22, ''),
+         issuer_street = NULLIF($23, ''),
+         issuer_number = NULLIF($24, ''),
+         issuer_complement = NULLIF($25, ''),
+         issuer_neighborhood = NULLIF($26, ''),
+         issuer_city = NULLIF($27, ''),
+         issuer_state = NULLIF($28, ''),
+         delivery_origin_use_issuer = $29,
+         delivery_origin_zip_code = NULLIF($30, ''),
+         delivery_origin_street = NULLIF($31, ''),
+         delivery_origin_number = NULLIF($32, ''),
+         delivery_origin_complement = NULLIF($33, ''),
+         delivery_origin_neighborhood = NULLIF($34, ''),
+         delivery_origin_city = NULLIF($35, ''),
+         delivery_origin_state = NULLIF($36, '')
+     WHERE id = $37`,
     [
       Math.round(prepTimeMinutes),
       deliveryFeeBase,
       deliveryFeeMode,
       deliveryFeePerKm,
       JSON.stringify(deliveryFeeTable),
+      deliveryMaxDistanceMeters,
+      deliveryMinOrderAmount,
       storeOpen,
+      menuOpenMode,
+      JSON.stringify(menuHours),
       orderNotificationSound,
+      orderSequenceStart,
       logoUrl,
       coverImageUrl,
       whatsappPhone,
@@ -407,8 +491,18 @@ export async function PATCH(request: Request) {
     deliveryFeeMode,
     deliveryFeePerKm,
     deliveryFeeTable,
+    deliveryMaxDistanceKm: metersToKm(deliveryMaxDistanceMeters),
+    deliveryMinOrderAmount,
     storeOpen,
+    effectiveStoreOpen: isMenuOpenNow({
+      manualOpen: storeOpen,
+      mode: menuOpenMode,
+      hours: menuHours,
+    }),
+    menuOpenMode,
+    menuHours,
     orderNotificationSound,
+    orderSequenceStart,
     logoUrl,
     coverImageUrl,
     whatsappPhone,

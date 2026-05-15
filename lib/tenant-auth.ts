@@ -1,6 +1,10 @@
+import { NextResponse } from 'next/server';
 import { query } from '@/lib/db';
 import type { AppSession } from '@/lib/session';
 import { getCurrentSession } from '@/lib/session';
+
+export type TenantRole = AppSession['role'];
+export type ValidatedTenantSession = AppSession;
 
 type TenantRow = {
   id: string;
@@ -15,7 +19,7 @@ type TenantUserRow = {
   role: AppSession['role'];
 };
 
-export async function getValidatedTenantSession() {
+export async function getValidatedTenantSession(): Promise<ValidatedTenantSession | null> {
   const session = await getCurrentSession();
   if (!session) {
     return null;
@@ -49,5 +53,34 @@ export async function getValidatedTenantSession() {
     name: user.name,
     email: user.email,
     role: user.role,
+  };
+}
+
+export function tenantSessionHasRole(
+  session: { role: TenantRole } | null | undefined,
+  allowedRoles: readonly TenantRole[],
+) {
+  return Boolean(session && allowedRoles.includes(session.role));
+}
+
+export async function requireTenantSession(allowedRoles?: readonly TenantRole[]) {
+  const session = await getValidatedTenantSession();
+  if (!session) {
+    return {
+      session: null,
+      response: NextResponse.json({ error: 'Unauthorized' }, { status: 401 }),
+    };
+  }
+
+  if (allowedRoles?.length && !tenantSessionHasRole(session, allowedRoles)) {
+    return {
+      session: null,
+      response: NextResponse.json({ error: 'Sem permissao para esta acao.' }, { status: 403 }),
+    };
+  }
+
+  return {
+    session,
+    response: null,
   };
 }

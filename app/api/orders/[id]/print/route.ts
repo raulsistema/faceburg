@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { query } from '@/lib/db';
-import { getValidatedTenantSession } from '@/lib/tenant-auth';
+import { requireTenantSession } from '@/lib/tenant-auth';
 import { enqueueOrderPrintJob, prepareOrderPrintJobs } from '@/lib/printing';
 
 type OrderRow = {
@@ -25,10 +25,8 @@ function isHubActive(connectionStatus: string, lastSeenAt: string | null) {
 }
 
 export async function POST(request: Request, { params }: { params: Promise<{ id: string }> }) {
-  const session = await getValidatedTenantSession();
-  if (!session) {
-    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-  }
+  const { session, response } = await requireTenantSession(['admin', 'staff']);
+  if (response) return response;
 
   const { id } = await params;
   const body = await request.json().catch(() => ({})) as { preferLocalAgent?: boolean };
@@ -71,7 +69,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
   }
 
   if (!isHubActive(String(agent.connection_status || ''), agent.last_seen_at || null)) {
-    return NextResponse.json({ error: 'Agente local de impressao offline. Verifique o agente local antes de imprimir.' }, { status: 409 });
+    return NextResponse.json({ error: 'Hub local de impressao offline. Verifique o Hub local antes de imprimir.' }, { status: 409 });
   }
 
   const queued = await enqueueOrderPrintJob(session.tenantId, id, 'manual_receipt');

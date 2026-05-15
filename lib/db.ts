@@ -6,6 +6,27 @@ declare global {
   var __faceburgDbInitPromise: Promise<void> | null | undefined;
 }
 
+function resolveDatabaseSsl() {
+  const sslEnabled =
+    process.env.DB_SSL === 'true' ||
+    process.env.DB_SSL === '1' ||
+    process.env.DB_SSL === 'require' ||
+    (process.env.DB_SSL !== 'false' && process.env.NODE_ENV === 'production');
+
+  if (!sslEnabled) return false;
+
+  const rejectUnauthorized = process.env.DB_SSL_REJECT_UNAUTHORIZED !== 'false';
+  if (!rejectUnauthorized && process.env.NODE_ENV === 'production') {
+    throw new Error('DB_SSL_REJECT_UNAUTHORIZED=false is not allowed in production.');
+  }
+
+  const ca = process.env.DB_CA_CERT?.replace(/\\n/g, '\n');
+  return {
+    rejectUnauthorized,
+    ...(ca ? { ca } : {}),
+  };
+}
+
 const pool =
   globalThis.__faceburgPool ??
   new Pool({
@@ -14,7 +35,7 @@ const pool =
     database: process.env.DB_NAME || 'faceburg',
     user: process.env.DB_USER || 'faceburg',
     password: process.env.DB_PASSWORD || process.env.PGPASSWORD || '',
-    ssl: process.env.DB_SSL === 'true' ? { rejectUnauthorized: false } : false,
+    ssl: resolveDatabaseSsl(),
     max: 20,
     idleTimeoutMillis: 30_000,
     connectionTimeoutMillis: 5_000,
@@ -78,8 +99,11 @@ async function initializeDb() {
           delivery_fee_mode TEXT NOT NULL DEFAULT 'fixed',
           delivery_fee_per_km NUMERIC(10,2) NOT NULL DEFAULT 0,
           delivery_fee_table JSONB NOT NULL DEFAULT '[]'::jsonb,
+          delivery_max_distance_meters INTEGER NOT NULL DEFAULT 0,
+          delivery_min_order_amount NUMERIC(10,2) NOT NULL DEFAULT 0,
           store_open BOOLEAN NOT NULL DEFAULT TRUE,
           order_notification_sound TEXT NOT NULL DEFAULT 'classic',
+          order_sequence_start INTEGER,
           primary_color TEXT DEFAULT '#3b82f6',
           plan TEXT NOT NULL DEFAULT 'starter',
           status TEXT NOT NULL DEFAULT 'active',
@@ -102,6 +126,7 @@ async function initializeDb() {
           category_id TEXT NOT NULL REFERENCES categories(id),
           name TEXT NOT NULL,
           description TEXT,
+          print_description BOOLEAN NOT NULL DEFAULT TRUE,
           price NUMERIC(10,2) NOT NULL,
           image_url TEXT,
           available BOOLEAN DEFAULT TRUE,
@@ -154,6 +179,18 @@ async function initializeDb() {
           payment_status TEXT DEFAULT 'pending',
           cash_session_id TEXT,
           public_checkout_key TEXT,
+          delivery_tracking_token TEXT,
+          delivery_driver_code TEXT,
+          delivery_started_at TIMESTAMPTZ,
+          delivery_finished_at TIMESTAMPTZ,
+          delivery_return_started_at TIMESTAMPTZ,
+          delivery_return_finished_at TIMESTAMPTZ,
+          delivery_last_latitude NUMERIC(10,7),
+          delivery_last_longitude NUMERIC(10,7),
+          delivery_location_updated_at TIMESTAMPTZ,
+          delivery_route_synced_at TIMESTAMPTZ,
+          delivery_driver_id TEXT,
+          order_sequence_number INTEGER,
           created_at TIMESTAMPTZ DEFAULT NOW(),
           updated_at TIMESTAMPTZ DEFAULT NOW()
         );
@@ -226,6 +263,64 @@ async function initializeDb() {
           created_at TIMESTAMPTZ DEFAULT NOW()
         );
 
+        CREATE TABLE IF NOT EXISTS delivery_drivers (
+          id TEXT PRIMARY KEY,
+          tenant_id TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+          name TEXT NOT NULL,
+          phone TEXT,
+          pin_hash TEXT,
+          status TEXT NOT NULL DEFAULT 'active',
+          active BOOLEAN NOT NULL DEFAULT TRUE,
+          last_login_at TIMESTAMPTZ,
+          dismissed_at TIMESTAMPTZ,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+
+        CREATE TABLE IF NOT EXISTS delivery_driver_devices (
+          id TEXT PRIMARY KEY,
+          tenant_id TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+          driver_id TEXT REFERENCES delivery_drivers(id) ON DELETE SET NULL,
+          platform TEXT NOT NULL DEFAULT 'android',
+          device_name TEXT,
+          push_token TEXT,
+          app_version TEXT,
+          last_seen_at TIMESTAMPTZ,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+
+        CREATE TABLE IF NOT EXISTS delivery_route_points (
+          id TEXT PRIMARY KEY,
+          tenant_id TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+          order_id TEXT NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
+          driver_id TEXT REFERENCES delivery_drivers(id) ON DELETE SET NULL,
+          device_id TEXT REFERENCES delivery_driver_devices(id) ON DELETE SET NULL,
+          latitude NUMERIC(10,7) NOT NULL,
+          longitude NUMERIC(10,7) NOT NULL,
+          accuracy_meters NUMERIC(10,2),
+          speed_meters_per_second NUMERIC(10,2),
+          heading_degrees NUMERIC(10,2),
+          recorded_at TIMESTAMPTZ NOT NULL,
+          synced_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+
+        CREATE TABLE IF NOT EXISTS delivery_commands (
+          id TEXT PRIMARY KEY,
+          tenant_id TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+          driver_id TEXT REFERENCES delivery_drivers(id) ON DELETE SET NULL,
+          device_id TEXT REFERENCES delivery_driver_devices(id) ON DELETE SET NULL,
+          order_id TEXT REFERENCES orders(id) ON DELETE SET NULL,
+          command_type TEXT NOT NULL,
+          payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+          status TEXT NOT NULL DEFAULT 'pending',
+          requested_by_user_id TEXT REFERENCES tenant_users(id) ON DELETE SET NULL,
+          requested_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          delivered_at TIMESTAMPTZ,
+          completed_at TIMESTAMPTZ,
+          expires_at TIMESTAMPTZ
+        );
+
         CREATE TABLE IF NOT EXISTS pdv_tabs (
           id TEXT PRIMARY KEY,
           tenant_id TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
@@ -270,9 +365,11 @@ async function initializeDb() {
           connection_status TEXT NOT NULL DEFAULT 'disconnected',
           printer_name TEXT,
           receipt_width INTEGER NOT NULL DEFAULT 32,
+          print_text_size TEXT NOT NULL DEFAULT '12.5',
           print_copies INTEGER NOT NULL DEFAULT 1,
+          auto_accept_orders BOOLEAN NOT NULL DEFAULT FALSE,
           print_events JSONB NOT NULL DEFAULT '{"new_order": true, "status_processing": true, "status_delivering": false, "status_completed": false, "status_cancelled": false, "manual_receipt": true}'::jsonb,
-          receipt_options JSONB NOT NULL DEFAULT '{"showStoreInfo": true, "showCustomerPhone": true, "showDeliveryAddress": true, "showPayment": true, "showItemNotes": true, "showTotals": true}'::jsonb,
+          receipt_options JSONB NOT NULL DEFAULT '{"showStoreInfo": true, "showCustomerPhone": true, "showDeliveryAddress": true, "showPayment": true, "showItemDescription": false, "showItemNotes": true, "showTotals": true}'::jsonb,
           receipt_header TEXT,
           receipt_footer TEXT,
           device_name TEXT,
@@ -289,6 +386,7 @@ async function initializeDb() {
           order_id TEXT REFERENCES orders(id) ON DELETE SET NULL,
           event_type TEXT NOT NULL,
           payload_text TEXT NOT NULL,
+          dedupe_key TEXT,
           status TEXT NOT NULL DEFAULT 'queued',
           attempt_count INTEGER NOT NULL DEFAULT 0,
           last_error TEXT,
@@ -320,6 +418,7 @@ async function initializeDb() {
           target_phone TEXT NOT NULL,
           event_type TEXT NOT NULL,
           payload_text TEXT NOT NULL,
+          dedupe_key TEXT,
           status TEXT NOT NULL DEFAULT 'queued',
           attempt_count INTEGER NOT NULL DEFAULT 0,
           last_error TEXT,
@@ -327,6 +426,30 @@ async function initializeDb() {
           lease_until TIMESTAMPTZ,
           created_at TIMESTAMPTZ DEFAULT NOW(),
           updated_at TIMESTAMPTZ DEFAULT NOW()
+        );
+
+        CREATE TABLE IF NOT EXISTS local_automation_leases (
+          tenant_id TEXT PRIMARY KEY REFERENCES tenants(id) ON DELETE CASCADE,
+          owner_id TEXT NOT NULL,
+          owner_label TEXT,
+          capabilities JSONB NOT NULL DEFAULT '{}'::jsonb,
+          lease_until TIMESTAMPTZ NOT NULL,
+          last_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+
+        CREATE TABLE IF NOT EXISTS local_automation_dispatches (
+          tenant_id TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+          dedupe_key TEXT NOT NULL,
+          order_id TEXT,
+          channel TEXT NOT NULL,
+          event_type TEXT NOT NULL,
+          owner_id TEXT,
+          owner_label TEXT,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          PRIMARY KEY (tenant_id, dedupe_key)
         );
 
         CREATE TABLE IF NOT EXISTS payment_methods (
@@ -368,6 +491,15 @@ async function initializeDb() {
           difference_amount NUMERIC(10,2),
           notes TEXT,
           status TEXT NOT NULL DEFAULT 'open'
+        );
+
+        CREATE TABLE IF NOT EXISTS order_sequence_counters (
+          tenant_id TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+          cash_session_id TEXT NOT NULL REFERENCES cash_register_sessions(id) ON DELETE CASCADE,
+          next_number INTEGER NOT NULL,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          PRIMARY KEY (tenant_id, cash_session_id)
         );
 
         CREATE TABLE IF NOT EXISTS cash_movements (
@@ -562,6 +694,20 @@ async function initializeDb() {
 
           IF NOT EXISTS (
             SELECT 1 FROM information_schema.columns
+            WHERE table_name = 'tenants' AND column_name = 'delivery_max_distance_meters'
+          ) THEN
+            ALTER TABLE tenants ADD COLUMN delivery_max_distance_meters INTEGER NOT NULL DEFAULT 0;
+          END IF;
+
+          IF NOT EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_name = 'tenants' AND column_name = 'delivery_min_order_amount'
+          ) THEN
+            ALTER TABLE tenants ADD COLUMN delivery_min_order_amount NUMERIC(10,2) NOT NULL DEFAULT 0;
+          END IF;
+
+          IF NOT EXISTS (
+            SELECT 1 FROM information_schema.columns
             WHERE table_name = 'tenants' AND column_name = 'delivery_origin_use_issuer'
           ) THEN
             ALTER TABLE tenants ADD COLUMN delivery_origin_use_issuer BOOLEAN NOT NULL DEFAULT TRUE;
@@ -628,6 +774,13 @@ async function initializeDb() {
             WHERE table_name = 'tenants' AND column_name = 'order_notification_sound'
           ) THEN
             ALTER TABLE tenants ADD COLUMN order_notification_sound TEXT NOT NULL DEFAULT 'classic';
+          END IF;
+
+          IF NOT EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_name = 'tenants' AND column_name = 'order_sequence_start'
+          ) THEN
+            ALTER TABLE tenants ADD COLUMN order_sequence_start INTEGER;
           END IF;
 
           IF NOT EXISTS (
@@ -708,6 +861,13 @@ async function initializeDb() {
             WHERE table_name = 'products' AND column_name = 'display_order'
           ) THEN
             ALTER TABLE products ADD COLUMN display_order INTEGER DEFAULT 0;
+          END IF;
+
+          IF NOT EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_name = 'products' AND column_name = 'print_description'
+          ) THEN
+            ALTER TABLE products ADD COLUMN print_description BOOLEAN NOT NULL DEFAULT TRUE;
           END IF;
 
           IF NOT EXISTS (
@@ -802,6 +962,132 @@ async function initializeDb() {
             WHERE table_name = 'orders' AND column_name = 'public_checkout_key'
           ) THEN
             ALTER TABLE orders ADD COLUMN public_checkout_key TEXT;
+          END IF;
+
+          IF NOT EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_name = 'orders' AND column_name = 'delivery_tracking_token'
+          ) THEN
+            ALTER TABLE orders ADD COLUMN delivery_tracking_token TEXT;
+          END IF;
+
+          IF NOT EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_name = 'orders' AND column_name = 'delivery_driver_code'
+          ) THEN
+            ALTER TABLE orders ADD COLUMN delivery_driver_code TEXT;
+          END IF;
+
+          IF NOT EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_name = 'orders' AND column_name = 'delivery_started_at'
+          ) THEN
+            ALTER TABLE orders ADD COLUMN delivery_started_at TIMESTAMPTZ;
+          END IF;
+
+          IF NOT EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_name = 'orders' AND column_name = 'delivery_finished_at'
+          ) THEN
+            ALTER TABLE orders ADD COLUMN delivery_finished_at TIMESTAMPTZ;
+          END IF;
+
+          IF NOT EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_name = 'orders' AND column_name = 'delivery_return_started_at'
+          ) THEN
+            ALTER TABLE orders ADD COLUMN delivery_return_started_at TIMESTAMPTZ;
+          END IF;
+
+          IF NOT EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_name = 'orders' AND column_name = 'delivery_return_finished_at'
+          ) THEN
+            ALTER TABLE orders ADD COLUMN delivery_return_finished_at TIMESTAMPTZ;
+          END IF;
+
+          IF NOT EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_name = 'orders' AND column_name = 'delivery_last_latitude'
+          ) THEN
+            ALTER TABLE orders ADD COLUMN delivery_last_latitude NUMERIC(10,7);
+          END IF;
+
+          IF NOT EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_name = 'orders' AND column_name = 'delivery_last_longitude'
+          ) THEN
+            ALTER TABLE orders ADD COLUMN delivery_last_longitude NUMERIC(10,7);
+          END IF;
+
+          IF NOT EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_name = 'orders' AND column_name = 'delivery_location_updated_at'
+          ) THEN
+            ALTER TABLE orders ADD COLUMN delivery_location_updated_at TIMESTAMPTZ;
+          END IF;
+
+          IF NOT EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_name = 'orders' AND column_name = 'delivery_route_synced_at'
+          ) THEN
+            ALTER TABLE orders ADD COLUMN delivery_route_synced_at TIMESTAMPTZ;
+          END IF;
+
+          IF NOT EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_name = 'orders' AND column_name = 'delivery_driver_id'
+          ) THEN
+            ALTER TABLE orders ADD COLUMN delivery_driver_id TEXT;
+          END IF;
+
+          IF NOT EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_name = 'orders' AND column_name = 'order_sequence_number'
+          ) THEN
+            ALTER TABLE orders ADD COLUMN order_sequence_number INTEGER;
+          END IF;
+
+          IF NOT EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_name = 'delivery_drivers' AND column_name = 'status'
+          ) THEN
+            ALTER TABLE delivery_drivers ADD COLUMN status TEXT;
+          END IF;
+
+          UPDATE delivery_drivers
+          SET status = CASE WHEN active THEN 'active' ELSE 'inactive' END
+          WHERE status IS NULL OR status NOT IN ('active', 'inactive', 'dismissed');
+
+          ALTER TABLE delivery_drivers ALTER COLUMN status SET DEFAULT 'active';
+          ALTER TABLE delivery_drivers ALTER COLUMN status SET NOT NULL;
+
+          UPDATE delivery_drivers
+          SET active = (status = 'active')
+          WHERE active IS DISTINCT FROM (status = 'active');
+
+          IF NOT EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_name = 'delivery_drivers' AND column_name = 'last_login_at'
+          ) THEN
+            ALTER TABLE delivery_drivers ADD COLUMN last_login_at TIMESTAMPTZ;
+          END IF;
+
+          IF NOT EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_name = 'delivery_drivers' AND column_name = 'dismissed_at'
+          ) THEN
+            ALTER TABLE delivery_drivers ADD COLUMN dismissed_at TIMESTAMPTZ;
+          END IF;
+
+          IF NOT EXISTS (
+            SELECT 1
+            FROM pg_constraint
+            WHERE conname = 'chk_delivery_drivers_status'
+          ) THEN
+            ALTER TABLE delivery_drivers
+              ADD CONSTRAINT chk_delivery_drivers_status
+              CHECK (status IN ('active', 'inactive', 'dismissed'));
           END IF;
 
           IF NOT EXISTS (
@@ -918,9 +1204,25 @@ async function initializeDb() {
 
           IF NOT EXISTS (
             SELECT 1 FROM information_schema.columns
+            WHERE table_name = 'printer_agents' AND column_name = 'print_text_size'
+          ) THEN
+            ALTER TABLE printer_agents ADD COLUMN print_text_size TEXT NOT NULL DEFAULT '12.5';
+          END IF;
+
+          ALTER TABLE printer_agents ALTER COLUMN print_text_size SET DEFAULT '12.5';
+
+          IF NOT EXISTS (
+            SELECT 1 FROM information_schema.columns
             WHERE table_name = 'printer_agents' AND column_name = 'print_copies'
           ) THEN
             ALTER TABLE printer_agents ADD COLUMN print_copies INTEGER NOT NULL DEFAULT 1;
+          END IF;
+
+          IF NOT EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_name = 'printer_agents' AND column_name = 'auto_accept_orders'
+          ) THEN
+            ALTER TABLE printer_agents ADD COLUMN auto_accept_orders BOOLEAN NOT NULL DEFAULT FALSE;
           END IF;
 
           IF NOT EXISTS (
@@ -934,7 +1236,7 @@ async function initializeDb() {
             SELECT 1 FROM information_schema.columns
             WHERE table_name = 'printer_agents' AND column_name = 'receipt_options'
           ) THEN
-            ALTER TABLE printer_agents ADD COLUMN receipt_options JSONB NOT NULL DEFAULT '{"showStoreInfo": true, "showCustomerPhone": true, "showDeliveryAddress": true, "showPayment": true, "showItemNotes": true, "showTotals": true}'::jsonb;
+            ALTER TABLE printer_agents ADD COLUMN receipt_options JSONB NOT NULL DEFAULT '{"showStoreInfo": true, "showCustomerPhone": true, "showDeliveryAddress": true, "showPayment": true, "showItemDescription": false, "showItemNotes": true, "showTotals": true}'::jsonb;
           END IF;
 
           IF NOT EXISTS (
@@ -949,6 +1251,20 @@ async function initializeDb() {
             WHERE table_name = 'printer_agents' AND column_name = 'receipt_footer'
           ) THEN
             ALTER TABLE printer_agents ADD COLUMN receipt_footer TEXT;
+          END IF;
+
+          IF NOT EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_name = 'print_jobs' AND column_name = 'dedupe_key'
+          ) THEN
+            ALTER TABLE print_jobs ADD COLUMN dedupe_key TEXT;
+          END IF;
+
+          IF NOT EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_name = 'whatsapp_jobs' AND column_name = 'dedupe_key'
+          ) THEN
+            ALTER TABLE whatsapp_jobs ADD COLUMN dedupe_key TEXT;
           END IF;
         END
         $$;
@@ -996,6 +1312,12 @@ async function initializeDb() {
       `);
 
       await client.query(`
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_print_jobs_tenant_dedupe_key
+          ON print_jobs(tenant_id, dedupe_key)
+          WHERE dedupe_key IS NOT NULL;
+      `);
+
+      await client.query(`
         CREATE INDEX IF NOT EXISTS idx_whatsapp_jobs_tenant_status_created
           ON whatsapp_jobs(tenant_id, status, created_at);
       `);
@@ -1008,6 +1330,12 @@ async function initializeDb() {
       await client.query(`
         CREATE INDEX IF NOT EXISTS idx_whatsapp_jobs_tenant_processing_lease
           ON whatsapp_jobs(tenant_id, status, lease_until);
+      `);
+
+      await client.query(`
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_whatsapp_jobs_tenant_dedupe_key
+          ON whatsapp_jobs(tenant_id, dedupe_key)
+          WHERE dedupe_key IS NOT NULL;
       `);
 
       await client.query(`
@@ -1026,9 +1354,34 @@ async function initializeDb() {
       `);
 
       await client.query(`
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_orders_tenant_cash_sequence_number
+          ON orders(tenant_id, cash_session_id, order_sequence_number)
+          WHERE order_sequence_number IS NOT NULL
+            AND cash_session_id IS NOT NULL;
+      `);
+
+      await client.query(`
         CREATE UNIQUE INDEX IF NOT EXISTS idx_orders_tenant_public_checkout_key
           ON orders(tenant_id, public_checkout_key)
           WHERE public_checkout_key IS NOT NULL;
+      `);
+
+      await client.query(`
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_orders_tenant_delivery_tracking_token
+          ON orders(tenant_id, delivery_tracking_token)
+          WHERE delivery_tracking_token IS NOT NULL;
+      `);
+
+      await client.query(`
+        CREATE INDEX IF NOT EXISTS idx_orders_tenant_delivery_driver_code
+          ON orders(tenant_id, delivery_driver_code)
+          WHERE delivery_driver_code IS NOT NULL;
+      `);
+
+      await client.query(`
+        CREATE INDEX IF NOT EXISTS idx_orders_tenant_delivery_active
+          ON orders(tenant_id, status, delivery_started_at DESC)
+          WHERE type = 'delivery';
       `);
 
       await client.query(`
@@ -1044,6 +1397,58 @@ async function initializeDb() {
       await client.query(`
         CREATE INDEX IF NOT EXISTS idx_payment_methods_tenant_active
           ON payment_methods(tenant_id, active);
+      `);
+
+      await client.query(`
+        DO $$
+        BEGIN
+          IF NOT EXISTS (
+            SELECT 1
+            FROM pg_indexes
+            WHERE schemaname = current_schema()
+              AND indexname = 'uq_payment_methods_tenant_name_normalized'
+          ) AND NOT EXISTS (
+            SELECT tenant_id, lower(trim(name))
+            FROM payment_methods
+            GROUP BY tenant_id, lower(trim(name))
+            HAVING COUNT(*) > 1
+          ) THEN
+            EXECUTE 'CREATE UNIQUE INDEX uq_payment_methods_tenant_name_normalized
+              ON payment_methods(tenant_id, lower(trim(name)))';
+          END IF;
+        END
+        $$;
+      `);
+
+      await client.query(`
+        CREATE INDEX IF NOT EXISTS idx_delivery_drivers_tenant_active
+          ON delivery_drivers(tenant_id, active, name);
+      `);
+
+      await client.query(`
+        CREATE INDEX IF NOT EXISTS idx_delivery_drivers_tenant_status
+          ON delivery_drivers(tenant_id, status, name);
+      `);
+
+      await client.query(`
+        CREATE INDEX IF NOT EXISTS idx_orders_tenant_delivery_driver_id
+          ON orders(tenant_id, delivery_driver_id, status, updated_at DESC)
+          WHERE delivery_driver_id IS NOT NULL;
+      `);
+
+      await client.query(`
+        CREATE INDEX IF NOT EXISTS idx_delivery_driver_devices_tenant_driver
+          ON delivery_driver_devices(tenant_id, driver_id, last_seen_at DESC);
+      `);
+
+      await client.query(`
+        CREATE INDEX IF NOT EXISTS idx_delivery_route_points_order_recorded
+          ON delivery_route_points(tenant_id, order_id, recorded_at);
+      `);
+
+      await client.query(`
+        CREATE INDEX IF NOT EXISTS idx_delivery_commands_device_status
+          ON delivery_commands(tenant_id, device_id, status, requested_at DESC);
       `);
 
       await client.query(`
@@ -1092,7 +1497,7 @@ async function initializeDb() {
       const tenantSeed = await client.query<{ id: string }>(
         `INSERT INTO tenants (id, name, slug)
          VALUES ($1, $2, $3)
-         ON CONFLICT (slug) DO UPDATE SET name = EXCLUDED.name
+         ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name
          RETURNING id`,
         ['t1', 'Pizza & Burger Master', 'pizza-burger'],
       );
@@ -1105,38 +1510,47 @@ async function initializeDb() {
       const seedOption1Id = `seed-${tenantId}-opt-1`;
       const seedOption2Id = `seed-${tenantId}-opt-2`;
       const seedOption3Id = `seed-${tenantId}-opt-3`;
-
-      await client.query(
-        `INSERT INTO categories (id, tenant_id, name, icon, product_type)
-         VALUES
-          ($1, $3, $4, $5, $8),
-          ($2, $3, $6, $7, $9)
-         ON CONFLICT (id) DO NOTHING`,
-        [category1Id, category2Id, tenantId, 'Pizzas', 'pizza', 'Burgers', 'hamburger', 'size_based', 'prepared'],
+      const catalogSeedCheck = await client.query<{ total: string }>(
+        `SELECT COUNT(*)::text AS total
+         FROM products
+         WHERE tenant_id = $1`,
+        [tenantId],
       );
+      const shouldSeedCatalog = Number(catalogSeedCheck.rows[0]?.total || 0) === 0;
 
-      await client.query(
-        `INSERT INTO products (id, tenant_id, category_id, name, description, price, image_url)
-         VALUES
-          ($1, $3, $4, $5, $6, $7, $8),
-          ($2, $3, $9, $10, $11, $12, $13)
-         ON CONFLICT (id) DO NOTHING`,
-        [
-          `seed-${tenantId}-p1`,
-          seedBurgerId,
-          tenantId,
-          category1Id,
-          'Margherita',
-          'Classic tomato, mozzarella, and basil',
-          45.0,
-          'https://picsum.photos/seed/pizza/400/300',
-          category2Id,
-          'Bacon Cheeseburger',
-          'Bento bun, beef patty, bacon, cheddar',
-          32.0,
-          'https://picsum.photos/seed/burger/400/300',
-        ],
-      );
+      if (shouldSeedCatalog) {
+        await client.query(
+          `INSERT INTO categories (id, tenant_id, name, icon, product_type)
+           VALUES
+            ($1, $3, $4, $5, $8),
+            ($2, $3, $6, $7, $9)
+           ON CONFLICT (id) DO NOTHING`,
+          [category1Id, category2Id, tenantId, 'Pizzas', 'pizza', 'Burgers', 'hamburger', 'size_based', 'prepared'],
+        );
+
+        await client.query(
+          `INSERT INTO products (id, tenant_id, category_id, name, description, price, image_url)
+           VALUES
+            ($1, $3, $4, $5, $6, $7, $8),
+            ($2, $3, $9, $10, $11, $12, $13)
+           ON CONFLICT (id) DO NOTHING`,
+          [
+            `seed-${tenantId}-p1`,
+            seedBurgerId,
+            tenantId,
+            category1Id,
+            'Margherita',
+            'Classic tomato, mozzarella, and basil',
+            45.0,
+            'https://picsum.photos/seed/pizza/400/300',
+            category2Id,
+            'Bacon Cheeseburger',
+            'Bento bun, beef patty, bacon, cheddar',
+            32.0,
+            'https://picsum.photos/seed/burger/400/300',
+          ],
+        );
+      }
 
       await client.query(
         `INSERT INTO payment_methods (id, tenant_id, name, method_type, fee_percent, fee_fixed, settlement_days, active)
@@ -1155,28 +1569,34 @@ async function initializeDb() {
         ],
       );
 
-      await client.query(
-        `INSERT INTO product_option_groups
-         (id, tenant_id, product_id, name, min_select, max_select, required, display_order)
-         VALUES ($1, $2, $3, $4, 0, 10, FALSE, 0)
-         ON CONFLICT (id) DO NOTHING`,
-        [seedOptionGroupId, tenantId, seedBurgerId, 'Turbine seu lanche'],
-      );
+      if (shouldSeedCatalog) {
+        await client.query(
+          `INSERT INTO product_option_groups
+           (id, tenant_id, product_id, name, min_select, max_select, required, display_order)
+           VALUES ($1, $2, $3, $4, 0, 10, FALSE, 0)
+           ON CONFLICT (id) DO NOTHING`,
+          [seedOptionGroupId, tenantId, seedBurgerId, 'Turbine seu lanche'],
+        );
 
-      await client.query(
-        `INSERT INTO product_options
-         (id, tenant_id, group_id, name, price_addition, active, display_order)
-         VALUES
-         ($1, $4, $5, $6, $7, TRUE, 0),
-         ($2, $4, $5, $8, $9, TRUE, 1),
-         ($3, $4, $5, $10, $11, TRUE, 2)
-         ON CONFLICT (id) DO NOTHING`,
-        [seedOption1Id, seedOption2Id, seedOption3Id, tenantId, seedOptionGroupId, 'Bacon', 3, 'Cheddar', 3, 'Ovo', 2],
-      );
+        await client.query(
+          `INSERT INTO product_options
+           (id, tenant_id, group_id, name, price_addition, active, display_order)
+           VALUES
+           ($1, $4, $5, $6, $7, TRUE, 0),
+           ($2, $4, $5, $8, $9, TRUE, 1),
+           ($3, $4, $5, $10, $11, TRUE, 2)
+           ON CONFLICT (id) DO NOTHING`,
+          [seedOption1Id, seedOption2Id, seedOption3Id, tenantId, seedOptionGroupId, 'Bacon', 3, 'Cheddar', 3, 'Ovo', 2],
+        );
+      }
     } finally {
       client.release();
     }
-  })();
+  })().catch((error) => {
+    initPromise = null;
+    globalThis.__faceburgDbInitPromise = null;
+    throw error;
+  });
   globalThis.__faceburgDbInitPromise = initPromise;
 
   return initPromise;

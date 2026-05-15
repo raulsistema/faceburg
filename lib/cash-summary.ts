@@ -1,4 +1,5 @@
 import type { DbExecutor } from '@/lib/db';
+import { getBusinessDateKey } from '@/lib/business-time';
 
 type MovementSummaryRow = {
   movement_type: string;
@@ -75,16 +76,11 @@ function dateKey(value: string | Date) {
     const normalized = value.trim();
     if (/^\d{4}-\d{2}-\d{2}$/.test(normalized)) return normalized;
   }
-  const date = value instanceof Date ? value : new Date(value);
-  if (Number.isNaN(date.getTime())) return '';
-  const year = date.getFullYear();
-  const month = String(date.getMonth() + 1).padStart(2, '0');
-  const day = String(date.getDate()).padStart(2, '0');
-  return `${year}-${month}-${day}`;
+  return getBusinessDateKey(value);
 }
 
 function receivableStatus(dueDate: string): 'overdue' | 'today' | 'future' {
-  const today = dateKey(new Date());
+  const today = getBusinessDateKey();
   if (!dueDate || dueDate === today) return 'today';
   return dueDate < today ? 'overdue' : 'future';
 }
