@@ -1,0 +1,441 @@
+{
+  "name": "Name of the corpus",
+  "locale": "pt-BR",
+  "data": [
+    {
+      "intent": "SAUDACAO",
+      "utterances": [
+        "Ola!",
+        "Oi, tudo bem?",
+        "Ei, como vai?",
+        "Saudacoes!",
+        "Bom dia!",
+        "Boa tarde!",
+        "Boa noite!",
+        "bom dia tudo bem como vai?",
+        "boa noite tudo bem? como vai?",
+        "oi",
+        "ola",
+        "como voces estao?",
+        "salve mano",
+        "ola bom dia",
+        "e aew brow",
+        "gostaria",
+        "Ois",
+        "Como voce esta ?",
+        "bomdia",
+        "boatarde",
+        "boanoite",
+        "vim pelo face",
+        "vim pelo facebook",
+        "vim pelo instagram",
+        "vim pelo insta",
+        "Ola, Bem Vindo ao *Don Sabore*\n\nPara realizar *pedidos* Acesso nosso *catalogo*👇\nhttps://sistemasnaweb.com.br/donsabore\n\nUtilize cupom de Desconto *SABORE10* e ganhe 10% de *desconto*",
+        "Consulte nossos horarios de *atendimento*! 🤩🤩\n\n*Domingo* - 18:30 as 23:10 🤩 \n*Segunda* - 18:30 as 23:10 🤩 \n*Terca* - Fechado 😕\n*Quarta* - 18:30 as 23:10 🤩 \n*Quinta* - 18:30 as 23:10 🤩 \n*Sexta* - 18:30 as 23:10 🤩 \n*Sabado* - 18:30 as 23:10 🤩 \n"
+      ],
+      "answers": [
+        "Olá @NOME, Em que posso ajudá-lo(a)?",
+        "Seja Bem Vindo(a) @NOME, Em que posso ajudá-lo(a)?"
+      ],
+      "contexto": [
+        "início de conversa"
+      ]
+    },
+    {
+      "intent": "RECLAMACAO",
+      "utterances": [
+        "Desculpe-me, mas acho que a comida poderia ter mais tempero. Esta um pouco sem graca.",
+        "meu pedido chegou achei ele gelado",
+        "Tambem achei o atendimento um pouco demorado. Talvez seja interessante contratar mais funcionarios.",
+        "E uma ultima coisa, acho que a iluminacao do restaurante esta um pouco fraca. Poderia ser mais clara.",
+        "Entrega demorada",
+        "Demorou muito para fazer a entrega",
+        "achei a entrega um pouco demorada",
+        "minha comida veio gelada",
+        "A comida estava gelada",
+        "Nao gostei do atendimento",
+        "O espetinho estava cru",
+        "o pedido estava bom, mas demorou muito para ser entregue",
+        "Nao gostei do lanche",
+        "Comida estava fria",
+        "eu nao pedi esse guarana",
+        "meu pedido chegou achei ele gelado",
+        "A comida estava muito fria",
+        "Nao gostei da comida",
+        "entrega demorou demais",
+        "entrega demorou",
+        "comida ruim",
+        "comida muito ruim",
+        "comida muito salgada",
+        "comida muito sem sabor"
+      ],
+      "answers": [
+        "Lamentamos por não atender as suas expectativas 😕. Vamos levar o seu comentário em consideração e tentar melhorar. 🥰",
+        "Agradecemos por sua sugestão 😚. Vamos melhorar nossos serviços para melhor atender você. 🤗",
+        "Obrigado pelo feedback 😗! Vamos Melhorar, para melhor atender você 🙌"
+      ],
+      "contexto": [
+        "cliente criticando os serviços"
+      ]
+    },
+    {
+      "intent": "INTENCAO_PEDIDO",
+      "utterances": [
+        "Gostaria de fazer um pedido, pode me ajudar",
+        "Como posso fazer um pedido",
+        "Voce pode me ajudar a fazer um pedido",
+        "Quero fazer um pedido, como faço",
+        "Posso fazer um pedido por aqui",
+        "Quais opcoes de pedido estao disponiveis",
+        "Qual e o processo de pedido",
+        "e possivel fazer um pedido online",
+        "Como faco para encomendar algo",
+        "quero pedir",
+        "lanche",
+        "gostaria de realizar um pedido",
+        "gostaria de pedir algo",
+        "gostaria de pedir",
+        "estou interessado em pedir algo",
+        "gostaria de saber sobre os pedidos",
+        "queria fazer um pedido",
+        "realizar pedido",
+        "pedido",
+        "fazer pedido",
+		"quero pedir o"
+      ],
+      "answers": [
+        "Que bom, descreva seu pedido de forma organizada\n💡 Ex. *UM X-TUDO, UM COCA COLA LATA*\n\nCaso prefirir acesso nosso catalogo pelo link👇\n@LINK 🔗"
+      ],
+      "contexto": [
+        "cliente com intenção de realizar um pedido"
+      ]
+    },
+    {
+      "intent": "PEDIDO",
+      "utterances": [
+        "marmita grande",
+        "pedir uma marmita",
+        "espetinho de carne",
+        "pedir um espetinho de carne",
+        "pedir um lanche",
+        "pedir um marmitex",
+        "me manda uma marmita ai",
+        "gostaria de efetuar o pedido de um x-tudo",
+        "marmita de frango",
+        "marmita",
+        "consigo pedir o combo x2 com coca cola",
+        "quero um x-salada",
+        "Uma carne bem passado e um frango mal passado",
+        "Por favor me manda um espeto de carne um de frango e uma jantinha com carne",
+        "Me manda um queijo e um chesse salada",
+        "Bacon na brasa e uma coca cola 2 litros",
+        "Queria pedir um chesse da brasa",
+        "Uma jantinha gormet com frango bacon salada",
+        "Frango a passarinho meia",
+        "Queria dois feijão tropeiro e uma jantinha",
+        "queria pedir uma coca latra",
+        "faz um cachorro qente pra mim",
+        "faz um duplo sem alface e um sim com 2 salsichas",
+        "queria um cachorro quente",
+        "eu quero um hot dog simples",
+        "Quero dog infarto",
+        "quero um sundae de morango com ovomaltine de 330ml",
+        "quero um x-calabresa e uma coca cola lata",
+        "quero pedir uma marmita pequena",
+        "quero pedir um lcnche",
+        "quero comprar",
+        "realizar pedidos"
+      ],
+      "answers": [
+        "Segue o *link* da nossa plataforma 👇\n@LINK 🔗\nou se prefirir pode *realizar o pedido por aqui mesmo*, é só seguir os proximos passos 🤗"
+      ],
+      "contexto": [
+        "fazendo um pedido"
+      ]
+    },
+    {
+      "intent": "RASTREAMENTO",
+      "utterances": [
+        "onde esta minha entrega",
+        "Como esta minha entrega",
+        "Como esta o andamento da minha entrega",
+        "Qual e o status do meu pedido",
+        "aonde esta meu pedido",
+        "Quando meu pedido chegara",
+        "Pode me informar o status da entrega",
+        "Acabei de fazer meu pedido, e agora",
+        "O que eu preciso fazer depois de fazer o pedido",
+        "Como eu confirmo meu pedido",
+        "andamento da minha entrega",
+        "Tenho algum pedido aberto",
+        "Existe algum pedido em andamento",
+        "Tem algum pedido que ainda nao foi entregue",
+        "Quero saber se tenho algum pedido pendente",
+        "Existe algum pedido que ainda não foi finalizado",
+        "andamento do meu pedido",
+        "status do pedido",
+        "andamento do pedido",
+        "qual andamento da entrega",
+        "consultar pedido",
+        "Andamento entrega",
+        "Qual o status da minha compra",
+        "Como faco para rastrear meu pedido",
+        "Posso acompanhar o meu pedido em tempo real",
+        "gostaria de saber onde esta meu pedido",
+        "onde esta me pedido",
+        "ola onde esta meu pedido",
+        "rastrei da entrega",
+        "andamento pedido",
+        "status pedido",
+        "onde ta meu pedido",
+        "Ainda não veio"
+      ],
+      "answers": [
+        "Seu pedido foi entregue com sucesso. Esperamos que tenha gostado!"
+      ],
+      "contexto": [
+        "andamento da entrega"
+      ]
+    },
+    {
+      "intent": "CONS_FUNCIONAMENTO",
+      "utterances": [
+        "Qual e o horario de funcionamento",
+        "qual o horario de funcionamento",
+        "Em que horario vocês abrem",
+        "Quais sao os horarios de atendimento",
+        "Que horas vocês fecham",
+        "Gostaria de saber os horarios de funcionamento.",
+        "horario de funcionamento",
+        "qual horario de funcionamento?"
+      ],
+      "answers": [
+        "Nosso horário de funcionamento é das 10h às 22h, todos os dias."
+      ],
+      "contexto": [
+        "consultar horario de funcionamento"
+      ]
+    },
+    {
+      "intent": "ELOGIO",
+      "utterances": [
+        "Gostei muito do ambiente desse restaurante, é muito agradavel e acolhedor!",
+        "E a comida também e maravilhosa! Voces tem um chef muito talentoso!",
+        "Com certeza vou voltar aqui mais vezes, e trazer outras pessoas tambem!",
+        "comida muito saborosa, gostei muito!",
+        "Gostei muito da sua comida",
+        "a comida estava maravilhosa",
+        "o produto chegou, e estava maravilhoso",
+        "o lanche estava maravilhoso",
+        "otima pizza, amei o sabor",
+        "a massa da pizza estava muito boa, ambiente muito agradável",
+        "pedido chegou e estava muito bom",
+        "comida marvilhosamente marvilhosa",
+        "comida mto boa",
+        "A comida esta maravilhosa",
+        "a entrega foi muito rapida",
+        "entrega rapida",
+        "entrega foi muito rapida",
+        "comida muito boa",
+        "comida boa",
+        "comida quente",
+        "comida excelente",
+        "comida muito gostosa",
+        "Show de bola"
+      ],
+      "answers": [
+        "Ficamos muito contentes em ouvir isso! Prezamos bastante pelo conforto dos nossos clientes.",
+        "Obrigado pelo elogio! Nosso chef dedica-se bastante em criar pratos deliciosos e criativos.",
+        "Será um prazer recebê-lo novamente! E obrigado por nos ajudar a divulgar o nosso restaurante."
+      ],
+      "contexto": [
+        "cliente elogiando o restaurante"
+      ]
+    },
+    {
+      "intent": "AGRADECIMENTO",
+      "utterances": [
+        "Obrigado",
+        "Obrigada",
+        "Valeu",
+        "Agradecido(a)",
+        "Obrigado(a) pela ajuda",
+        "certo",
+        "agradeço",
+        "gradece",
+        "obg"
+      ],
+      "answers": [
+        "De nada!",
+        "Por nada!",
+        "Fico feliz em ajudar!",
+        "Sempre estou aqui para ajudar!",
+        "Não tem de quê!",
+        "Disponha!"
+      ],
+      "contexto": [
+        "cliente agradecendo atendimento"
+      ]
+    },
+    {
+      "intent": "ENTREGA",
+      "utterances": [
+        "Voces fazem entrega",
+        "VOCES FAZEM ENTREGA",
+        "voces fazem entregas",
+        "boa noite, qual o valor de entrega de voces",
+        "qual o tempo de espera para a entrega",
+        "preciso saber se vocês entregam aqui no meu bairro",
+        "estão realizando entregas",
+        "Estao entregando",
+        "Status entrega",
+        "Estao fazendo entregas",
+        "entrega esta disponivel",
+        "TEMPO DE ENTREGA",
+        "quanto tempo",
+        "estao fazendo entrega",
+        "entrega",
+        "demora a entrega?",
+        "quanto tempo a entrega?",
+        "qual a taxa de entrega",
+        "Demora pra chegar",
+        "tem taxa de entrega"
+      ],
+      "answers": [
+        "Estamos realizando entregas, consulte no Aplicativo a disponibilidade de seu bairro!👇\n@LINK"
+      ],
+      "contexto": [
+        "cliente consultando entrega"
+      ]
+    },
+    {
+      "intent": "PROMOCAO",
+      "utterances": [
+        "Hoje tem promocao",
+        "Promocoes",
+        "tem cupom de desconto ou alguma promocao",
+        "Cupom de desconto",
+        "qual a promocao disponivel",
+        "cupons de desconto",
+        "quero saber das promocoes",
+        "tem promocoes"
+      ],
+      "answers": [
+        "Temos varias promoções acesse atraves do nosso cardapio👇\n@LINK"
+      ],
+      "contexto": [
+        "cliente querendo promoção"
+      ]
+    },
+    {
+      "intent": "CANCELAMENTO",
+      "utterances": [
+        "queria realizar o cancelamento do meu pedido",
+        "queria cancelar meu pedido",
+        "quero cancelar meu pedido"
+      ],
+      "answers": [
+        "Sem problemas, vou chamar o dono do restaurante!"
+      ],
+      "contexto": [
+        "cliente querendo cancelar o pedido"
+      ]
+    },
+    {
+      "intent": "REMOVER",
+      "utterances": [
+        "REMOVER",
+        "remova a coca cola",
+        "remover  a coca lata",
+        "remove a coca cola lata",
+        "remove o x-calabresa",
+        "Remove o x - calabresa",
+        "remover o cheese salada",
+        "remover coca cola lata",
+        "remover a fanta lata",
+        "remova a coca cola lata",
+        "remover marmitex pequena",
+        "remover duo de 180 kit kat"
+      ],
+      "answers": [
+        "Sem problemas, da uma olhada no seu pedido agora"
+      ],
+      "contexto": [
+        "cliente querendo cancelar o pedido"
+      ]
+    },
+    {
+      "intent": "CARDAPIO",
+      "utterances": [
+        "Me mostre o cardapio",
+        "qual o cardapio de voces",
+        "qual o cardapio de hoje",
+        "quais seus produtos",
+        "Para conferir o nosso cardápio",
+        "cardapio",
+        "quero ver o cardapio",
+        "o que voces tem disponivel hoje",
+        "qual seu cardapio",
+        "cadapio",
+        "ver cardapio"
+      ],
+      "answers": [
+        "você pode acessar nosso cardapio atraves do nosso cardapio👇\n@LINK"
+      ],
+      "contexto": [
+        "cliente querendo ver o cardapio"
+      ]
+    },
+    {
+      "intent": "ATENDENTE",
+      "utterances": [
+        "gostaria de falar com um atendente",
+        "quero falar com um atendente",
+        "gostaria de falar com atendente humano",
+        "meu pedido chegou, mas faltando algo",
+        "faltando",
+        "faltava um item do pedido. Isso é muito frustrante e arruinou minha experiência de compra.",
+        "Recebi meu pedido, mas falta um item que paguei por ele. Como faço para resolver isso?",
+        "gostaria de falar com uma pessoa",
+        "eu nao consegui",
+        "nao consegui"
+      ],
+      "answers": [
+        "Comunicamos o dono do restaurante logo ele irá entrar em contato, qualquer duvida pode estar acessando nosso catalogo 👇\n@LINK"
+      ],
+      "contexto": [
+        "cliente querendo falar com atendente humano"
+      ]
+    },
+    {
+      "intent": "FINALIZAR",
+      "utterances": [
+        "finalizar"
+      ],
+      "answers": [
+        "finalizar",
+        "finalizar pedido"
+      ],
+      "contexto": [
+        "cliente querendo finalizar o pedido"
+      ]
+    },
+    {
+      "intent": "CARRINHO",
+      "utterances": [
+        "me mostre meu carrinho",
+        "meu carrinho",
+        "mostrar carrinho de comprar",
+        "mostrar carrinho de compras",
+        "ver carrinho"
+      ],
+      "answers": [
+        "ver carrinho",
+        "carrinho"
+      ],
+      "contexto": [
+        "cliente querendo ver o carrinho"
+      ]
+    }
+  ]
+}

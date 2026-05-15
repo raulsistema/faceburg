@@ -66,6 +66,7 @@ type PaymentMethodRow = {
 
 type CustomerRow = {
   id: string;
+  name: string;
 };
 
 type ExistingCheckoutOrderRow = {
@@ -330,6 +331,45 @@ function normalizePhone(value: string) {
   return digits.replace(/^0+/, '');
 }
 
+function normalizeLookupName(value: string) {
+  return value
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function customerNameMatches(storedName: string, inputName: string) {
+  const stored = normalizeLookupName(storedName);
+  const input = normalizeLookupName(inputName);
+  if (!stored || !input || input.replace(/\s/g, '').length < 2) {
+    return false;
+  }
+  if (stored === input) {
+    return true;
+  }
+
+  const storedTokens = stored.split(' ').filter(Boolean);
+  const inputTokens = input.split(' ').filter(Boolean);
+  if (!storedTokens.length || !inputTokens.length) {
+    return false;
+  }
+
+  const firstTokenMatches = storedTokens[0] === inputTokens[0] || (inputTokens[0].length >= 3 && storedTokens[0].startsWith(inputTokens[0]));
+
+  if (inputTokens.length === 1) {
+    return firstTokenMatches;
+  }
+
+  if (!firstTokenMatches) {
+    return false;
+  }
+
+  return true;
+}
+
 function normalizeCheckoutKey(value: unknown) {
   const key = String(value || '').trim();
   if (!key) return '';
@@ -442,7 +482,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ slu
     const changeFor = Number.isFinite(changeForRaw) && changeForRaw > 0 ? changeForRaw : null;
     const items = (body.items || []) as CheckoutItemInput[];
 
-    if (!customerName || customerPhoneDigits.length < 10) {
+    if (normalizeLookupName(customerName).replace(/\s/g, '').length < 2 || customerPhoneDigits.length < 10) {
       return NextResponse.json({ error: 'Nome e celular sao obrigatorios.' }, { status: 400 });
     }
 
@@ -784,38 +824,50 @@ export async function POST(request: Request, { params }: { params: Promise<{ slu
     await dbClient.query('BEGIN');
 
     const existingCustomerResult = await dbClient.query<CustomerRow>(
-      `SELECT id
+      `SELECT id, name
        FROM customers
        WHERE tenant_id = $1
          AND regexp_replace(phone, '\D', '', 'g') = $2
        ORDER BY created_at ASC
-       LIMIT 1`,
+       LIMIT 25`,
       [tenant.id, customerPhoneDigits],
     );
 
+    const matchingCustomer = existingCustomerResult.rows.find((customer) => customerNameMatches(customer.name, customerName)) || null;
+    const existingPhoneCustomer = existingCustomerResult.rows[0] || null;
     let customerId = '';
-    if (existingCustomerResult.rowCount) {
-      customerId = existingCustomerResult.rows[0].id;
+    let allowSavedCustomerAddress = false;
+    if (matchingCustomer) {
+      customerId = matchingCustomer.id;
+      allowSavedCustomerAddress = true;
       await dbClient.query(
         `UPDATE customers
-         SET name = $3,
-             phone = $4,
-             email = NULLIF($5, ''),
-             is_company = $6,
-             company_name = NULLIF($7, ''),
-             document_number = NULLIF($8, ''),
+         SET phone = $3,
+             email = NULLIF($4, ''),
+             is_company = $5,
+             company_name = NULLIF($6, ''),
+             document_number = NULLIF($7, ''),
              status = 'active'
          WHERE id = $1 AND tenant_id = $2`,
         [
           customerId,
           tenant.id,
-          customerName,
           customerPhoneDigits,
           customerEmail,
           customerIsCompany,
           customerCompanyName,
           customerDocumentNumber,
         ],
+      );
+    } else if (existingPhoneCustomer) {
+      customerId = existingPhoneCustomer.id;
+      await dbClient.query(
+        `UPDATE customers
+         SET phone = $3,
+             email = COALESCE(NULLIF($4, ''), email),
+             status = 'active'
+         WHERE id = $1 AND tenant_id = $2`,
+        [customerId, tenant.id, customerPhoneDigits, customerEmail],
       );
     } else {
       customerId = randomUUID();
@@ -851,6 +903,9 @@ export async function POST(request: Request, { params }: { params: Promise<{ slu
       | null = null;
     if (orderType === 'delivery') {
       if (selectedAddressId) {
+        if (!allowSavedCustomerAddress) {
+          throw new CheckoutValidationError('Confirme nome e celular do cadastro antes de usar endereco salvo.');
+        }
         const selectedAddressResult = await dbClient.query<AddressRow>(
           `SELECT id, label, street, number, complement, neighborhood, city, state, zip_code, reference, is_default
            FROM customer_addresses
@@ -1125,18 +1180,14 @@ export async function POST(request: Request, { params }: { params: Promise<{ slu
     const orderEventDispatch = await Promise.allSettled([
       notifyOrderEvent(tenant.id, 'created', orderId),
       enqueueOrderPrintJob(tenant.id, orderId, 'new_order', undefined, queueOptions),
-      initialOrderStatus === 'processing'
-        ? enqueueOrderPrintJob(tenant.id, orderId, 'status_update', undefined, queueOptions)
-        : Promise.resolve(false),
       enqueueOrderWhatsappJob(tenant.id, orderId, 'new_order', undefined, queueOptions),
     ]);
     const realtimeNotified = orderEventDispatch[0]?.status === 'fulfilled';
     const printQueued =
       orderEventDispatch[1]?.status === 'fulfilled' && Boolean(orderEventDispatch[1].value);
-    const kitchenPrintQueued =
-      orderEventDispatch[2]?.status === 'fulfilled' && Boolean(orderEventDispatch[2].value);
+    const kitchenPrintQueued = printQueued;
     const whatsappQueued =
-      orderEventDispatch[3]?.status === 'fulfilled' && Boolean(orderEventDispatch[3].value);
+      orderEventDispatch[2]?.status === 'fulfilled' && Boolean(orderEventDispatch[2].value);
 
     return NextResponse.json({
       ok: true,

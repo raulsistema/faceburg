@@ -1,0 +1,16 @@
+{
+  "name": "Faceburg Bot",
+  "locale": "pt",
+  "data": [
+    {
+      "intent": "greeting",
+      "utterances": ["ola", "oie", "oi", "bom dia", "boa tarde", "boa noite"],
+      "answers": ["Ola! Seja bem-vindo ao nosso atendimento. Como posso ajudar?"]
+    },
+    {
+      "intent": "menu",
+      "utterances": ["quero o cardapio", "menu", "fazer pedido", "cardapio"],
+      "answers": ["Acesse nosso site para fazer seu pedido e ver o cardapio completo!"]
+    }
+  ]
+}

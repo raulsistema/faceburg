@@ -140,7 +140,7 @@ type CartItem = {
   pizzaSelection: PizzaSelection | null;
 };
 
-type CheckoutStep = 'cart' | 'customer' | 'address' | 'payment' | 'review' | 'success';
+type CheckoutStep = 'cart' | 'address' | 'payment' | 'review' | 'success';
 type OrderType = 'delivery' | 'pickup' | 'table';
 type PaymentMethodType = 'pix' | 'card' | 'cash' | 'bank_slip' | 'wallet' | 'other';
 type TopTab = 'products' | 'portal' | 'contact' | 'about';
@@ -226,17 +226,6 @@ type PortalCustomer = {
   email: string | null;
 };
 
-type PortalOrder = {
-  id: string;
-  deliveryAddress: string;
-  total: number;
-  status: 'pending' | 'processing' | 'delivering' | 'completed' | 'cancelled';
-  type: 'delivery' | 'pickup' | 'table';
-  paymentMethod: string;
-  createdAt: string;
-  itemsSummary: string;
-};
-
 type CustomerLookupResponse = {
   found?: boolean;
   customer?: {
@@ -246,17 +235,15 @@ type CustomerLookupResponse = {
     email?: string | null;
     isCompany?: boolean;
     companyName?: string | null;
-    documentNumber?: string | null;
   } | null;
   addresses?: SavedAddress[];
-  orders?: PortalOrder[];
   error?: string;
 };
 
 type CustomerLookupCacheEntry = {
   tenantSlug: string;
   phone: string;
-  includeOrders: boolean;
+  name: string;
   loadedAt: number;
   data: CustomerLookupResponse | null;
 };
@@ -305,7 +292,7 @@ type PublicMenuClientProps = {
   initialData?: PublicMenuData | null;
 };
 
-const checkoutSteps: CheckoutStep[] = ['cart', 'customer', 'address', 'payment', 'review'];
+const checkoutSteps: CheckoutStep[] = ['cart', 'address', 'payment', 'review'];
 
 const EMPTY_ADDRESS_FORM: AddressFormState = {
   label: '',
@@ -425,6 +412,10 @@ function normalizePhone(raw: string) {
   return digits.replace(/^0+/, '');
 }
 
+function normalizeLookupNameInput(raw: string) {
+  return raw.trim().replace(/\s+/g, ' ').toLowerCase();
+}
+
 function createCheckoutKey() {
   if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
     return crypto.randomUUID();
@@ -451,31 +442,6 @@ function getCartKey(
   return `${productId}::${selectedOptions.map((option) => option.id).sort().join('|')}::${pizzaKey}::${notes
     .trim()
     .toLowerCase()}`;
-}
-
-function orderStatusLabel(status: PortalOrder['status']) {
-  if (status === 'pending') return 'Recebido';
-  if (status === 'processing') return 'Em preparo';
-  if (status === 'delivering') return 'Saiu para entrega';
-  if (status === 'completed') return 'Concluido';
-  if (status === 'cancelled') return 'Cancelado';
-  return status;
-}
-
-function orderStatusTone(status: PortalOrder['status']) {
-  if (status === 'pending') return 'bg-amber-50 text-amber-700 border-amber-200';
-  if (status === 'processing') return 'bg-sky-50 text-sky-700 border-sky-200';
-  if (status === 'delivering') return 'bg-violet-50 text-violet-700 border-violet-200';
-  if (status === 'completed') return 'bg-emerald-50 text-emerald-700 border-emerald-200';
-  if (status === 'cancelled') return 'bg-rose-50 text-rose-700 border-rose-200';
-  return 'bg-slate-50 text-slate-700 border-slate-200';
-}
-
-function orderTypeLabel(type: PortalOrder['type']) {
-  if (type === 'delivery') return 'Entrega';
-  if (type === 'pickup') return 'Retirada';
-  if (type === 'table') return 'Consumo no local';
-  return type;
 }
 
 function getSizeOptions(product: Product): SizeBasedOption[] {
@@ -575,7 +541,6 @@ function getPortalSessionKey(tenantSlug?: string) {
 function createEmptyPortalCustomerState() {
   return {
     portalCustomer: null as PortalCustomer | null,
-    portalOrders: [] as PortalOrder[],
     customerName: '',
     customerPhone: '',
     customerEmail: '',
@@ -709,13 +674,16 @@ export default function PublicMenuClient({ tenantSlug, initialData }: PublicMenu
   const [activeCategory, setActiveCategory] = useState<string>('all');
   const [activeTopTab, setActiveTopTab] = useState<TopTab>('products');
   const [portalOpen, setPortalOpen] = useState(false);
+  const [customerIdentityOpen, setCustomerIdentityOpen] = useState(false);
+  const [identityNameInput, setIdentityNameInput] = useState('');
+  const [identityPhoneInput, setIdentityPhoneInput] = useState('');
+  const [customerIdentityError, setCustomerIdentityError] = useState<string | null>(null);
   const [portalSaving, setPortalSaving] = useState(false);
   const [portalError, setPortalError] = useState<string | null>(null);
   const [profileMenuOpen, setProfileMenuOpen] = useState(false);
   const [portalNameInput, setPortalNameInput] = useState('');
   const [portalPhoneInput, setPortalPhoneInput] = useState('');
   const [portalCustomer, setPortalCustomer] = useState<PortalCustomer | null>(null);
-  const [portalOrders, setPortalOrders] = useState<PortalOrder[]>([]);
   const [portalSyncing, setPortalSyncing] = useState(false);
   const [menuStories, setMenuStories] = useState<MenuStory[]>([]);
   const [activeStory, setActiveStory] = useState<MenuStory | null>(null);
@@ -735,9 +703,9 @@ export default function PublicMenuClient({ tenantSlug, initialData }: PublicMenu
   const [customerIsCompany, setCustomerIsCompany] = useState(false);
   const [customerCompanyName, setCustomerCompanyName] = useState('');
   const [customerDocumentNumber, setCustomerDocumentNumber] = useState('');
-  const [customerLookupLoading, setCustomerLookupLoading] = useState(false);
-  const [customerLookupDone, setCustomerLookupDone] = useState(false);
-  const [customerLookupFound, setCustomerLookupFound] = useState(false);
+  const [, setCustomerLookupLoading] = useState(false);
+  const [, setCustomerLookupDone] = useState(false);
+  const [, setCustomerLookupFound] = useState(false);
   const [savedAddresses, setSavedAddresses] = useState<SavedAddress[]>([]);
   const [addressDeleteTarget, setAddressDeleteTarget] = useState<SavedAddress | null>(null);
   const [addressDeleteError, setAddressDeleteError] = useState<string | null>(null);
@@ -766,7 +734,7 @@ export default function PublicMenuClient({ tenantSlug, initialData }: PublicMenu
   const customerLookupPromiseRef = useRef<{
     tenantSlug: string;
     phone: string;
-    includeOrders: boolean;
+    name: string;
     promise: Promise<CustomerLookupResponse | null>;
   } | null>(null);
   const checkoutKeyRef = useRef('');
@@ -826,10 +794,8 @@ export default function PublicMenuClient({ tenantSlug, initialData }: PublicMenu
       email?: string | null;
       isCompany?: boolean;
       companyName?: string | null;
-      documentNumber?: string | null;
     } | null;
     addresses?: SavedAddress[];
-    orders?: PortalOrder[];
   }) => {
     if (!data.customer) return;
     const keepManualAddressDraft =
@@ -846,13 +812,10 @@ export default function PublicMenuClient({ tenantSlug, initialData }: PublicMenu
     setCustomerEmail(data.customer.email || '');
     setCustomerIsCompany(Boolean(data.customer.isCompany));
     setCustomerCompanyName(String(data.customer.companyName || ''));
-    setCustomerDocumentNumber(String(data.customer.documentNumber || ''));
+    setCustomerDocumentNumber('');
 
     const incomingAddresses = Array.isArray(data.addresses) ? data.addresses : [];
     setSavedAddresses(incomingAddresses);
-    if (Array.isArray(data.orders)) {
-      setPortalOrders(data.orders);
-    }
     if (keepManualAddressDraft) {
       addressEntryModeRef.current = 'new';
       selectedSavedAddressIdRef.current = '';
@@ -888,10 +851,8 @@ export default function PublicMenuClient({ tenantSlug, initialData }: PublicMenu
       email?: string | null;
       isCompany?: boolean;
       companyName?: string | null;
-      documentNumber?: string | null;
     } | null;
     addresses?: SavedAddress[];
-    orders?: PortalOrder[];
   }) => {
     if (!data.customer) return;
 
@@ -901,9 +862,6 @@ export default function PublicMenuClient({ tenantSlug, initialData }: PublicMenu
       phone: String(data.customer.phone || ''),
       email: data.customer.email || null,
     });
-    if (Array.isArray(data.orders)) {
-      setPortalOrders(data.orders);
-    }
     setSavedAddresses(Array.isArray(data.addresses) ? data.addresses : []);
 
     if (addressEntryModeRef.current === 'saved') {
@@ -929,19 +887,20 @@ export default function PublicMenuClient({ tenantSlug, initialData }: PublicMenu
   const syncPortalByPhone = useCallback(async (
     rawPhone: string,
     preserveAddressState = false,
-    options: { includeOrders?: boolean } = {},
+    options: { name?: string } = {},
   ) => {
     if (!tenantSlug) return null;
     const requestTenantSlug = tenantSlug;
     const digits = normalizePhone(rawPhone);
-    if (digits.length < 10) return null;
-    const includeOrders = Boolean(options.includeOrders);
+    const lookupName = String(options.name ?? customerName).trim();
+    const lookupNameKey = normalizeLookupNameInput(lookupName);
+    if (digits.length < 10 || lookupNameKey.replace(/\s/g, '').length < 2) return null;
     const cached = customerLookupCacheRef.current;
     if (
       cached
       && cached.tenantSlug === requestTenantSlug
       && cached.phone === digits
-      && (!includeOrders || cached.includeOrders || !cached.data?.found)
+      && cached.name === lookupNameKey
       && Date.now() - cached.loadedAt < CUSTOMER_LOOKUP_CACHE_MS
     ) {
       const data = cached.data;
@@ -961,13 +920,12 @@ export default function PublicMenuClient({ tenantSlug, initialData }: PublicMenu
       inflight
       && inflight.tenantSlug === requestTenantSlug
       && inflight.phone === digits
-      && (!includeOrders || inflight.includeOrders)
+      && inflight.name === lookupNameKey
         ? inflight.promise
         : (() => {
             const promise = (async () => {
               try {
-                const params = new URLSearchParams({ phone: digits });
-                if (!includeOrders) params.set('includeOrders', 'false');
+                const params = new URLSearchParams({ phone: digits, name: lookupName });
                 const { response, data } = await requestJson<CustomerLookupResponse>(
                   `/api/public/customer/${requestTenantSlug}?${params.toString()}`,
                   { cache: 'no-store', retries: 1 },
@@ -979,7 +937,7 @@ export default function PublicMenuClient({ tenantSlug, initialData }: PublicMenu
                 customerLookupCacheRef.current = {
                   tenantSlug: requestTenantSlug,
                   phone: digits,
-                  includeOrders,
+                  name: lookupNameKey,
                   loadedAt: Date.now(),
                   data: result,
                 };
@@ -989,7 +947,7 @@ export default function PublicMenuClient({ tenantSlug, initialData }: PublicMenu
                   customerLookupPromiseRef.current
                   && customerLookupPromiseRef.current.tenantSlug === requestTenantSlug
                   && customerLookupPromiseRef.current.phone === digits
-                  && customerLookupPromiseRef.current.includeOrders === includeOrders
+                  && customerLookupPromiseRef.current.name === lookupNameKey
                 ) {
                   customerLookupPromiseRef.current = null;
                 }
@@ -998,7 +956,7 @@ export default function PublicMenuClient({ tenantSlug, initialData }: PublicMenu
             customerLookupPromiseRef.current = {
               tenantSlug: requestTenantSlug,
               phone: digits,
-              includeOrders,
+              name: lookupNameKey,
               promise,
             };
             return promise;
@@ -1019,7 +977,7 @@ export default function PublicMenuClient({ tenantSlug, initialData }: PublicMenu
       applyKnownCustomer(data);
     }
     return data;
-  }, [tenantSlug, applyKnownCustomer, mergeKnownCustomer]);
+  }, [tenantSlug, customerName, applyKnownCustomer, mergeKnownCustomer]);
 
   function openAddressDeleteConfirm(address: SavedAddress) {
     if (deletingAddressId) return;
@@ -1036,8 +994,13 @@ export default function PublicMenuClient({ tenantSlug, initialData }: PublicMenu
   async function deleteSavedAddress(address: SavedAddress) {
     if (!tenantSlug || deletingAddressId) return;
     const phoneDigits = normalizePhone(customerPhone || portalCustomer?.phone || '');
+    const lookupName = String(customerName || portalCustomer?.name || '').trim();
     if (phoneDigits.length < 10) {
       setAddressDeleteError('Informe o celular do cliente antes de remover o endereco.');
+      return;
+    }
+    if (!lookupName) {
+      setAddressDeleteError('Informe o nome do cliente antes de remover o endereco.');
       return;
     }
 
@@ -1053,6 +1016,7 @@ export default function PublicMenuClient({ tenantSlug, initialData }: PublicMenu
         retries: 0,
         body: JSON.stringify({
           phone: phoneDigits,
+          name: lookupName,
           addressId: address.id,
         }),
       });
@@ -1067,9 +1031,6 @@ export default function PublicMenuClient({ tenantSlug, initialData }: PublicMenu
       const nextAddresses = Array.isArray(data.addresses) ? data.addresses : [];
       setSavedAddresses(nextAddresses);
       savedAddressesRef.current = nextAddresses;
-      if (Array.isArray(data.orders)) {
-        setPortalOrders(data.orders);
-      }
       if (data.customer) {
         setPortalCustomer({
           id: String(data.customer.id || ''),
@@ -1081,7 +1042,7 @@ export default function PublicMenuClient({ tenantSlug, initialData }: PublicMenu
       customerLookupCacheRef.current = {
         tenantSlug,
         phone: phoneDigits,
-        includeOrders: true,
+        name: normalizeLookupNameInput(lookupName),
         loadedAt: Date.now(),
         data: {
           ...data,
@@ -1126,13 +1087,14 @@ export default function PublicMenuClient({ tenantSlug, initialData }: PublicMenu
     const phoneDigits = normalizePhone(String(input?.phone ?? customerPhone).trim());
     const email = String(input?.email ?? customerEmail).trim();
 
-    if (!name || phoneDigits.length < 10) {
+    if (normalizeLookupNameInput(name).replace(/\s/g, '').length < 2 || phoneDigits.length < 10) {
       return null;
     }
 
     setPortalSaving(true);
     try {
       const { response, data } = await requestJson<{
+        found?: boolean;
         customer?: {
           id?: string;
           name?: string;
@@ -1140,10 +1102,8 @@ export default function PublicMenuClient({ tenantSlug, initialData }: PublicMenu
           email?: string | null;
           isCompany?: boolean;
           companyName?: string | null;
-          documentNumber?: string | null;
         } | null;
         addresses?: SavedAddress[];
-        orders?: PortalOrder[];
         error?: string;
       }>(`/api/public/customer/${tenantSlug}`, {
         method: 'POST',
@@ -1161,19 +1121,19 @@ export default function PublicMenuClient({ tenantSlug, initialData }: PublicMenu
         throw new Error(data?.error || 'Falha ao entrar.');
       }
 
+      const result = data?.found ? data : null;
       customerLookupCacheRef.current = {
         tenantSlug,
         phone: phoneDigits,
-        includeOrders: true,
+        name: normalizeLookupNameInput(name),
         loadedAt: Date.now(),
-        data: {
-          ...data,
-          found: true,
-        },
+        data: result,
       };
-      applyKnownCustomer(data);
       setCustomerLookupDone(true);
-      setCustomerLookupFound(true);
+      setCustomerLookupFound(Boolean(result?.customer));
+      if (result?.customer) {
+        applyKnownCustomer(result);
+      }
       return data;
     } finally {
       setPortalSaving(false);
@@ -1184,28 +1144,68 @@ export default function PublicMenuClient({ tenantSlug, initialData }: PublicMenu
     if (!tenantSlug || portalSaving) return;
     setPortalError(null);
     const phoneDigits = normalizePhone(portalPhoneInput);
+    const portalName = portalNameInput.trim();
     if (phoneDigits.length < 10) {
       setPortalError('Informe um celular valido.');
       return;
     }
+    if (normalizeLookupNameInput(portalName).replace(/\s/g, '').length < 2) {
+      setPortalError('Informe seu nome para entrar ou cadastrar.');
+      return;
+    }
 
     try {
-      if (!portalNameInput.trim()) {
-        const existingPortal = await syncPortalByPhone(phoneDigits, false, { includeOrders: true });
-        if (!existingPortal) {
-          setPortalError('Cadastro nao encontrado. Informe seu nome para criar o portal agora.');
-          return;
-        }
-      } else {
-        await ensurePortalCustomer({
-          name: portalNameInput.trim(),
-          phone: phoneDigits,
-        });
-      }
+      await ensurePortalCustomer({
+        name: portalName,
+        phone: phoneDigits,
+      });
       setPortalOpen(false);
       setActiveTopTab('portal');
     } catch (error) {
       setPortalError(error instanceof Error ? error.message : 'Falha ao entrar.');
+    }
+  }
+
+  function openCustomerIdentityModal() {
+    setIdentityNameInput(customerName || portalCustomer?.name || '');
+    setIdentityPhoneInput(customerPhone || (portalCustomer?.phone ? maskPhone(portalCustomer.phone) : ''));
+    setCustomerIdentityError(null);
+    setCustomerIdentityOpen(true);
+  }
+
+  function closeCustomerIdentityModal() {
+    if (portalSaving) return;
+    setCustomerIdentityOpen(false);
+    setCustomerIdentityError(null);
+  }
+
+  async function confirmCustomerIdentity() {
+    if (!tenantSlug || portalSaving) return;
+    const name = identityNameInput.trim();
+    const phoneDigits = normalizePhone(identityPhoneInput);
+
+    if (normalizeLookupNameInput(name).replace(/\s/g, '').length < 2) {
+      setCustomerIdentityError('Informe seu nome.');
+      return;
+    }
+    if (phoneDigits.length < 10) {
+      setCustomerIdentityError('Informe um celular valido.');
+      return;
+    }
+
+    setCustomerIdentityError(null);
+    setCustomerName(name);
+    setCustomerPhone(maskPhone(phoneDigits));
+    try {
+      await ensurePortalCustomer({
+        name,
+        phone: phoneDigits,
+      });
+      setCustomerIdentityOpen(false);
+      setCheckoutOpen(true);
+      setCheckoutStep('address');
+    } catch (error) {
+      setCustomerIdentityError(error instanceof Error ? error.message : 'Nao foi possivel confirmar seus dados agora.');
     }
   }
 
@@ -1361,10 +1361,13 @@ export default function PublicMenuClient({ tenantSlug, initialData }: PublicMenu
     if (!tenantSlug) return;
     const emptyState = createEmptyPortalCustomerState();
     setPortalCustomer(emptyState.portalCustomer);
-    setPortalOrders(emptyState.portalOrders);
     setPortalSyncing(false);
     setPortalNameInput(emptyState.portalNameInput);
     setPortalPhoneInput(emptyState.portalPhoneInput);
+    setIdentityNameInput('');
+    setIdentityPhoneInput('');
+    setCustomerIdentityOpen(false);
+    setCustomerIdentityError(null);
     setCustomerName(emptyState.customerName);
     setCustomerPhone(emptyState.customerPhone);
     setCustomerEmail(emptyState.customerEmail);
@@ -1417,12 +1420,12 @@ export default function PublicMenuClient({ tenantSlug, initialData }: PublicMenu
   }, [tenantSlug, portalCustomer]);
 
   useEffect(() => {
-    if (!portalCustomer?.phone || !tenantSlug) {
-      setPortalOrders([]);
+    if (!portalCustomer?.phone || !portalCustomer?.name || !tenantSlug) {
       setPortalSyncing(false);
       return;
     }
     const portalPhone = portalCustomer.phone;
+    const portalName = portalCustomer.name;
 
     let active = true;
     async function refreshPortal() {
@@ -1430,7 +1433,7 @@ export default function PublicMenuClient({ tenantSlug, initialData }: PublicMenu
       if (typeof document !== 'undefined' && document.hidden) return;
       setPortalSyncing(true);
       try {
-        await syncPortalByPhone(portalPhone, true, { includeOrders: true });
+        await syncPortalByPhone(portalPhone, true, { name: portalName });
       } catch {
         // Mantem a sessao local do portal mesmo se a atualizacao falhar.
       } finally {
@@ -1454,12 +1457,14 @@ export default function PublicMenuClient({ tenantSlug, initialData }: PublicMenu
       document.removeEventListener('visibilitychange', onVisibilityChange);
       clearInterval(interval);
     };
-  }, [portalCustomer?.phone, tenantSlug, syncPortalByPhone]);
+  }, [portalCustomer?.phone, portalCustomer?.name, tenantSlug, syncPortalByPhone]);
 
   useEffect(() => {
     if (!tenantSlug) return;
     const digits = normalizePhone(customerPhone);
-    if (digits.length < 10) {
+    const lookupName = customerName.trim();
+    const lookupNameKey = normalizeLookupNameInput(lookupName);
+    if (digits.length < 10 || lookupNameKey.replace(/\s/g, '').length < 2) {
       const keepManualAddressDraft = addressEntryModeRef.current === 'new' && hasManualAddressDraft(addressFormRef.current);
       setCustomerLookupDone(false);
       setCustomerLookupFound(false);
@@ -1481,6 +1486,8 @@ export default function PublicMenuClient({ tenantSlug, initialData }: PublicMenu
     let active = true;
     const requestTenantSlug = tenantSlug;
     const requestDigits = digits;
+    const requestName = lookupName;
+    const requestNameKey = lookupNameKey;
     setCustomerLookupDone(false);
     setCustomerLookupFound(false);
     const timeout = setTimeout(async () => {
@@ -1489,8 +1496,13 @@ export default function PublicMenuClient({ tenantSlug, initialData }: PublicMenu
       setCustomerLookupFound(false);
       setCustomerLookupLoading(true);
       try {
-        const data = await syncPortalByPhone(requestDigits);
-        if (!active || tenantSlugRef.current !== requestTenantSlug || normalizePhone(customerPhone) !== requestDigits) {
+        const data = await syncPortalByPhone(requestDigits, false, { name: requestName });
+        if (
+          !active
+          || tenantSlugRef.current !== requestTenantSlug
+          || normalizePhone(customerPhone) !== requestDigits
+          || normalizeLookupNameInput(customerName) !== requestNameKey
+        ) {
           return;
         }
         if (!data?.found) {
@@ -1525,11 +1537,17 @@ export default function PublicMenuClient({ tenantSlug, initialData }: PublicMenu
       active = false;
       clearTimeout(timeout);
     };
-  }, [tenantSlug, customerPhone, syncPortalByPhone]);
+  }, [tenantSlug, customerName, customerPhone, syncPortalByPhone]);
 
   const checkoutPhoneDigits = normalizePhone(customerPhone);
+  const checkoutNameKey = normalizeLookupNameInput(customerName);
   const portalCustomerMatchesCheckout = Boolean(
-    portalCustomer?.phone && checkoutPhoneDigits && normalizePhone(portalCustomer.phone) === checkoutPhoneDigits,
+    portalCustomer?.phone
+    && portalCustomer?.name
+    && checkoutPhoneDigits
+    && checkoutNameKey
+    && normalizePhone(portalCustomer.phone) === checkoutPhoneDigits
+    && normalizeLookupNameInput(portalCustomer.name) === checkoutNameKey,
   );
   const usingNewAddress = orderType === 'delivery' && (savedAddresses.length === 0 || addressEntryMode === 'new');
 
@@ -1914,7 +1932,6 @@ export default function PublicMenuClient({ tenantSlug, initialData }: PublicMenu
     .filter(Boolean)
     .join(' • ');
 
-  const latestPortalOrder = useMemo(() => portalOrders[0] || null, [portalOrders]);
   const requiredOptionPromptGroup = useMemo(() => {
     if (!customizeProduct || !requiredOptionPromptGroupId) return null;
     return customizeProduct.optionGroups.find((group) => group.id === requiredOptionPromptGroupId) || null;
@@ -2365,6 +2382,8 @@ export default function PublicMenuClient({ tenantSlug, initialData }: PublicMenu
     checkoutKeyRef.current = '';
     setCheckoutOpen(false);
     setCheckoutStep('cart');
+    setCustomerIdentityOpen(false);
+    setCustomerIdentityError(null);
     setSelectedPaymentMethodId('');
     setChangeFor('');
     setFormError(null);
@@ -2390,21 +2409,11 @@ export default function PublicMenuClient({ tenantSlug, initialData }: PublicMenu
     }
     if (checkoutStep === 'cart') {
       if (!cart.length) return setFormError('Seu carrinho esta vazio.');
-      if (portalCustomerMatchesCheckout && customerName.trim() && checkoutPhoneDigits.length >= 10) {
+      if (portalCustomerMatchesCheckout && checkoutNameKey.replace(/\s/g, '').length >= 2 && checkoutPhoneDigits.length >= 10) {
         return setCheckoutStep('address');
       }
-      return setCheckoutStep('customer');
-    }
-    if (checkoutStep === 'customer') {
-      if (!customerName.trim() || checkoutPhoneDigits.length < 10) return setFormError('Informe nome e celular valido.');
-      if (!portalCustomerMatchesCheckout || !customerLookupFound) {
-        try {
-          await ensurePortalCustomer();
-        } catch (error) {
-          return setFormError(error instanceof Error ? error.message : 'Nao foi possivel criar o cadastro do cliente agora.');
-        }
-      }
-      return setCheckoutStep('address');
+      openCustomerIdentityModal();
+      return;
     }
     if (checkoutStep === 'address') {
       if (orderType === 'delivery' && !effectiveDeliveryAddress.trim()) {
@@ -2628,7 +2637,7 @@ export default function PublicMenuClient({ tenantSlug, initialData }: PublicMenu
       });
 
       try {
-        const refreshedPortal = await syncPortalByPhone(customerPhone, true, { includeOrders: true });
+        const refreshedPortal = await syncPortalByPhone(customerPhone, true, { name: customerName });
         if (!refreshedPortal && !portalCustomer) {
           setPortalCustomer({
             id: normalizePhone(customerPhone),
@@ -2728,7 +2737,6 @@ export default function PublicMenuClient({ tenantSlug, initialData }: PublicMenu
                       onClick={() => {
                         setProfileMenuOpen(false);
                         setPortalCustomer(null);
-                        setPortalOrders([]);
                         setPortalNameInput('');
                         setPortalPhoneInput('');
                         setActiveTopTab('products');
@@ -2981,8 +2989,8 @@ export default function PublicMenuClient({ tenantSlug, initialData }: PublicMenu
                     <p className="mt-1 text-xl font-bold text-slate-900">{savedAddresses.length}</p>
                   </div>
                   <div className="rounded-xl bg-slate-50 p-3">
-                    <p className="text-slate-500">Pedidos</p>
-                    <p className="mt-1 text-xl font-bold text-slate-900">{portalOrders.length}</p>
+                    <p className="text-slate-500">Cadastro</p>
+                    <p className="mt-1 text-xl font-bold text-slate-900">Ativo</p>
                   </div>
                 </div>
                 <div className="mt-4 space-y-2">
@@ -3008,58 +3016,31 @@ export default function PublicMenuClient({ tenantSlug, initialData }: PublicMenu
                 <div className="bg-white border border-slate-200 rounded-2xl p-6 shadow-sm">
                   <div className="flex items-center justify-between gap-3">
                     <div>
-                      <p className="text-xs uppercase tracking-[0.18em] text-slate-400">Ultima atualizacao</p>
+                      <p className="text-xs uppercase tracking-[0.18em] text-slate-400">Enderecos salvos</p>
                       <h3 className="mt-1 text-lg font-bold text-slate-900">
-                        {latestPortalOrder ? `Pedido #${latestPortalOrder.id.slice(0, 8).toUpperCase()}` : 'Nenhum pedido ainda'}
+                        {savedAddresses.length > 0 ? `${savedAddresses.length} endereco${savedAddresses.length === 1 ? '' : 's'}` : 'Nenhum endereco salvo'}
                       </h3>
                     </div>
                     {portalSyncing ? <span className="text-xs font-semibold text-sky-600">Atualizando...</span> : null}
                   </div>
 
-                  {latestPortalOrder ? (
-                    <div className="mt-4 space-y-3">
-                      <span className={cn('inline-flex rounded-full border px-3 py-1 text-xs font-bold', orderStatusTone(latestPortalOrder.status))}>
-                        {orderStatusLabel(latestPortalOrder.status)}
-                      </span>
-                      <div className="grid gap-2 text-sm text-slate-600 md:grid-cols-2">
-                        <p><strong className="text-slate-900">Tipo:</strong> {orderTypeLabel(latestPortalOrder.type)}</p>
-                        <p><strong className="text-slate-900">Total:</strong> {brl(latestPortalOrder.total)}</p>
-                        <p><strong className="text-slate-900">Data:</strong> {formatBusinessDateTime(latestPortalOrder.createdAt)}</p>
-                        <p><strong className="text-slate-900">Pagamento:</strong> {formatPaymentMethodLabel(latestPortalOrder.paymentMethod)}</p>
-                      </div>
-                      {latestPortalOrder.deliveryAddress ? (
-                        <p className="text-sm text-slate-600">
-                          <strong className="text-slate-900">Endereco:</strong> {latestPortalOrder.deliveryAddress}
-                        </p>
-                      ) : null}
-                    </div>
-                  ) : (
-                    <p className="mt-3 text-sm text-slate-500">Assim que voce fizer o primeiro pedido, ele aparece aqui com o status atualizado.</p>
-                  )}
-                </div>
-
-                <div className="bg-white border border-slate-200 rounded-2xl p-6 shadow-sm">
-                  <h3 className="text-lg font-bold text-slate-900">Historico recente</h3>
-                  <p className="mt-1 text-sm text-slate-500">Seus ultimos pedidos neste cardapio.</p>
                   <div className="mt-4 space-y-3">
-                    {portalOrders.length === 0 ? (
-                      <p className="text-sm text-slate-500">Nenhum pedido encontrado ainda.</p>
+                    {savedAddresses.length === 0 ? (
+                      <p className="text-sm text-slate-500">Adicione um endereco no checkout para agilizar os proximos pedidos.</p>
                     ) : (
-                      portalOrders.map((order) => (
-                        <div key={order.id} className="rounded-xl border border-slate-200 p-4">
+                      savedAddresses.map((address) => (
+                        <div key={address.id} className="rounded-xl border border-slate-200 p-4">
                           <div className="flex flex-wrap items-center justify-between gap-3">
                             <div>
-                              <p className="font-bold text-slate-900">Pedido #{order.id.slice(0, 8).toUpperCase()}</p>
-                              <p className="text-xs text-slate-500">{formatBusinessDateTime(order.createdAt)}</p>
+                              <p className="font-bold text-slate-900">{address.label || 'Endereco salvo'}</p>
+                              <p className="mt-1 text-sm text-slate-600">{formatSavedAddress(address)}</p>
                             </div>
-                            <span className={cn('inline-flex rounded-full border px-3 py-1 text-xs font-bold', orderStatusTone(order.status))}>
-                              {orderStatusLabel(order.status)}
-                            </span>
+                            {address.isDefault ? (
+                              <span className="inline-flex rounded-full border border-emerald-200 bg-emerald-50 px-3 py-1 text-xs font-bold text-emerald-700">
+                                Principal
+                              </span>
+                            ) : null}
                           </div>
-                          <p className="mt-2 text-sm text-slate-600">
-                            <strong className="text-slate-900">Tipo:</strong> {orderTypeLabel(order.type)} | <strong className="text-slate-900">Total:</strong> {brl(order.total)}
-                          </p>
-                          {order.itemsSummary ? <p className="mt-2 text-sm text-slate-500">{order.itemsSummary}</p> : null}
                         </div>
                       ))
                     )}
@@ -3070,7 +3051,7 @@ export default function PublicMenuClient({ tenantSlug, initialData }: PublicMenu
           ) : (
             <div className="bg-white border border-slate-200 rounded-2xl p-6 shadow-sm text-sm text-slate-600">
               <p className="font-semibold text-slate-900 mb-2">Entre no seu portal</p>
-              <p>Informe nome e celular para recuperar seus enderecos e acompanhar seus pedidos.</p>
+              <p>Informe nome e celular para recuperar seus enderecos.</p>
               <button
                 onClick={() => setPortalOpen(true)}
                 className="mt-4 rounded-xl bg-rose-500 px-4 py-2 font-semibold text-white"
@@ -3135,10 +3116,7 @@ export default function PublicMenuClient({ tenantSlug, initialData }: PublicMenu
           <div className="max-w-md mx-auto bg-white rounded-2xl border border-slate-200 shadow-xl">
             <div className="p-4 border-b border-slate-200 flex items-center justify-between">
               <div>
-                <h3 className="font-bold text-slate-900">Entre ou Cadastre</h3>
-                <p className="text-xs text-slate-500">
-                  Se seu celular ja estiver cadastrado, entramos direto. Se ainda nao existir, basta informar o nome para criar agora.
-                </p>
+                <h3 className="font-bold text-slate-900">Insira seus dados</h3>
               </div>
               <button onClick={() => setPortalOpen(false)} className="p-2 rounded-lg hover:bg-slate-100">
                 <X className="w-4 h-4 text-slate-500" />
@@ -3169,7 +3147,7 @@ export default function PublicMenuClient({ tenantSlug, initialData }: PublicMenu
                 disabled={portalSaving}
                 className="w-full rounded-xl bg-rose-500 py-3 text-white font-bold disabled:opacity-60"
               >
-                {portalSaving ? 'Entrando...' : 'Entrar / Cadastrar'}
+                {portalSaving ? 'Confirmando...' : 'Confirmar'}
               </button>
             </div>
           </div>
@@ -3440,7 +3418,11 @@ export default function PublicMenuClient({ tenantSlug, initialData }: PublicMenu
                                 </span>
                               </div>
                             </div>
-                            <strong className="shrink-0 text-slate-900">+ {brl(option.priceAddition)}</strong>
+                            {option.priceAddition > 0 ? (
+                              <strong className="shrink-0 text-slate-900">+ {brl(option.priceAddition)}</strong>
+                            ) : (
+                              <strong className="shrink-0 text-xs font-semibold uppercase text-emerald-700">Incluso</strong>
+                            )}
                           </div>
                         </button>
                       );
@@ -3551,7 +3533,11 @@ export default function PublicMenuClient({ tenantSlug, initialData }: PublicMenu
                           </span>
                         </div>
                       </div>
-                      <strong className="shrink-0 text-slate-950">+ {brl(option.priceAddition)}</strong>
+                      {option.priceAddition > 0 ? (
+                        <strong className="shrink-0 text-slate-950">+ {brl(option.priceAddition)}</strong>
+                      ) : (
+                        <strong className="shrink-0 text-xs font-semibold uppercase text-emerald-700">Incluso</strong>
+                      )}
                     </div>
                   </button>
                 );
@@ -3816,55 +3802,6 @@ export default function PublicMenuClient({ tenantSlug, initialData }: PublicMenu
                       </div>
                     </article>
                   ))}
-                </section>
-              ) : null}
-
-              {checkoutStep === 'customer' ? (
-                <section className="space-y-3">
-                  <div>
-                    <label className="text-sm font-semibold text-slate-700">Celular</label>
-                    <div className="relative">
-                      <Phone className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
-                      <input
-                        value={customerPhone}
-                        onChange={(e) => setCustomerPhone(maskPhone(e.target.value))}
-                        className="w-full border border-slate-200 rounded-lg pl-9 pr-3 py-2 text-sm"
-                        placeholder="(00) 00000-0000"
-                      />
-                    </div>
-                    {customerLookupLoading ? (
-                      <p className="text-xs text-slate-500 mt-1">Buscando cadastro...</p>
-                    ) : customerLookupDone && customerLookupFound ? (
-                      <p className="text-xs text-emerald-600 mt-1">
-                        {savedAddresses.length > 0 ? 'Cliente encontrado com enderecos salvos.' : 'Cliente encontrado.'}
-                      </p>
-                    ) : customerLookupDone ? (
-                      <p className="text-xs text-sky-700 mt-1">
-                        Cliente novo. Informe o nome para criar o cadastro ao tocar em Proximo.
-                      </p>
-                    ) : null}
-                  </div>
-                  <div>
-                    <label className="text-sm font-semibold text-slate-700">Nome</label>
-                    <div className="relative">
-                      <User className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
-                      <input
-                        value={customerName}
-                        onChange={(e) => setCustomerName(e.target.value)}
-                        className="w-full border border-slate-200 rounded-lg pl-9 pr-3 py-2 text-sm"
-                        placeholder="Seu nome"
-                      />
-                    </div>
-                  </div>
-                  <div>
-                    <label className="text-sm font-semibold text-slate-700">E-mail (opcional)</label>
-                    <input
-                      value={customerEmail}
-                      onChange={(e) => setCustomerEmail(e.target.value)}
-                      className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm"
-                      placeholder="voce@email.com"
-                    />
-                  </div>
                 </section>
               ) : null}
 
@@ -4138,9 +4075,97 @@ export default function PublicMenuClient({ tenantSlug, initialData }: PublicMenu
                   </p>
                 ) : null}
                 {formError ? <p className="text-sm text-rose-600">{formError}</p> : null}
-                {checkoutStep === 'review' ? <button onClick={submitOrder} disabled={submitting} className="w-full py-3 rounded-xl bg-emerald-500 text-white font-bold disabled:opacity-60">{submitting ? 'Enviando pedido...' : 'Finalizar pedido'}</button> : <button onClick={goNextStep} disabled={portalSaving} className="w-full py-3 rounded-xl bg-rose-500 text-white font-bold disabled:opacity-60">{checkoutStep === 'customer' && portalSaving ? 'Salvando cliente...' : 'Proximo'}</button>}
+                {checkoutStep === 'review' ? <button onClick={submitOrder} disabled={submitting} className="w-full py-3 rounded-xl bg-emerald-500 text-white font-bold disabled:opacity-60">{submitting ? 'Enviando pedido...' : 'Finalizar pedido'}</button> : <button onClick={goNextStep} disabled={portalSaving} className="w-full py-3 rounded-xl bg-rose-500 text-white font-bold disabled:opacity-60">Proximo</button>}
               </div>
             ) : null}
+          </div>
+        </div>
+      ) : null}
+
+      {customerIdentityOpen ? (
+        <div className="fixed inset-0 z-[80] flex items-start justify-center bg-black/45 px-3 py-6 sm:items-center">
+          <div className="w-full max-w-lg overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl">
+            <div className="flex items-center justify-between border-b border-slate-100 px-5 py-4">
+              <div className="w-9">
+                <button
+                  type="button"
+                  onClick={closeCustomerIdentityModal}
+                  disabled={portalSaving}
+                  className="grid h-9 w-9 place-items-center rounded-lg text-slate-500 transition hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-50"
+                  aria-label="Voltar"
+                >
+                  <ArrowLeft className="h-4 w-4" />
+                </button>
+              </div>
+              <h3 className="text-center text-base font-black text-slate-950">Insira seus dados</h3>
+              <div className="flex w-9 justify-end">
+                <button
+                  type="button"
+                  onClick={closeCustomerIdentityModal}
+                  disabled={portalSaving}
+                  className="grid h-9 w-9 place-items-center rounded-lg text-slate-500 transition hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-50"
+                  aria-label="Fechar"
+                >
+                  <X className="h-4 w-4" />
+                </button>
+              </div>
+            </div>
+
+            <div className="space-y-4 px-5 py-5">
+              <div>
+                <label className="text-sm font-bold text-slate-700">Nome</label>
+                <div className="relative mt-1">
+                  <User className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+                  <input
+                    value={identityNameInput}
+                    onChange={(event) => setIdentityNameInput(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === 'Enter') {
+                        event.preventDefault();
+                        void confirmCustomerIdentity();
+                      }
+                    }}
+                    className="h-12 w-full rounded-lg border border-slate-200 pl-10 pr-3 text-sm font-semibold text-slate-900 outline-none transition placeholder:text-slate-400 focus:border-rose-300 focus:ring-4 focus:ring-rose-100"
+                    placeholder="Seu nome"
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="text-sm font-bold text-slate-700">Celular</label>
+                <div className="relative mt-1">
+                  <Phone className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+                  <input
+                    value={identityPhoneInput}
+                    onChange={(event) => setIdentityPhoneInput(maskPhone(event.target.value))}
+                    onKeyDown={(event) => {
+                      if (event.key === 'Enter') {
+                        event.preventDefault();
+                        void confirmCustomerIdentity();
+                      }
+                    }}
+                    className="h-12 w-full rounded-lg border border-slate-200 pl-10 pr-3 text-sm font-semibold text-slate-900 outline-none transition placeholder:text-slate-400 focus:border-rose-300 focus:ring-4 focus:ring-rose-100"
+                    placeholder="(00) 00000-0000"
+                    inputMode="tel"
+                  />
+                </div>
+              </div>
+
+              {customerIdentityError ? (
+                <p className="rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-sm font-semibold text-rose-700">
+                  {customerIdentityError}
+                </p>
+              ) : null}
+
+              <button
+                type="button"
+                onClick={() => void confirmCustomerIdentity()}
+                disabled={portalSaving}
+                className="h-12 w-full rounded-lg bg-slate-950 text-sm font-black text-white transition hover:bg-slate-800 disabled:cursor-wait disabled:opacity-60"
+              >
+                {portalSaving ? 'Confirmando...' : 'Confirmar'}
+              </button>
+            </div>
           </div>
         </div>
       ) : null}

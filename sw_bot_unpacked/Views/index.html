@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="pt-br">
+
+<head>
+    <meta charset="utf-8" />
+    <meta content='True' name='HandheldFriendly' />
+    <meta content='width=device-width; initial-scale=1.0; maximum-scale=1.0; user-scalable=0;' name='viewport' />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="description" content="" />
+    <meta name="author" content="" />
+    <meta name="mobile-web-app-capable" content="yes">
+
+    <title>Sistemas na Web - Gestão de Restaurantes</title>
+    <!--begin::Global Stylesheets Bundle(used by all pages)-->
+    <link href="../lib/Metronic/plugins/global/plugins.bundle.css" rel="stylesheet" type="text/css" />
+    <link href="../lib/Metronic/css/style.bundle.css" rel="stylesheet" type="text/css" />
+    <script>
+        onload = () => {
+          const webview = document.querySelector('webview')
+          const indicator = document.querySelector('.indicator')
+      
+          const loadstart = () => {
+            indicator.innerText = 'loading...'
+          }
+      
+          const loadstop = () => {
+            indicator.innerText = ''
+          }
+      
+          webview.addEventListener('did-start-loading', loadstart)
+          webview.addEventListener('did-stop-loading', loadstop)
+        }
+      </script>
+</head>
+
+<body data-kt-name="metronic" class="app-blank" cz-shortcut-listen="true" style="padding-right: 0px;">
+    <div class="d-flex flex-column flex-root">
+        <!--begin::Page-->
+        <div class="page d-flex flex-row flex-column-fluid">
+            <!--begin::Aside-->
+            <div class="aside aside-dark aside-hoverable" style="z-index: 1000; width: 70px !important;">
+     
+            </div>
+            <!--end::Aside-->
+            <!--begin::Wrapper-->
+            <div class="wrapper d-flex flex-column flex-row-fluid" id="kt_wrapper">                
+                <div class="content d-flex flex-column flex-column-fluid p-0" id="kt_content">
+
+                    <webview id="foo" src="https://sistemasnaweb.com.br/Login" style="width: 100%; height: 100%;"></webview>
+
+
+
+                </div>
+
+            </div>
+            <!--end::Wrapper-->
+        </div>
+        <!--end::Page-->
+    </div>
+
+    <script src="../lib/Metronic/js/scripts.bundle.js"></script>
+</body>
+
+</html>

@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { NextResponse } from 'next/server';
 import { query } from '@/lib/db';
+import { checkRateLimit } from '@/lib/rate-limit';
 
 type TenantRow = {
   id: string;
@@ -14,7 +15,6 @@ type CustomerRow = {
   email: string | null;
   is_company: boolean;
   company_name: string | null;
-  document_number: string | null;
 };
 
 type AddressRow = {
@@ -31,16 +31,23 @@ type AddressRow = {
   is_default: boolean;
 };
 
-type OrderRow = {
+type AddressDeleteRow = {
   id: string;
-  delivery_address: string | null;
-  total: string;
-  status: 'pending' | 'processing' | 'delivering' | 'completed' | 'cancelled';
-  type: 'delivery' | 'pickup' | 'table';
-  payment_method: string | null;
-  created_at: string;
-  items_summary: string | null;
+  was_default: boolean;
 };
+
+const NO_STORE_HEADERS = {
+  'cache-control': 'no-store',
+};
+
+class PublicCustomerRateLimitError extends Error {
+  retryAfterSeconds: number;
+
+  constructor(retryAfterSeconds: number) {
+    super('Muitas tentativas. Aguarde um pouco e tente novamente.');
+    this.retryAfterSeconds = retryAfterSeconds;
+  }
+}
 
 function normalizePhone(value: string) {
   let digits = value.replace(/\D/g, '');
@@ -51,6 +58,86 @@ function normalizePhone(value: string) {
     digits = digits.slice(2);
   }
   return digits.replace(/^0+/, '');
+}
+
+function normalizeLookupName(value: string) {
+  return value
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function isValidLookupName(value: string) {
+  return normalizeLookupName(value).replace(/\s/g, '').length >= 2;
+}
+
+function customerNameMatches(storedName: string, inputName: string) {
+  const stored = normalizeLookupName(storedName);
+  const input = normalizeLookupName(inputName);
+  if (!stored || !input || input.replace(/\s/g, '').length < 2) {
+    return false;
+  }
+  if (stored === input) {
+    return true;
+  }
+
+  const storedTokens = stored.split(' ').filter(Boolean);
+  const inputTokens = input.split(' ').filter(Boolean);
+  if (!storedTokens.length || !inputTokens.length) {
+    return false;
+  }
+
+  const firstTokenMatches = storedTokens[0] === inputTokens[0] || (inputTokens[0].length >= 3 && storedTokens[0].startsWith(inputTokens[0]));
+
+  if (inputTokens.length === 1) {
+    return firstTokenMatches;
+  }
+
+  if (!firstTokenMatches) {
+    return false;
+  }
+
+  return true;
+}
+
+function emptyLookupResponse() {
+  return {
+    found: false,
+    customer: null,
+    addresses: [],
+  };
+}
+
+function getClientIp(request: Request) {
+  return (
+    request.headers.get('x-real-ip')
+    || request.headers.get('cf-connecting-ip')
+    || request.headers.get('x-forwarded-for')?.split(',')[0]?.trim()
+    || 'unknown'
+  );
+}
+
+async function enforcePublicCustomerRateLimit(request: Request, tenantId: string, phone: string) {
+  const clientIp = getClientIp(request);
+  const [ipLimit, phoneLimit] = await Promise.all([
+    checkRateLimit({
+      key: `public-customer:${tenantId}:ip:${clientIp}`,
+      limit: 120,
+      windowSeconds: 60,
+    }),
+    checkRateLimit({
+      key: `public-customer:${tenantId}:phone:${phone}`,
+      limit: 30,
+      windowSeconds: 10 * 60,
+    }),
+  ]);
+
+  if (!ipLimit.allowed || !phoneLimit.allowed) {
+    throw new PublicCustomerRateLimitError(Math.max(ipLimit.retryAfterSeconds, phoneLimit.retryAfterSeconds));
+  }
 }
 
 async function getTenantBySlug(slug: string) {
@@ -67,26 +154,35 @@ async function getTenantBySlug(slug: string) {
   return tenantResult.rows[0];
 }
 
-async function loadCustomerAndAddresses(tenantId: string, phone: string, options?: { includeOrders?: boolean }) {
-  if (phone.length < 10) {
-    return { found: false, customer: null, addresses: [], orders: [] };
+async function findCustomerByPhoneAndName(tenantId: string, phone: string, name: string) {
+  if (phone.length < 10 || !isValidLookupName(name)) {
+    return null;
   }
-  const includeOrders = options?.includeOrders !== false;
+
+  const customerRows = await loadCustomersByPhone(tenantId, phone);
+  return customerRows.find((customer) => customerNameMatches(customer.name, name)) || null;
+}
+
+async function loadCustomersByPhone(tenantId: string, phone: string) {
   const customerResult = await query<CustomerRow>(
-    `SELECT id, name, phone, email, is_company, company_name, document_number
+    `SELECT id, name, phone, email, is_company, company_name
      FROM customers
      WHERE tenant_id = $1
        AND regexp_replace(phone, '\D', '', 'g') = $2
      ORDER BY created_at ASC
-     LIMIT 1`,
+     LIMIT 25`,
     [tenantId, phone],
   );
 
-  if (!customerResult.rowCount) {
-    return { found: false, customer: null, addresses: [], orders: [] };
+  return customerResult.rows;
+}
+
+async function loadCustomerAndAddresses(tenantId: string, phone: string, name: string) {
+  const customer = await findCustomerByPhoneAndName(tenantId, phone, name);
+  if (!customer) {
+    return emptyLookupResponse();
   }
 
-  const customer = customerResult.rows[0];
   const addressesResult = await query<AddressRow>(
     `SELECT id, label, street, number, complement, neighborhood, city, state, zip_code, reference, is_default
      FROM customer_addresses
@@ -97,42 +193,7 @@ async function loadCustomerAndAddresses(tenantId: string, phone: string, options
     [tenantId, customer.id],
   );
 
-  const orders = includeOrders
-    ? (
-        await query<OrderRow>(
-          `SELECT
-            o.id,
-            o.delivery_address,
-            o.total::text,
-            o.status,
-            o.type,
-            o.payment_method,
-            o.created_at,
-            COALESCE(
-              STRING_AGG(
-                (oi.quantity::text || 'x ' || COALESCE(p.name, 'Produto removido')),
-                ', '
-                ORDER BY oi.ctid
-              ),
-              ''
-            ) AS items_summary
-          FROM orders o
-          LEFT JOIN order_items oi
-            ON oi.order_id = o.id
-          LEFT JOIN products p
-            ON p.id = oi.product_id
-           AND p.tenant_id = o.tenant_id
-          WHERE o.tenant_id = $1
-            AND regexp_replace(o.customer_phone, '\D', '', 'g') = $2
-          GROUP BY o.id
-          ORDER BY o.created_at DESC
-          LIMIT 10`,
-          [tenantId, phone],
-        )
-      ).rows
-    : [];
-
-  const response = {
+  return {
     found: true,
     customer: {
       id: customer.id,
@@ -141,7 +202,6 @@ async function loadCustomerAndAddresses(tenantId: string, phone: string, options
       email: customer.email,
       isCompany: customer.is_company,
       companyName: customer.company_name,
-      documentNumber: customer.document_number,
     },
     addresses: addressesResult.rows.map((address) => ({
       id: address.id,
@@ -157,24 +217,19 @@ async function loadCustomerAndAddresses(tenantId: string, phone: string, options
       isDefault: address.is_default,
     })),
   };
+}
 
-  if (!includeOrders) {
-    return response;
-  }
-
-  return {
-    ...response,
-    orders: orders.map((order) => ({
-      id: order.id,
-      deliveryAddress: order.delivery_address || '',
-      total: Number(order.total || 0),
-      status: order.status,
-      type: order.type,
-      paymentMethod: order.payment_method || 'pix',
-      createdAt: order.created_at,
-      itemsSummary: order.items_summary || '',
-    })),
-  };
+function rateLimitResponse(error: PublicCustomerRateLimitError) {
+  return NextResponse.json(
+    { error: error.message },
+    {
+      status: 429,
+      headers: {
+        ...NO_STORE_HEADERS,
+        'retry-after': String(error.retryAfterSeconds),
+      },
+    },
+  );
 }
 
 export async function GET(request: Request, { params }: { params: Promise<{ slug: string }> }) {
@@ -182,21 +237,31 @@ export async function GET(request: Request, { params }: { params: Promise<{ slug
     const { slug } = await params;
     const { searchParams } = new URL(request.url);
     const phone = normalizePhone(String(searchParams.get('phone') || '').trim());
-    const includeOrders = searchParams.get('includeOrders') !== 'false';
+    const name = String(searchParams.get('name') || '').trim();
 
     const tenant = await getTenantBySlug(slug);
     if (!tenant) {
-      return NextResponse.json({ error: 'Empresa nao encontrada.' }, { status: 404 });
+      return NextResponse.json({ error: 'Empresa nao encontrada.' }, { status: 404, headers: NO_STORE_HEADERS });
     }
     if (tenant.status !== 'active') {
-      return NextResponse.json({ error: 'Empresa inativa.' }, { status: 403 });
+      return NextResponse.json({ error: 'Empresa inativa.' }, { status: 403, headers: NO_STORE_HEADERS });
     }
 
-    const result = await loadCustomerAndAddresses(tenant.id, phone, { includeOrders });
-    return NextResponse.json(result);
+    if (phone.length >= 10) {
+      await enforcePublicCustomerRateLimit(request, tenant.id, phone);
+    }
+    if (phone.length < 10 || !isValidLookupName(name)) {
+      return NextResponse.json(emptyLookupResponse(), { headers: NO_STORE_HEADERS });
+    }
+
+    const result = await loadCustomerAndAddresses(tenant.id, phone, name);
+    return NextResponse.json(result, { headers: NO_STORE_HEADERS });
   } catch (error) {
+    if (error instanceof PublicCustomerRateLimitError) {
+      return rateLimitResponse(error);
+    }
     console.error('[public-customer] failed to load customer', error);
-    return NextResponse.json({ error: 'Falha ao carregar cadastro.' }, { status: 500 });
+    return NextResponse.json({ error: 'Falha ao carregar cadastro.' }, { status: 500, headers: NO_STORE_HEADERS });
   }
 }
 
@@ -208,46 +273,42 @@ export async function POST(request: Request, { params }: { params: Promise<{ slu
     try {
       body = (await request.json()) as Record<string, unknown>;
     } catch {
-      return NextResponse.json({ error: 'Corpo da requisicao invalido.' }, { status: 400 });
+      return NextResponse.json({ error: 'Corpo da requisicao invalido.' }, { status: 400, headers: NO_STORE_HEADERS });
     }
 
     const name = String(body.name || '').trim();
     const phone = normalizePhone(String(body.phone || '').trim());
     const email = String(body.email || '').trim();
 
-    if (!name || phone.length < 10) {
-      return NextResponse.json({ error: 'Nome e celular validos sao obrigatorios.' }, { status: 400 });
+    if (!isValidLookupName(name) || phone.length < 10) {
+      return NextResponse.json({ error: 'Nome e celular validos sao obrigatorios.' }, { status: 400, headers: NO_STORE_HEADERS });
     }
 
     const tenant = await getTenantBySlug(slug);
     if (!tenant) {
-      return NextResponse.json({ error: 'Empresa nao encontrada.' }, { status: 404 });
+      return NextResponse.json({ error: 'Empresa nao encontrada.' }, { status: 404, headers: NO_STORE_HEADERS });
     }
     if (tenant.status !== 'active') {
-      return NextResponse.json({ error: 'Empresa inativa.' }, { status: 403 });
+      return NextResponse.json({ error: 'Empresa inativa.' }, { status: 403, headers: NO_STORE_HEADERS });
     }
 
-    const existingCustomerResult = await query<{ id: string }>(
-      `SELECT id
-       FROM customers
-       WHERE tenant_id = $1
-         AND regexp_replace(phone, '\D', '', 'g') = $2
-       ORDER BY created_at ASC
-       LIMIT 1`,
-      [tenant.id, phone],
-    );
+    await enforcePublicCustomerRateLimit(request, tenant.id, phone);
 
-    if (existingCustomerResult.rowCount) {
+    const phoneCustomers = await loadCustomersByPhone(tenant.id, phone);
+    const matchingCustomer = phoneCustomers.find((customer) => customerNameMatches(customer.name, name)) || null;
+    const existingPhoneCustomer = phoneCustomers[0] || null;
+    if (matchingCustomer) {
       await query(
         `UPDATE customers
-         SET name = $3,
-             phone = $4,
-             email = COALESCE(NULLIF($5, ''), email),
+         SET phone = $3,
+             email = COALESCE(NULLIF($4, ''), email),
              status = 'active'
          WHERE id = $1
            AND tenant_id = $2`,
-        [existingCustomerResult.rows[0].id, tenant.id, name, phone, email],
+        [matchingCustomer.id, tenant.id, phone, email],
       );
+    } else if (existingPhoneCustomer) {
+      return NextResponse.json(emptyLookupResponse(), { headers: NO_STORE_HEADERS });
     } else {
       await query(
         `INSERT INTO customers (id, tenant_id, name, phone, email, status)
@@ -256,11 +317,14 @@ export async function POST(request: Request, { params }: { params: Promise<{ slu
       );
     }
 
-    const result = await loadCustomerAndAddresses(tenant.id, phone, { includeOrders: true });
-    return NextResponse.json(result, { status: 201 });
+    const result = await loadCustomerAndAddresses(tenant.id, phone, name);
+    return NextResponse.json(result, { status: matchingCustomer ? 200 : 201, headers: NO_STORE_HEADERS });
   } catch (error) {
+    if (error instanceof PublicCustomerRateLimitError) {
+      return rateLimitResponse(error);
+    }
     console.error('[public-customer] failed to save customer', error);
-    return NextResponse.json({ error: 'Falha ao salvar cadastro.' }, { status: 500 });
+    return NextResponse.json({ error: 'Falha ao salvar cadastro.' }, { status: 500, headers: NO_STORE_HEADERS });
   }
 }
 
@@ -272,56 +336,60 @@ export async function DELETE(request: Request, { params }: { params: Promise<{ s
     try {
       body = (await request.json()) as Record<string, unknown>;
     } catch {
-      return NextResponse.json({ error: 'Corpo da requisicao invalido.' }, { status: 400 });
+      return NextResponse.json({ error: 'Corpo da requisicao invalido.' }, { status: 400, headers: NO_STORE_HEADERS });
     }
 
+    const name = String(body.name || '').trim();
     const phone = normalizePhone(String(body.phone || '').trim());
     const addressId = String(body.addressId || '').trim();
 
-    if (phone.length < 10 || !addressId) {
-      return NextResponse.json({ error: 'Celular e endereco validos sao obrigatorios.' }, { status: 400 });
+    if (phone.length < 10 || !addressId || !isValidLookupName(name)) {
+      return NextResponse.json({ error: 'Celular, nome e endereco validos sao obrigatorios.' }, { status: 400, headers: NO_STORE_HEADERS });
     }
 
     const tenant = await getTenantBySlug(slug);
     if (!tenant) {
-      return NextResponse.json({ error: 'Empresa nao encontrada.' }, { status: 404 });
+      return NextResponse.json({ error: 'Empresa nao encontrada.' }, { status: 404, headers: NO_STORE_HEADERS });
     }
     if (tenant.status !== 'active') {
-      return NextResponse.json({ error: 'Empresa inativa.' }, { status: 403 });
+      return NextResponse.json({ error: 'Empresa inativa.' }, { status: 403, headers: NO_STORE_HEADERS });
     }
 
-    const customerResult = await query<{ id: string }>(
-      `SELECT id
-       FROM customers
-       WHERE tenant_id = $1
-         AND regexp_replace(phone, '\D', '', 'g') = $2
-       ORDER BY created_at ASC
-       LIMIT 1`,
-      [tenant.id, phone],
-    );
+    await enforcePublicCustomerRateLimit(request, tenant.id, phone);
 
-    if (!customerResult.rowCount) {
-      return NextResponse.json({ error: 'Cliente nao encontrado.' }, { status: 404 });
+    const customer = await findCustomerByPhoneAndName(tenant.id, phone, name);
+    if (!customer) {
+      return NextResponse.json({ error: 'Cliente nao encontrado.' }, { status: 404, headers: NO_STORE_HEADERS });
     }
 
-    const customerId = customerResult.rows[0].id;
-    const deletedAddressResult = await query<{ id: string; is_default: boolean }>(
-      `UPDATE customer_addresses
-       SET active = FALSE,
-           is_default = FALSE
-       WHERE id = $1
-         AND tenant_id = $2
-         AND customer_id = $3
-         AND active = TRUE
-       RETURNING id, is_default`,
-      [addressId, tenant.id, customerId],
+    const deletedAddressResult = await query<AddressDeleteRow>(
+      `WITH target AS (
+         SELECT id, is_default
+         FROM customer_addresses
+         WHERE id = $1
+           AND tenant_id = $2
+           AND customer_id = $3
+           AND active = TRUE
+         LIMIT 1
+       ),
+       updated AS (
+         UPDATE customer_addresses address
+         SET active = FALSE,
+             is_default = FALSE
+         FROM target
+         WHERE address.id = target.id
+         RETURNING address.id, target.is_default AS was_default
+       )
+       SELECT id, was_default
+       FROM updated`,
+      [addressId, tenant.id, customer.id],
     );
 
     if (!deletedAddressResult.rowCount) {
-      return NextResponse.json({ error: 'Endereco nao encontrado.' }, { status: 404 });
+      return NextResponse.json({ error: 'Endereco nao encontrado.' }, { status: 404, headers: NO_STORE_HEADERS });
     }
 
-    if (deletedAddressResult.rows[0].is_default) {
+    if (deletedAddressResult.rows[0].was_default) {
       await query(
         `UPDATE customer_addresses
          SET is_default = TRUE
@@ -334,14 +402,17 @@ export async function DELETE(request: Request, { params }: { params: Promise<{ s
            ORDER BY created_at DESC
            LIMIT 1
          )`,
-        [tenant.id, customerId],
+        [tenant.id, customer.id],
       );
     }
 
-    const result = await loadCustomerAndAddresses(tenant.id, phone, { includeOrders: true });
-    return NextResponse.json(result);
+    const result = await loadCustomerAndAddresses(tenant.id, phone, name);
+    return NextResponse.json(result, { headers: NO_STORE_HEADERS });
   } catch (error) {
+    if (error instanceof PublicCustomerRateLimitError) {
+      return rateLimitResponse(error);
+    }
     console.error('[public-customer] failed to delete address', error);
-    return NextResponse.json({ error: 'Falha ao remover endereco.' }, { status: 500 });
+    return NextResponse.json({ error: 'Falha ao remover endereco.' }, { status: 500, headers: NO_STORE_HEADERS });
   }
 }

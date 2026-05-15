@@ -72,6 +72,9 @@ function normalizeText(text) {
   return String(text || '')
     .replace(/\r\n/g, '\n')
     .replace(/\r/g, '\n')
+    .split('\n')
+    .map(line => '  ' + line) // Add left margin
+    .join('\n')
     .replace(/\u00a0/g, ' ')
     .trimEnd();
 }
@@ -199,10 +202,57 @@ $bytes = [System.IO.File]::ReadAllBytes($dataFile)
   }
 }
 
+let rawJobQueue = [];
+let rawJobTimer = null;
+
+async function flushRawQueue() {
+  if (rawJobQueue.length === 0) return;
+  const jobs = [...rawJobQueue];
+  rawJobQueue = [];
+  rawJobTimer = null;
+
+  const jobsByPrinter = {};
+  for (const job of jobs) {
+    const pName = job.printerName || 'default';
+    if (!jobsByPrinter[pName]) jobsByPrinter[pName] = [];
+    jobsByPrinter[pName].push(job);
+  }
+
+  for (const [pName, printerJobs] of Object.entries(jobsByPrinter)) {
+    try {
+      const buffers = [];
+      const actualPrinterName = pName === 'default' ? '' : pName;
+      
+      for (let i = 0; i < printerJobs.length; i++) {
+        buffers.push(printerJobs[i].payload);
+        if (i < printerJobs.length - 1) {
+          buffers.push(Buffer.from([0x1d, 0x56, 0x42, 0x00])); // Insert cut between separate jobs
+        }
+      }
+      
+      const combinedPayload = Buffer.concat(buffers);
+      const result = await sendRawBufferWindows(combinedPayload, actualPrinterName, 'Faceburg Hub Batch');
+      
+      for (const j of printerJobs) {
+        j.resolve({ strategy: 'raw', printerName: result.printerName });
+      }
+    } catch (err) {
+      for (const j of printerJobs) {
+        j.reject(err);
+      }
+    }
+  }
+}
+
 async function printRawWindows(text, printerName) {
-  const payload = buildRawPayload(text);
-  const result = await sendRawBufferWindows(payload, printerName, 'Faceburg Hub');
-  return { strategy: 'raw', printerName: result.printerName };
+  return new Promise((resolve, reject) => {
+    const payload = buildRawPayload(text);
+    rawJobQueue.push({ payload, printerName, resolve, reject });
+    
+    if (!rawJobTimer) {
+      rawJobTimer = setTimeout(flushRawQueue, 800); // 800ms debounce window
+    }
+  });
 }
 
 async function sendCutCommandWindows(printerName) {

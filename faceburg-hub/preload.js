@@ -52,6 +52,12 @@ contextBridge.exposeInMainWorld('hub', {
   onWhatsAppState: (cb) => subscribe('whatsapp:state', cb),
   onPrintState: (cb) => subscribe('print:state', cb),
   onAgentLog: (cb) => subscribe('agent:log', cb),
+  
+  // Updates and formatting
+  onSystemUpdateAvailable: (cb) => subscribe('system:update-available', cb),
+  onSystemUpdateProgress: (cb) => subscribe('system:update-progress', cb),
+  onSystemUpdateDownloaded: (cb) => subscribe('system:update-downloaded', cb),
+  numeroPorExtenso: (payload) => ipcRenderer.invoke('hub:numero-por-extenso', payload),
 });
 
 contextBridge.exposeInMainWorld('faceburgDesktop', {

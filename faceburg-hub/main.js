@@ -4,6 +4,9 @@ const { fork, execFile } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
 const QRCode = require('qrcode');
+const { autoUpdater } = require('electron-updater');
+const electronLocalshortcut = require('electron-localshortcut');
+const numeroPorExtenso = require('numero-por-extenso');
 const { printTextWindows, sendCutCommandWindows } = require('./agents/native-printer');
 
 /* ─── constants ──────────────────────────────────────────────── */
@@ -38,6 +41,7 @@ let tray = null;
 let trayIcon = null;
 let forceQuit = false;
 let trayHintShown = false;
+let isSystemShutdown = false;
 
 let whatsWorker = null;
 let printWorker = null;
@@ -58,6 +62,7 @@ let logs = [];
 let systemSessionSyncPromise = null;
 let workerRequestSeq = 0;
 const pendingWorkerRequests = new Map();
+let settingsCache = null;
 
 const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) app.quit();
@@ -125,6 +130,7 @@ function migrateDefaultServerUrl(settings) {
 }
 
 function readSettings() {
+  if (settingsCache) return { ...settingsCache };
   try {
     const f = settingsFilePath();
     if (!fs.existsSync(f)) return { ...DEFAULT_SETTINGS };
@@ -133,10 +139,12 @@ function readSettings() {
       raw.passwordEncrypted
         ? decryptPassword(String(raw.passwordEncrypted))
         : String(raw.password || '');
-    return migrateDefaultServerUrl({
+    const result = migrateDefaultServerUrl({
       ...raw,
       password,
     });
+    settingsCache = result;
+    return { ...result };
   } catch {
     return { ...DEFAULT_SETTINGS };
   }
@@ -152,6 +160,7 @@ function saveSettings(s) {
   }
   delete serializable.password;
   fs.writeFileSync(settingsFilePath(), JSON.stringify(serializable, null, 2), 'utf8');
+  settingsCache = { ...s };
 }
 
 function persistLastSystemUrl(url) {
@@ -480,6 +489,11 @@ async function refreshAgentCredentialsIfPossible() {
   }
 
   if (!current.slug || !current.email || !current.password) {
+    // On cold boot, there's no web session yet; skip if we already have agent keys.
+    if (current.whatsAgentKey || current.printAgentKey) {
+      pushLog('system', 'Usando credenciais de agentes ja salvas (cold boot).');
+      return current;
+    }
     try {
       const synced = await refreshAgentCredentialsFromSystemSession({ silent: true });
       return synced.settings;
@@ -489,26 +503,27 @@ async function refreshAgentCredentialsIfPossible() {
   }
 
   try {
-    const printLogin = await fetchJson(`${current.serverUrl}/api/print/agent/login`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({
-        slug: current.slug,
-        email: current.email,
-        password: current.password,
-        printerName: current.printerName || '',
+    const [printLogin, whatsLogin] = await Promise.all([
+      fetchJson(`${current.serverUrl}/api/print/agent/login`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          slug: current.slug,
+          email: current.email,
+          password: current.password,
+          printerName: current.printerName || '',
+        }),
       }),
-    });
-
-    const whatsLogin = await fetchJson(`${current.serverUrl}/api/whatsapp/agent/login`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({
-        slug: current.slug,
-        email: current.email,
-        password: current.password,
+      fetchJson(`${current.serverUrl}/api/whatsapp/agent/login`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          slug: current.slug,
+          email: current.email,
+          password: current.password,
+        }),
       }),
-    });
+    ]);
 
     const next = {
       ...current,
@@ -527,40 +542,51 @@ async function refreshAgentCredentialsIfPossible() {
 }
 
 async function syncAutoStartAgents() {
-  let saved = await refreshAgentCredentialsIfPossible();
-  saved = readSettings();
-  if (!saved.serverUrl) return;
+  const startedAt = Date.now();
+  const STARTUP_WARN_MS = 10000;
+  const warnTimer = setTimeout(() => {
+    pushLog('system', 'Startup dos agentes ainda em andamento...');
+  }, STARTUP_WARN_MS);
 
-  if (saved.autoStartWhatsApp && saved.whatsAgentKey) {
-    const enabled = await checkServerAgentEnabled(saved.serverUrl, saved.whatsAgentKey, 'whatsapp');
-    if (enabled) {
-      try {
-        await startWhatsAppWorker();
-      } catch (err) {
-        pushLog('system', `Falha auto-start WhatsApp: ${err.message || err}`);
+  try {
+    const saved = await refreshAgentCredentialsIfPossible();
+    if (!saved.serverUrl) return;
+
+    if (saved.autoStartWhatsApp && saved.whatsAgentKey) {
+      const enabled = await checkServerAgentEnabled(saved.serverUrl, saved.whatsAgentKey, 'whatsapp');
+      if (enabled) {
+        try {
+          await startWhatsAppWorker();
+        } catch (err) {
+          pushLog('system', `Falha auto-start WhatsApp: ${err.message || err}`);
+        }
+      } else {
+        pushLog('system', 'WhatsApp desativado no sistema. Mantendo agente parado.');
+        stopWhatsAppWorker();
       }
     } else {
-      pushLog('system', 'WhatsApp desativado no sistema. Mantendo agente parado.');
       stopWhatsAppWorker();
     }
-  } else {
-    stopWhatsAppWorker();
-  }
 
-  if (saved.autoStartPrint && saved.printAgentKey) {
-    const enabled = await checkServerAgentEnabled(saved.serverUrl, saved.printAgentKey, 'print');
-    if (enabled) {
-      try {
-        await startPrintWorker();
-      } catch (err) {
-        pushLog('system', `Falha auto-start impressao: ${err.message || err}`);
+    if (saved.autoStartPrint && saved.printAgentKey) {
+      const enabled = await checkServerAgentEnabled(saved.serverUrl, saved.printAgentKey, 'print');
+      if (enabled) {
+        try {
+          await startPrintWorker();
+        } catch (err) {
+          pushLog('system', `Falha auto-start impressao: ${err.message || err}`);
+        }
+      } else {
+        pushLog('system', 'Impressao desativada no sistema. Mantendo agente parado.');
+        stopPrintWorker();
       }
     } else {
-      pushLog('system', 'Impressao desativada no sistema. Mantendo agente parado.');
       stopPrintWorker();
     }
-  } else {
-    stopPrintWorker();
+  } finally {
+    clearTimeout(warnTimer);
+    const elapsed = Date.now() - startedAt;
+    pushLog('system', `Startup dos agentes concluido em ${Math.round(elapsed / 1000)}s.`);
   }
 }
 
@@ -760,11 +786,9 @@ function stopWhatsAppWorker(options = {}) {
     }
     return;
   }
-  if (ref) {
-    try {
-      ref.send({ type: 'shutdown' });
-    } catch {}
-  }
+  try {
+    ref.send({ type: 'shutdown' });
+  } catch {}
   setTimeout(() => {
     if (ref && whatsWorker === ref && !ref.killed) {
       try { ref.kill('SIGTERM'); } catch {}
@@ -874,11 +898,9 @@ function stopPrintWorker(options = {}) {
     }
     return;
   }
-  if (ref) {
-    try {
-      ref.send({ type: 'shutdown' });
-    } catch {}
-  }
+  try {
+    ref.send({ type: 'shutdown' });
+  } catch {}
   setTimeout(() => {
     if (ref && printWorker === ref && !ref.killed) {
       try { ref.kill('SIGTERM'); } catch {}
@@ -1227,13 +1249,39 @@ function createMainWindow(preferredUrl = '') {
     }
   });
 
-  mainWindow.on('minimize', (event) => {
-    event.preventDefault();
-    mainWindow.hide();
-    mainWindow.setSkipTaskbar(true);
-  });
-
   mainWindow.on('closed', () => { mainWindow = null; });
+
+  electronLocalshortcut.register(mainWindow, 'F5', () => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.reload();
+    }
+  });
+}
+
+function initAutoUpdater() {
+  autoUpdater.on('update-available', () => {
+    pushLog('system', 'Nova atualizacao disponivel. Baixando...');
+    emit('system:update-available', {});
+  });
+  autoUpdater.on('download-progress', (progress) => {
+    emit('system:update-progress', progress);
+  });
+  autoUpdater.on('update-downloaded', () => {
+    pushLog('system', 'Atualizacao baixada. O app sera reiniciado em breve.');
+    emit('system:update-downloaded', {});
+    setTimeout(() => {
+      forceQuit = true;
+      stopAllAgents();
+      setTimeout(() => autoUpdater.quitAndInstall(false, true), 1000);
+    }, 5000);
+  });
+  
+  setTimeout(() => {
+    autoUpdater.checkForUpdatesAndNotify().catch(() => {});
+  }, 10000);
+  setInterval(() => {
+    autoUpdater.checkForUpdatesAndNotify().catch(() => {});
+  }, 4 * 60 * 60 * 1000);
 }
 
 /* ─── IPC handlers ───────────────────────────────────────────── */
@@ -1377,6 +1425,16 @@ ipcMain.handle('hub:open-system', async (_ev, payload) => {
   return { ok: true };
 });
 
+ipcMain.handle('hub:numero-por-extenso', (_ev, payload) => {
+  try {
+    const parsed = Number(String(payload).replace(',', '.'));
+    if (!Number.isFinite(parsed)) return String(payload);
+    return numeroPorExtenso.porExtenso(parsed);
+  } catch {
+    return String(payload);
+  }
+});
+
 ipcMain.handle('hub:sync-system-session', async () => {
   try {
     const synced = await syncAgentCredentialsFromSystemSessionOnce();
@@ -1437,6 +1495,9 @@ app.whenReady().then(async () => {
   // Auto-start agents if logged in
   void syncAutoStartAgents();
 
+  // Initialize auto-updater
+  initAutoUpdater();
+
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {
       createMainWindow();
@@ -1451,11 +1512,24 @@ app.on('second-instance', () => showMainWindow());
 app.on('window-all-closed', () => { /* mantém na bandeja */ });
 
 app.on('before-quit', (event) => {
-  if (!forceQuit) {
-    event.preventDefault();
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.hide();
-      mainWindow.setSkipTaskbar(true);
-    }
+  if (forceQuit) return;
+
+  // Detect system shutdown / logoff: if the window is not visible,
+  // the user triggered quit from outside (e.g. system shutdown).
+  // Also, Electron sets app.isQuitting internally on some paths.
+  const windowHidden = !mainWindow || mainWindow.isDestroyed() || !mainWindow.isVisible();
+  if (windowHidden) {
+    // System shutdown — do graceful cleanup and let the app exit.
+    isSystemShutdown = true;
+    forceQuit = true;
+    stopAllAgents();
+    return;
+  }
+
+  // User closed the window — just hide to tray.
+  event.preventDefault();
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.hide();
+    mainWindow.setSkipTaskbar(true);
   }
 });

@@ -9,6 +9,7 @@ const path = require('node:path');
 const WebSocket = require('ws');
 const QRCode = require('qrcode');
 const { Client, LocalAuth } = require('whatsapp-web.js');
+const { processMessage } = require('./nlp-manager');
 
 const SERVER_URL = String(process.env.HUB_SERVER_URL || process.env.WHATS_SERVER_URL || 'https://faceburg.vercel.app').replace(/\/$/, '');
 const AGENT_KEY = String(process.env.HUB_AGENT_KEY || process.env.WHATS_AGENT_KEY || '');
@@ -17,10 +18,6 @@ const ENABLE_REALTIME = ['1', 'true', 'yes', 'y', 'on'].includes(
   String(process.env.HUB_ENABLE_REALTIME || process.env.WHATS_ENABLE_REALTIME || '').trim().toLowerCase(),
 );
 
-const WS_RECONNECT_BASE_MS = Number(process.env.HUB_WHATS_WS_RECONNECT_MS || process.env.WHATS_WS_RECONNECT_MS || 3000);
-const WS_RECONNECT_MAX_MS = Number(process.env.HUB_WHATS_WS_RECONNECT_MAX_MS || process.env.WHATS_WS_RECONNECT_MAX_MS || 60000);
-const WS_LOG_COOLDOWN_MS = Number(process.env.HUB_WHATS_WS_LOG_COOLDOWN_MS || process.env.WHATS_WS_LOG_COOLDOWN_MS || 60000);
-const HEARTBEAT_MS = Number(process.env.HUB_WHATS_HEARTBEAT_MS || process.env.WHATS_HEARTBEAT_MS || 60000);
 const INIT_TIMEOUT_MS = 120000;
 const RESTART_DELAY_MS = 5000;
 const WATCHDOG_INTERVAL_MS = 30000;
@@ -35,18 +32,9 @@ let restartTimer = null;
 let startingClient = false;
 let shuttingDown = false;
 let lastQrAt = 0;
-let ws = null;
-let wsConnected = false;
-let wsReconnectTimer = null;
-let heartbeatTimer = null;
 let lastErrorMessage = '';
 let lockServer = null;
 let watchdogTimer = null;
-let wsReconnectAttempt = 0;
-let wsLastLogAt = 0;
-let wsLastErrorReason = '';
-let wsFallbackActive = false;
-let wsConnectedOnce = false;
 let lastAuthenticatedLogAt = 0;
 let lastStateLabel = '';
 
@@ -62,7 +50,7 @@ function sendLog(text) {
 
 function updateState(patch = {}) {
   sendState({
-    realtimeConnected: wsConnected,
+    realtimeConnected: false, // Legacy format
     ...patch,
   });
 }
@@ -134,46 +122,7 @@ function getBrowserPath() {
   return '';
 }
 
-function formatRetryDelay(ms) {
-  return `${Math.max(1, Math.round(ms / 1000))}s`;
-}
 
-function getWsReconnectDelay() {
-  const attempt = Math.max(0, wsReconnectAttempt - 1);
-  return Math.min(WS_RECONNECT_MAX_MS, WS_RECONNECT_BASE_MS * (2 ** attempt));
-}
-
-function shouldLogWsFallback() {
-  return !wsLastLogAt || Date.now() - wsLastLogAt >= WS_LOG_COOLDOWN_MS;
-}
-
-function announceWsDisconnect(reason, delayMs) {
-  const safeReason = String(reason || 'gateway indisponivel').trim();
-  if (!wsFallbackActive) {
-    wsFallbackActive = true;
-    wsLastLogAt = Date.now();
-    sendLog(`Realtime indisponivel (${safeReason}). Nova tentativa em ${formatRetryDelay(delayMs)}.`);
-    return;
-  }
-
-  if (shouldLogWsFallback()) {
-    wsLastLogAt = Date.now();
-    sendLog(`Realtime ainda indisponivel (${safeReason}). Tentando novamente em ${formatRetryDelay(delayMs)}.`);
-  }
-}
-
-function markWsConnected() {
-  const recoveredFromFallback = wsFallbackActive || !wsConnectedOnce;
-  wsConnected = true;
-  wsReconnectAttempt = 0;
-  wsLastErrorReason = '';
-  wsFallbackActive = false;
-  updateState();
-  if (recoveredFromFallback) {
-    sendLog('Realtime conectado (direct-v1).');
-  }
-  wsConnectedOnce = true;
-}
 
 function getCurrentPhoneNumber() {
   return String(client?.info?.wid?.user || '');
@@ -287,140 +236,7 @@ function bindBrowserDiagnostics(nextClient) {
   }
 }
 
-/* ─── realtime websocket (direct-v1) ─────────────────────────────── */
 
-function sendWsJson(payload) {
-  if (!ws || ws.readyState !== WebSocket.OPEN) return false;
-  ws.send(JSON.stringify(payload));
-  return true;
-}
-
-function sendWsAgentState(state) {
-  sendWsJson({
-    type: 'agent_state',
-    state: {
-      sessionStatus: state.sessionStatus || 'disconnected',
-      qrCode: state.qrCode || '',
-      phoneNumber: state.phoneNumber || '',
-      deviceName: os.hostname(),
-      appVersion: '1.0.0',
-      lastError: state.lastError || '',
-    },
-  });
-}
-
-function sendWsJobAck(jobId, success, errorMessage) {
-  sendWsJson({
-    type: 'job_ack',
-    jobId,
-    success,
-    error: errorMessage || '',
-  });
-}
-
-async function handleDirectJob(job) {
-  if (!job?.id) return;
-  const jobId = String(job.id);
-  try {
-    await sendDirectWhatsappMessage(job);
-    sendWsJobAck(jobId, true, '');
-    sendLog(`Job ${jobId} enviado com sucesso.`);
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : 'Falha';
-    sendWsJobAck(jobId, false, msg);
-    sendLog(`Falha job ${jobId}: ${msg}`);
-  }
-}
-
-function buildWsUrl() {
-  const parsed = new URL(SERVER_URL);
-  const proto = parsed.protocol === 'https:' ? 'wss:' : 'ws:';
-  const port = String(process.env.REALTIME_WS_PORT || process.env.REALTIME_GATEWAY_PORT || '3001').trim();
-  const host = `${parsed.hostname}:${port}`;
-  return `${proto}//${host}/ws/agents`;
-}
-
-function scheduleWsReconnect(reason = '') {
-  if (wsReconnectTimer || shuttingDown) return;
-  wsReconnectAttempt += 1;
-  const delayMs = getWsReconnectDelay();
-  announceWsDisconnect(reason, delayMs);
-  wsReconnectTimer = setTimeout(() => { wsReconnectTimer = null; connectRealtime(); }, delayMs);
-}
-
-function connectRealtime() {
-  if (!AGENT_KEY || shuttingDown) return;
-  const url = `${buildWsUrl()}?kind=whatsapp&protocol=${DIRECT_PROTOCOL}`;
-  let opened = false;
-  try {
-    ws = new WebSocket(url, {
-      headers: {
-        'x-agent-key': AGENT_KEY,
-        'x-agent-protocol': DIRECT_PROTOCOL,
-      },
-    });
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error || 'falha ao iniciar websocket');
-    wsConnected = false;
-    updateState();
-    scheduleWsReconnect(message);
-    return;
-  }
-
-  ws.on('open', () => {
-    opened = true;
-    markWsConnected();
-    // Report current state so gateway knows if we're ready to receive jobs
-    const currentStatus = ready ? 'ready' : startingClient ? 'connecting' : 'disconnected';
-    sendWsAgentState({
-      sessionStatus: currentStatus,
-      qrCode: '',
-      phoneNumber: getCurrentPhoneNumber(),
-      lastError: lastErrorMessage,
-    });
-  });
-
-  ws.on('message', (raw) => {
-    try {
-      const payload = JSON.parse(String(raw));
-      if (payload?.type === 'pong') return;
-
-      // direct-v1: gateway pushes jobs directly
-      if (payload?.type === 'job' && payload?.job) {
-        if (!ready || !client) {
-          // Not ready — nack the job so it goes back to the queue
-          sendWsJobAck(String(payload.job.id || ''), false, 'WhatsApp nao esta conectado.');
-          return;
-        }
-        void handleDirectJob(payload.job);
-        return;
-      }
-
-      if (payload?.type === 'connected') {
-        sendLog(`Gateway: protocolo ${payload.protocol || 'unknown'}, tenant ${payload.tenantId || '?'}.`);
-      }
-    } catch {}
-  });
-
-  ws.on('close', (code, reasonBuffer) => {
-    const closeReason = String(reasonBuffer || '').trim();
-    const failureReason =
-      wsLastErrorReason ||
-      closeReason ||
-      (opened ? `conexao encerrada (${code || 0})` : `nao foi possivel conectar (${code || 0})`);
-    wsLastErrorReason = '';
-    wsConnected = false;
-    updateState();
-    if (shuttingDown) return;
-    scheduleWsReconnect(failureReason);
-  });
-
-  ws.on('error', (error) => {
-    wsLastErrorReason = error instanceof Error ? error.message : String(error || 'erro websocket');
-    wsConnected = false;
-    updateState();
-  });
-}
 
 /* ─── whatsapp client ────────────────────────────────────────────── */
 
@@ -493,6 +309,18 @@ async function startClient(opts = {}) {
     bindBrowserDiagnostics(nextClient);
     updateState({ status: 'ready', qrCode: '', phoneNumber: phone, lastError: '' });
     void focusClientPage(nextClient);
+
+    // Block Blue Ticks (Seen)
+    if (nextClient.pupPage) {
+      try {
+        await nextClient.pupPage.evaluate(() => {
+          if (window.WWebJS) {
+            window.WWebJS.sendSeen = async () => false;
+          }
+        });
+      } catch (err) {}
+    }
+
     sendLog(`Conectado ao WhatsApp (${phone || 'sem numero'}).`);
     sendWsAgentState({ sessionStatus: 'ready', qrCode: '', phoneNumber: phone, lastError: '' });
   });
@@ -542,6 +370,19 @@ async function startClient(opts = {}) {
     }
   });
 
+  nextClient.on('message', async (msg) => {
+    try {
+      if (msg.from === 'status@broadcast' || msg.isGroupMsg) return;
+      if (msg.type !== 'chat') return;
+      
+      const autoReply = await processMessage(msg.body);
+      if (autoReply) {
+        sendLog(`NLP Auto-reply para ${msg.from}`);
+        await msg.reply(autoReply);
+      }
+    } catch (err) {}
+  });
+
   nextClient.on('auth_failure', async () => {
     ready = false;
     lastErrorMessage = 'auth_failure';
@@ -577,24 +418,7 @@ async function startClient(opts = {}) {
 
 async function main() {
   await acquireSingleInstanceLock();
-  sendLog(`Iniciado. Server: ${SERVER_URL}`);
-  if (ENABLE_REALTIME) {
-    connectRealtime();
-
-  // heartbeat — report state periodically via WebSocket
-  heartbeatTimer = setInterval(() => {
-    if (shuttingDown) return;
-    const s = ready ? 'ready' : startingClient ? 'connecting' : 'disconnected';
-    sendWsAgentState({
-      sessionStatus: s,
-      qrCode: '',
-      phoneNumber: String(client?.info?.wid?.user || ''),
-      lastError: lastErrorMessage,
-    });
-  }, HEARTBEAT_MS);
-  } else {
-    sendLog('Modo local ativo: aguardando comandos da tela aberta no hub.');
-  }
+  sendLog(`Iniciado em modo IPC Local (sem cloud-ws): aguardando comandos do hub.`);
 
   // initial client start with retries
   let ok = false;
@@ -630,10 +454,7 @@ async function shutdown() {
   shuttingDown = true;
   sendLog('Encerrando...');
   if (restartTimer) { clearTimeout(restartTimer); restartTimer = null; }
-  if (wsReconnectTimer) { clearTimeout(wsReconnectTimer); wsReconnectTimer = null; }
-  if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; }
   if (watchdogTimer) { clearInterval(watchdogTimer); watchdogTimer = null; }
-  if (ws) try { ws.close(); } catch {} 
   if (lockServer) {
     try { lockServer.close(); } catch {}
     lockServer = null;
