@@ -29,7 +29,10 @@ contextBridge.exposeInMainWorld('hub', {
 
   // Printer
   listPrinters: () => ipcRenderer.invoke('hub:list-printers'),
+  getAgentConfig: () => ipcRenderer.invoke('hub:get-agent-config'),
   updatePrinter: (payload) => ipcRenderer.invoke('hub:update-printer', payload),
+  updatePrintConfig: (payload) => ipcRenderer.invoke('hub:update-print-config', payload),
+  updateWhatsAppConfig: (payload) => ipcRenderer.invoke('hub:update-whatsapp-config', payload),
 
   // Individual agent controls
   startWhatsApp: () => ipcRenderer.invoke('hub:start-whatsapp'),
@@ -68,13 +71,17 @@ contextBridge.exposeInMainWorld('faceburgDesktop', {
       isDesktopApp: true,
       whatsRunning: Boolean(current?.whatsRunning),
       printRunning: Boolean(current?.printRunning),
+      hasLocalWhatsappSession: Boolean(current?.hasLocalWhatsappSession),
       whatsapp: current?.whatsState || null,
       print: current?.printState || null,
     };
   },
   syncSession: syncSystemSession,
   listPrinters: () => ipcRenderer.invoke('hub:list-printers'),
+  getAgentConfig: () => ipcRenderer.invoke('hub:get-agent-config'),
   updatePrinter: (payload) => ipcRenderer.invoke('hub:update-printer', payload),
+  updatePrintConfig: (payload) => ipcRenderer.invoke('hub:update-print-config', payload),
+  updateWhatsAppConfig: (payload) => ipcRenderer.invoke('hub:update-whatsapp-config', payload),
   startWhatsApp: () => ipcRenderer.invoke('hub:start-whatsapp'),
   stopWhatsApp: () => ipcRenderer.invoke('hub:stop-whatsapp'),
   restartWhatsApp: () => ipcRenderer.invoke('hub:restart-whatsapp'),

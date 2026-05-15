@@ -5,7 +5,7 @@ import { getValidatedDeliveryAccess, isActiveDeliveryAccess } from '@/lib/delive
 import { buildDeliveryDriverCode, buildDeliveryTrackingToken } from '@/lib/delivery-tracking';
 import { enqueueOrderPrintJob, prepareOrderPrintJobs } from '@/lib/printing';
 import { notifyOrderEvent } from '@/lib/realtime';
-import { enqueueOrderWhatsappJob, prepareOrderWhatsappJob } from '@/lib/whatsapp';
+import { enqueueOrderWhatsappJob, prepareOrderWhatsappJob, type OrderWhatsappEventType } from '@/lib/whatsapp';
 import { isCashPaymentType } from '@/lib/cash-summary';
 import { BUSINESS_CURRENT_DATE_SQL } from '@/lib/business-time';
 import { assignOrderSequenceNumber, ensureOrderSequenceSchema } from '@/lib/order-sequence';
@@ -103,6 +103,9 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
   }
   if (status === 'cancelled' && cancelReason.length < 3) {
     return NextResponse.json({ error: 'Motivo do cancelamento e obrigatorio.' }, { status: 400 });
+  }
+  if (status === 'cancelled' && cancelReason.length > 500) {
+    return NextResponse.json({ error: 'Motivo do cancelamento deve ter no maximo 500 caracteres.' }, { status: 400 });
   }
 
   const client = await pool.connect();
@@ -519,8 +522,10 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
       orderSequenceNumber = currentOrder.order_sequence_number;
     }
 
+    const whatsappEventType: OrderWhatsappEventType | null =
+      status === 'delivering' ? 'status_update' : status === 'cancelled' ? 'status_cancelled' : null;
     shouldQueuePrint = statusChanged && status === 'processing';
-    shouldQueueWhatsapp = statusChanged && status === 'delivering';
+    shouldQueueWhatsapp = statusChanged && Boolean(whatsappEventType);
     orderEventKind = status === 'cancelled' ? 'cancelled' : 'updated';
 
     await client.query('COMMIT');
@@ -537,8 +542,8 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
       if (queuePrint && !useLocalDispatch) {
         sideEffects.push(enqueueOrderPrintJob(tenantId, orderId, 'status_update'));
       }
-      if (queueWhatsapp && !useLocalDispatch) {
-        sideEffects.push(enqueueOrderWhatsappJob(tenantId, orderId, 'status_update'));
+      if (queueWhatsapp && !useLocalDispatch && whatsappEventType) {
+        sideEffects.push(enqueueOrderWhatsappJob(tenantId, orderId, whatsappEventType));
       }
       sideEffects.push(notifyOrderEvent(tenantId, eventKind, orderId));
       return Promise.allSettled(sideEffects).then(() => undefined);
@@ -569,9 +574,9 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
 
     if (queueWhatsapp) {
       try {
-        const whatsappJob = await prepareOrderWhatsappJob(tenantId, orderId, 'status_update', undefined, {
+        const whatsappJob = whatsappEventType ? await prepareOrderWhatsappJob(tenantId, orderId, whatsappEventType, undefined, {
           requireActiveHub: false,
-        });
+        }) : null;
         localDispatch.whatsappJobs = whatsappJob ? [whatsappJob] : [];
       } catch (error) {
         console.error('prepare local whatsapp dispatch failed', error);

@@ -20,6 +20,8 @@ tmp-whatsapp-products/
 tmp-sistemasnaweb-products/
 Conversa do WhatsApp*.zip
 tmp_*.js
+model.nlp
+tmp-test-artifacts/
 faceburg-hub/node_modules/
 faceburg-hub/dist/
 faceburg-hub/.wwebjs_cache/

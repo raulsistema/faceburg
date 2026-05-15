@@ -289,7 +289,7 @@ export default function PDVPage() {
   const [searchTerm, setSearchTerm] = useState('');
   const [activeCategory, setActiveCategory] = useState<string>('all');
   const [visibleProductLimit, setVisibleProductLimit] = useState(INITIAL_PDV_PRODUCT_RENDER_LIMIT);
-  const [saleMode, setSaleMode] = useState<SaleMode>('tab');
+  const [saleMode, setSaleMode] = useState<SaleMode>('quick');
   const [paymentMethods, setPaymentMethods] = useState<PaymentMethodOption[]>([]);
   const [checkoutPayments, setCheckoutPayments] = useState<CheckoutPaymentLine[]>([]);
   const [selectedTabId, setSelectedTabId] = useState('');

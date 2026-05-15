@@ -90,7 +90,12 @@ function customerNameMatches(storedName: string, inputName: string) {
     return false;
   }
 
-  const firstTokenMatches = storedTokens[0] === inputTokens[0] || (inputTokens[0].length >= 3 && storedTokens[0].startsWith(inputTokens[0]));
+  const storedFirstToken = storedTokens[0];
+  const inputFirstToken = inputTokens[0];
+  const firstTokenMatches =
+    storedFirstToken === inputFirstToken ||
+    (inputFirstToken.length >= 3 && storedFirstToken.startsWith(inputFirstToken)) ||
+    (storedFirstToken.length >= 3 && inputFirstToken.startsWith(storedFirstToken));
 
   if (inputTokens.length === 1) {
     return firstTokenMatches;

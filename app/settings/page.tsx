@@ -4,7 +4,7 @@ import { ensureOrderSequenceSchema } from '@/lib/order-sequence';
 import { ensureStoreHoursSchema, isMenuOpenNow } from '@/lib/store-hours';
 import { getValidatedTenantSession } from '@/lib/tenant-auth';
 import EmitenteSettings from './EmitenteSettings';
-import LazyLocalAgentSettings from './LazyLocalAgentSettings';
+import HubAutomationSettings from './HubAutomationSettings';
 import MenuHoursSettings from './MenuHoursSettings';
 import OrderSoundSettings from './OrderSoundSettings';
 import OrderSequenceSettings from './OrderSequenceSettings';
@@ -187,11 +187,8 @@ export default async function SettingsPage() {
         <EmitenteSettings initialData={emitenteInitialData} />
         <MenuHoursSettings initialData={menuHoursInitialData} />
         <OrderSoundSettings initialData={orderSoundInitialData} />
+        <HubAutomationSettings />
         <OrderSequenceSettings initialData={orderSequenceInitialData} />
-        <LazyLocalAgentSettings
-          tenantId={tenant?.id || ''}
-          tenantSlug={tenant?.slug || ''}
-        />
       </div>
     </DashboardShell>
   );

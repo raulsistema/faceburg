@@ -8,7 +8,9 @@ const PRINT_MODE = String(process.env.HUB_PRINT_MODE || process.env.PRINT_MODE |
 const RAW_ENCODING = String(process.env.HUB_PRINT_RAW_ENCODING || process.env.PRINT_RAW_ENCODING || 'cp860').trim().toLowerCase();
 const RAW_APPEND_CUT = !['0', 'false', 'no', 'off'].includes(String(process.env.HUB_PRINT_RAW_CUT || process.env.PRINT_RAW_CUT || 'false').trim().toLowerCase());
 const RAW_INIT_PRINTER = !['0', 'false', 'no', 'off'].includes(String(process.env.HUB_PRINT_RAW_INIT || process.env.PRINT_RAW_INIT || 'true').trim().toLowerCase());
-const CSS_CUT_MODE = String(process.env.HUB_PRINT_CSS_CUT || process.env.PRINT_CSS_CUT || 'auto').trim().toLowerCase();
+// Windows visual printing should let the printer driver handle paper cutting.
+// Sending an extra RAW cut here makes many thermal printers fire the cutter twice.
+const CSS_CUT_MODE = String(process.env.HUB_PRINT_CSS_CUT || process.env.PRINT_CSS_CUT || 'driver').trim().toLowerCase();
 const POWERSHELL_TIMEOUT_MS = Number(process.env.HUB_PRINT_TIMEOUT_MS || process.env.PRINT_TIMEOUT_MS || 45000);
 
 const THERMAL_PRINTER_HINTS = [
@@ -261,15 +263,15 @@ async function sendCutCommandWindows(printerName) {
     throw new Error('Nenhuma impressora configurada para corte RAW.');
   }
 
-  const forced = ['1', 'true', 'yes', 'y', 'on', 'always'].includes(CSS_CUT_MODE);
-  const disabled = ['0', 'false', 'no', 'off', 'never'].includes(CSS_CUT_MODE);
+  const forced = ['1', 'true', 'yes', 'y', 'on', 'always', 'raw'].includes(CSS_CUT_MODE);
+  const disabled = ['0', 'false', 'no', 'off', 'never', 'driver', 'windows', 'none'].includes(CSS_CUT_MODE);
   const shouldCut = forced || (!disabled && isThermalPrinter(effectivePrinterName));
   if (!shouldCut) {
     return {
       strategy: 'raw-command',
       printerName: effectivePrinterName,
       skipped: true,
-      reason: 'printer-not-thermal',
+      reason: disabled ? 'driver-managed' : 'printer-not-thermal',
     };
   }
 

@@ -5,6 +5,39 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.resolve(scriptDir, '..');
 const serverPath = path.join(rootDir, '.next', 'standalone', 'server.js');
+const standaloneDir = path.dirname(serverPath);
+
+function readTextIfExists(filePath) {
+  if (!fs.existsSync(filePath)) return '';
+  return fs.readFileSync(filePath, 'utf8').trim();
+}
+
+function copyDirIfExists(sourceDir, targetDir) {
+  if (!fs.existsSync(sourceDir)) return;
+  fs.rmSync(targetDir, { recursive: true, force: true });
+  fs.mkdirSync(path.dirname(targetDir), { recursive: true });
+  fs.cpSync(sourceDir, targetDir, { recursive: true });
+}
+
+function syncStandaloneAssets() {
+  const sourceBuildIdPath = path.join(rootDir, '.next', 'BUILD_ID');
+  const markerPath = path.join(standaloneDir, '.faceburg-static-build-id');
+  const sourceBuildId = readTextIfExists(sourceBuildIdPath);
+  const copiedBuildId = readTextIfExists(markerPath);
+  const sourceStaticDir = path.join(rootDir, '.next', 'static');
+  const standaloneStaticDir = path.join(standaloneDir, '.next', 'static');
+  const sourcePublicDir = path.join(rootDir, 'public');
+  const standalonePublicDir = path.join(standaloneDir, 'public');
+
+  if (sourceBuildId && sourceBuildId !== copiedBuildId) {
+    copyDirIfExists(sourceStaticDir, standaloneStaticDir);
+    fs.writeFileSync(markerPath, sourceBuildId);
+  }
+
+  if (fs.existsSync(sourcePublicDir) && !fs.existsSync(standalonePublicDir)) {
+    fs.cpSync(sourcePublicDir, standalonePublicDir, { recursive: true });
+  }
+}
 
 function stripInlineComment(value) {
   let inSingleQuote = false;
@@ -62,4 +95,6 @@ if (!fs.existsSync(serverPath)) {
   throw new Error('Standalone server not found. Run npm run build before npm start.');
 }
 
+syncStandaloneAssets();
+process.chdir(standaloneDir);
 await import(pathToFileURL(serverPath).href);

@@ -224,11 +224,11 @@ export default function DashboardShell({
         <div className="min-h-0 flex-1 overflow-y-auto p-6">{children}</div>
         <footer className="h-12 bg-white border-t border-slate-200 flex items-center justify-between px-6 text-xs text-slate-400 shrink-0">
           <div>
-            Tenant: <strong className="text-slate-700">{data?.tenant?.slug || 'n/a'}</strong>
+            Empresa: <strong className="text-slate-700">{data?.tenant?.slug || 'n/a'}</strong>
           </div>
           <div className="flex gap-6">
             <span>Suporte: (11) 96491-1550</span>
-            <span className="font-mono">v1.3.0-SaaS</span>
+            <span className="font-mono">v1.3.0</span>
           </div>
         </footer>
       </main>

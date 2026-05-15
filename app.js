@@ -9,6 +9,14 @@ var Executando = true, StatusImpressao = true;
 
 var countSuporte = 0;
 
+function getGoogleMapsApiKey() {
+  const key = String(process.env.GOOGLE_MAPS_SERVER_KEY || process.env.NEXT_PUBLIC_GOOGLE_MAPS_BROWSER_KEY || '').trim();
+  if (!key) {
+    throw new Error('GOOGLE_MAPS_SERVER_KEY nao configurada.');
+  }
+  return encodeURIComponent(key);
+}
+
 var numerosPorExtenso = [];
 const { Configuration, OpenAIApi } = require("openai");
 const WebSocket = require('ws');
@@ -850,7 +858,7 @@ try {
                     await Teste3(found, client, message, Administrador);
                   }
                 } else {
-                  var Url = `https://maps.googleapis.com/maps/api/geocode/json?latlng=${message.location.latitude},${message.location.longitude}&key=AIzaSyDTeohdHJlLUGblpiEh1bjYZmqvsCCX_eo`;
+                  var Url = `https://maps.googleapis.com/maps/api/geocode/json?latlng=${message.location.latitude},${message.location.longitude}&key=${getGoogleMapsApiKey()}`;
 
                   const response = await fetch(Url);
                   const data = await response.json();
@@ -4180,7 +4188,7 @@ function obterDelayAleatorio() {
 
       if (Fretes != null && Fretes.length > 0) {
         if (Op == 0) {
-          var Url = 'https://maps.googleapis.com/maps/api/distancematrix/json?origins=@ORIGEM&destinations=@DESTINO&units=imperial&key=AIzaSyDTeohdHJlLUGblpiEh1bjYZmqvsCCX_eo';
+          var Url = `https://maps.googleapis.com/maps/api/distancematrix/json?origins=@ORIGEM&destinations=@DESTINO&units=imperial&key=${getGoogleMapsApiKey()}`;
 
           Url = Url.replace('@ORIGEM', Origem);
           Url = Url.replace('@DESTINO', Destino);

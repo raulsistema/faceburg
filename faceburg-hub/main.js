@@ -2,6 +2,7 @@
 const { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage, safeStorage, shell, session } = require('electron');
 const { fork, execFile } = require('node:child_process');
 const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
 const QRCode = require('qrcode');
 const { autoUpdater } = require('electron-updater');
@@ -11,8 +12,10 @@ const { printTextWindows, sendCutCommandWindows } = require('./agents/native-pri
 
 /* ─── constants ──────────────────────────────────────────────── */
 
+const DEFAULT_SERVER_URL = 'https://faceburg.vercel.app';
+
 const DEFAULT_SETTINGS = {
-  serverUrl: 'https://faceburg.vercel.app',
+  serverUrl: DEFAULT_SERVER_URL,
   slug: '',
   email: '',
   password: '',
@@ -47,10 +50,13 @@ let whatsWorker = null;
 let printWorker = null;
 let whatsWorkerRestartTimer = null;
 let printWorkerRestartTimer = null;
+let whatsStateSyncTimer = null;
 let whatsStopRequested = false;
 let printStopRequested = false;
 let whatsRestartRequested = false;
 let printRestartRequested = false;
+let whatsStartupProbeActive = false;
+let whatsStartupProbeBlocked = false;
 let whatsRestartDelayMs = 1500;
 let printRestartDelayMs = 1500;
 let whatsRestartReason = 'reinicio solicitado pelo hub';
@@ -60,6 +66,7 @@ let whatsState = { status: 'stopped', qrCode: '', phoneNumber: '', lastError: ''
 let printState = { status: 'stopped', lastError: '', lastJobAt: '' };
 let logs = [];
 let systemSessionSyncPromise = null;
+let systemLoadSyncTimer = null;
 let workerRequestSeq = 0;
 const pendingWorkerRequests = new Map();
 let settingsCache = null;
@@ -205,6 +212,36 @@ function getPreferredSystemUrl(preferredUrl = '') {
   return getSafeSystemUrl(preferredUrl || settings.lastSystemUrl, serverUrl);
 }
 
+function getWhatsAppRuntimeDir() {
+  const localAppData = String(process.env.LOCALAPPDATA || '').trim();
+  if (localAppData) return path.join(localAppData, 'Faceburg', 'whatsapp-agent');
+  return path.join(app.getPath('home'), '.faceburg', 'whatsapp-agent');
+}
+
+function getWhatsAppClientId(settings = readSettings()) {
+  const slug = String(settings.slug || '').trim().toLowerCase();
+  const agentKey = String(settings.whatsAgentKey || '');
+  if (slug) return slug;
+  if (!agentKey) return '';
+  return `tenant-${agentKey.slice(3, 11)}`;
+}
+
+function getWhatsAppAuthSessionDir(settings = readSettings()) {
+  const clientId = getWhatsAppClientId(settings);
+  if (!clientId) return '';
+  return path.join(getWhatsAppRuntimeDir(), 'auth', `session-${clientId}`);
+}
+
+function hasWhatsAppLocalSession(settings = readSettings()) {
+  const sessionDir = getWhatsAppAuthSessionDir(settings);
+  if (!sessionDir) return false;
+  try {
+    return fs.existsSync(sessionDir) && fs.readdirSync(sessionDir).length > 0;
+  } catch {
+    return false;
+  }
+}
+
 function isAllowedSystemUrl(url, allowedOrigin) {
   if (!url) return false;
   if (url === 'about:blank') return true;
@@ -213,6 +250,14 @@ function isAllowedSystemUrl(url, allowedOrigin) {
   } catch {
     return false;
   }
+}
+
+function scheduleSystemLoadAgentSync() {
+  if (systemLoadSyncTimer) clearTimeout(systemLoadSyncTimer);
+  systemLoadSyncTimer = setTimeout(() => {
+    systemLoadSyncTimer = null;
+    void syncAutoStartAgents();
+  }, 1500);
 }
 
 function bindMainWindowNavigation(targetUrl) {
@@ -246,6 +291,7 @@ function bindMainWindowNavigation(targetUrl) {
     const currentUrl = mainWindow?.webContents.getURL();
     if (!currentUrl || currentUrl === 'about:blank') return;
     persistLastSystemUrl(currentUrl);
+    scheduleSystemLoadAgentSync();
   });
 }
 
@@ -352,6 +398,50 @@ async function fetchJsonWithStatus(url, options = {}) {
     status: response.status,
     data,
   };
+}
+
+function normalizeWhatsAppSessionStatus(status) {
+  const value = String(status || 'disconnected').trim().toLowerCase();
+  return ['disconnected', 'qr', 'ready', 'auth_failure', 'connecting'].includes(value)
+    ? value
+    : 'disconnected';
+}
+
+async function syncWhatsAppStateToServer(state = {}) {
+  const settings = readSettings();
+  if (!settings.serverUrl || !settings.whatsAgentKey) return;
+
+  const sessionStatus = normalizeWhatsAppSessionStatus(state.status || state.sessionStatus);
+  await fetchJsonWithTimeout(`${settings.serverUrl}/api/whatsapp/agent/state`, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      'x-agent-key': settings.whatsAgentKey,
+      'cache-control': 'no-cache',
+    },
+    body: JSON.stringify({
+      sessionStatus,
+      qrCode: sessionStatus === 'qr' ? String(state.rawQrCode || '') : '',
+      phoneNumber: String(state.phoneNumber || ''),
+      deviceName: os.hostname(),
+      appVersion: app.getVersion(),
+      lastError: String(state.lastError || ''),
+    }),
+  }, 3500);
+}
+
+function clearWhatsAppStateSyncTimer() {
+  if (!whatsStateSyncTimer) return;
+  clearInterval(whatsStateSyncTimer);
+  whatsStateSyncTimer = null;
+}
+
+function startWhatsAppStateSyncHeartbeat() {
+  clearWhatsAppStateSyncTimer();
+  whatsStateSyncTimer = setInterval(() => {
+    if (!whatsWorker) return;
+    void syncWhatsAppStateToServer(whatsState).catch(() => {});
+  }, 60000);
 }
 
 function getSystemSession() {
@@ -552,20 +642,23 @@ async function syncAutoStartAgents() {
     const saved = await refreshAgentCredentialsIfPossible();
     if (!saved.serverUrl) return;
 
-    if (saved.autoStartWhatsApp && saved.whatsAgentKey) {
+    const hasSavedWhatsSession = hasWhatsAppLocalSession(saved);
+    const shouldStartWhatsApp = Boolean(saved.autoStartWhatsApp || (hasSavedWhatsSession && !whatsStartupProbeBlocked));
+
+    if (saved.whatsAgentKey) {
       const enabled = await checkServerAgentEnabled(saved.serverUrl, saved.whatsAgentKey, 'whatsapp');
-      if (enabled) {
+      if (enabled && shouldStartWhatsApp) {
         try {
-          await startWhatsAppWorker();
+          await startWhatsAppWorker({ startupProbe: !saved.autoStartWhatsApp });
         } catch (err) {
           pushLog('system', `Falha auto-start WhatsApp: ${err.message || err}`);
         }
-      } else {
+      } else if (!enabled) {
         pushLog('system', 'WhatsApp desativado no sistema. Mantendo agente parado.');
         stopWhatsAppWorker();
+      } else if (!whatsWorker && !hasSavedWhatsSession) {
+        pushLog('system', 'WhatsApp sem sessao local salva. Aguardando operador abrir no Hub.');
       }
-    } else {
-      stopWhatsAppWorker();
     }
 
     if (saved.autoStartPrint && saved.printAgentKey) {
@@ -609,8 +702,10 @@ function scheduleWhatsAppWorkerRestart(reason, delayMs = WORKER_RESTART_DELAY_MS
     if (forceQuit || whatsWorker) return;
 
     const settings = readSettings();
-    if (!settings.autoStartWhatsApp || !settings.whatsAgentKey || !settings.serverUrl) {
-      pushLog('whatsapp', 'Reinicio cancelado: auto-start do WhatsApp desativado.');
+    const hasSavedWhatsSession = hasWhatsAppLocalSession(settings);
+    const shouldRestartWhatsApp = Boolean(settings.autoStartWhatsApp || (hasSavedWhatsSession && !whatsStartupProbeBlocked));
+    if (!shouldRestartWhatsApp || !settings.whatsAgentKey || !settings.serverUrl) {
+      pushLog('whatsapp', 'Reinicio cancelado: WhatsApp aguardando operador ligar.');
       return;
     }
 
@@ -621,7 +716,7 @@ function scheduleWhatsAppWorkerRestart(reason, delayMs = WORKER_RESTART_DELAY_MS
     }
 
     try {
-      await startWhatsAppWorker();
+      await startWhatsAppWorker({ startupProbe: !settings.autoStartWhatsApp });
     } catch (err) {
       pushLog('whatsapp', `Falha ao reiniciar worker: ${err?.message || err}`);
       scheduleWhatsAppWorkerRestart('nova tentativa apos falha', delayMs);
@@ -686,7 +781,8 @@ function listPrintersWindows() {
 
 /* ─── WhatsApp worker ────────────────────────────────────────── */
 
-async function startWhatsAppWorker() {
+async function startWhatsAppWorker(options = {}) {
+  const startupProbe = Boolean(options.startupProbe);
   if (whatsWorker) {
     emit('whatsapp:state', whatsState);
     return;
@@ -703,21 +799,31 @@ async function startWhatsAppWorker() {
   }
 
   if (!settings.whatsAgentKey) throw new Error('Entre no sistema nesta janela antes de abrir o WhatsApp.');
+  if (startupProbe && !hasWhatsAppLocalSession(settings)) {
+    pushLog('whatsapp', 'Auto-inicio ignorado: nao existe sessao local do WhatsApp salva.');
+    return;
+  }
   clearWhatsAppWorkerRestartTimer();
   whatsStopRequested = false;
   whatsRestartRequested = false;
+  whatsStartupProbeActive = startupProbe;
+  if (!startupProbe) {
+    whatsStartupProbeBlocked = false;
+  }
 
   const workerPath = path.join(__dirname, 'agents', 'whatsapp-worker.js');
+  const workerEnv = {
+    ...process.env,
+    HUB_SERVER_URL: settings.serverUrl,
+    HUB_AGENT_KEY: settings.whatsAgentKey,
+    HUB_SLUG: settings.slug,
+  };
   whatsWorker = fork(workerPath, [], {
-    env: {
-      ...process.env,
-      HUB_SERVER_URL: settings.serverUrl,
-      HUB_AGENT_KEY: settings.whatsAgentKey,
-      HUB_SLUG: settings.slug,
-    },
+    env: workerEnv,
     silent: true,
   });
   const workerRef = whatsWorker;
+  startWhatsAppStateSyncHeartbeat();
 
   whatsWorker.stdout?.on('data', (d) => pushLog('whatsapp', d.toString().trim()));
   whatsWorker.stderr?.on('data', (d) => pushLog('whatsapp', `[ERR] ${d.toString().trim()}`));
@@ -728,6 +834,19 @@ async function startWhatsAppWorker() {
     if (msg.type === 'state') {
       whatsState = { ...whatsState, ...msg.data };
       emit('whatsapp:state', whatsState);
+      void syncWhatsAppStateToServer(whatsState).catch(() => {});
+      if (whatsStartupProbeActive) {
+        const status = String(whatsState.status || '').toLowerCase();
+        if (status === 'ready') {
+          whatsStartupProbeActive = false;
+          pushLog('whatsapp', 'Sessao local do WhatsApp encontrada. Agente mantido ligado.');
+        } else if (status === 'qr' || status === 'auth_failure' || (status === 'disconnected' && whatsState.lastError)) {
+          whatsStartupProbeActive = false;
+          whatsStartupProbeBlocked = true;
+          pushLog('whatsapp', 'WhatsApp nao iniciou automaticamente (sem sessao pronta). Aguardando operador abrir no Hub.');
+          stopWhatsAppWorker({ killDelayMs: 1000 });
+        }
+      }
     } else if (msg.type === 'log') {
       pushLog('whatsapp', msg.text);
     }
@@ -749,11 +868,14 @@ async function startWhatsAppWorker() {
     if (whatsWorker === workerRef) {
       whatsWorker = null;
     }
+    clearWhatsAppStateSyncTimer();
     rejectWorkerRequestsFor(workerRef, new Error('Agente WhatsApp encerrou antes de responder.'));
     whatsStopRequested = false;
     whatsRestartRequested = false;
+    whatsStartupProbeActive = false;
     whatsState.status = 'stopped';
     emit('whatsapp:state', whatsState);
+    void syncWhatsAppStateToServer({ status: 'disconnected', qrCode: '', phoneNumber: '', lastError: expectedStop ? '' : 'worker_exit' }).catch(() => {});
 
     if (restartAfterExit && !forceQuit) {
       scheduleWhatsAppWorkerRestart(whatsRestartReason, whatsRestartDelayMs);
@@ -772,12 +894,15 @@ async function startWhatsAppWorker() {
 
 function stopWhatsAppWorker(options = {}) {
   clearWhatsAppWorkerRestartTimer();
+  clearWhatsAppStateSyncTimer();
+  whatsStartupProbeActive = false;
   whatsStopRequested = true;
   whatsRestartRequested = Boolean(options.restartAfterExit);
   const ref = whatsWorker;
   if (!ref) {
     whatsState = { status: 'stopped', qrCode: '', phoneNumber: '', lastError: '' };
     emit('whatsapp:state', whatsState);
+    void syncWhatsAppStateToServer({ status: 'disconnected', qrCode: '', phoneNumber: '', lastError: '' }).catch(() => {});
     pushLog('whatsapp', options.restartAfterExit ? 'Reiniciando agente WhatsApp...' : 'Agente WhatsApp parado.');
     whatsStopRequested = false;
     whatsRestartRequested = false;
@@ -796,6 +921,7 @@ function stopWhatsAppWorker(options = {}) {
   }, Number(options.killDelayMs || WHATSAPP_STOP_GRACE_MS));
   whatsState = { status: 'stopped', qrCode: '', phoneNumber: '', lastError: '' };
   emit('whatsapp:state', whatsState);
+  void syncWhatsAppStateToServer({ status: 'disconnected', qrCode: '', phoneNumber: '', lastError: '' }).catch(() => {});
   pushLog('whatsapp', options.restartAfterExit ? 'Reiniciando agente WhatsApp...' : 'Agente WhatsApp parado.');
 }
 
@@ -1149,7 +1275,7 @@ async function printDirectFromHub(payload) {
 
 async function sendWhatsAppDirectFromHub(payload) {
   if (!whatsWorker) {
-    await startWhatsAppWorker();
+    throw new Error('WhatsApp nao esta ligado neste computador. Abra o WhatsApp no Hub antes de enviar.');
   }
   if (!whatsWorker) throw new Error('Agente WhatsApp nao iniciou.');
   if (whatsState.status !== 'ready') {
@@ -1229,6 +1355,7 @@ function createMainWindow(preferredUrl = '') {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
+      backgroundThrottling: false,
       partition: SYSTEM_PARTITION,
     },
   });
@@ -1286,18 +1413,46 @@ function initAutoUpdater() {
 
 /* ─── IPC handlers ───────────────────────────────────────────── */
 
-ipcMain.handle('hub:get-settings', () => ({
-  settings: readSettings(),
-  whatsState,
-  printState,
-  logs,
-  whatsRunning: !!whatsWorker,
-  printRunning: !!printWorker,
-}));
+ipcMain.handle('hub:get-settings', () => {
+  const settings = readSettings();
+  return {
+    settings,
+    whatsState,
+    printState,
+    logs,
+    whatsRunning: !!whatsWorker,
+    printRunning: !!printWorker,
+    hasLocalWhatsappSession: hasWhatsAppLocalSession(settings),
+  };
+});
 
 ipcMain.handle('hub:list-printers', async () => {
   if (process.platform === 'win32') return listPrintersWindows();
   return [];
+});
+
+ipcMain.handle('hub:get-agent-config', async () => {
+  const settings = readSettings();
+  const result = { print: null, whatsapp: null, printError: '', whatsappError: '' };
+  if (settings.serverUrl && settings.printAgentKey) {
+    try {
+      result.print = await fetchJson(`${settings.serverUrl}/api/print/agent/config`, {
+        headers: { 'x-agent-key': settings.printAgentKey },
+      });
+    } catch (error) {
+      result.printError = error?.message || String(error || 'Falha ao carregar impressao.');
+    }
+  }
+  if (settings.serverUrl && settings.whatsAgentKey) {
+    try {
+      result.whatsapp = await fetchJson(`${settings.serverUrl}/api/whatsapp/agent/config`, {
+        headers: { 'x-agent-key': settings.whatsAgentKey },
+      });
+    } catch (error) {
+      result.whatsappError = error?.message || String(error || 'Falha ao carregar WhatsApp.');
+    }
+  }
+  return result;
 });
 
 ipcMain.handle('hub:login', async (_ev, payload) => {
@@ -1368,15 +1523,82 @@ ipcMain.handle('hub:logout', async () => {
 
 ipcMain.handle('hub:update-printer', async (_ev, payload) => {
   const current = readSettings();
-  if (!current.printAgentKey) throw new Error('Faca login antes.');
   const printerName = String(payload.printerName || '').trim();
   const next = { ...current, printerName };
   saveSettings(next);
+  if (current.printAgentKey && current.serverUrl) {
+    await fetchJson(`${current.serverUrl}/api/print/agent/config`, {
+      method: 'PATCH',
+      headers: {
+        'content-type': 'application/json',
+        'x-agent-key': current.printAgentKey,
+      },
+      body: JSON.stringify({ printerName }),
+    });
+  }
   // If print agent is running, restart it with new printer
   if (printWorker) {
     restartPrintWorker('troca de impressora', 1500);
   }
   return next;
+});
+
+ipcMain.handle('hub:update-print-config', async (_ev, payload = {}) => {
+  const current = readSettings();
+  const next = { ...current };
+  const hasPrinterName = Object.prototype.hasOwnProperty.call(payload, 'printerName');
+  const hasEnabled = Object.prototype.hasOwnProperty.call(payload, 'enabled');
+  if (hasPrinterName) {
+    next.printerName = String(payload.printerName || '').trim();
+  }
+  saveSettings(next);
+
+  if (!current.printAgentKey || !current.serverUrl) {
+    if (hasEnabled) throw new Error('Entre no sistema pelo Hub antes de ativar a impressao.');
+    return next;
+  }
+
+  await fetchJson(`${current.serverUrl}/api/print/agent/config`, {
+    method: 'PATCH',
+    headers: {
+      'content-type': 'application/json',
+      'x-agent-key': current.printAgentKey,
+    },
+    body: JSON.stringify({
+      ...(hasPrinterName ? { printerName: next.printerName } : {}),
+      ...(hasEnabled ? { enabled: Boolean(payload.enabled) } : {}),
+    }),
+  });
+
+  if (hasEnabled && !payload.enabled) {
+    stopPrintWorker();
+  } else if (printWorker && hasPrinterName) {
+    restartPrintWorker('configuracao de impressora alterada', 1000);
+  }
+  return next;
+});
+
+ipcMain.handle('hub:update-whatsapp-config', async (_ev, payload = {}) => {
+  const current = readSettings();
+  if (!current.whatsAgentKey || !current.serverUrl) {
+    throw new Error('Entre no sistema pelo Hub antes de configurar o WhatsApp.');
+  }
+  const hasEnabled = Object.prototype.hasOwnProperty.call(payload, 'enabled');
+  if (!hasEnabled) return current;
+
+  await fetchJson(`${current.serverUrl}/api/whatsapp/agent/config`, {
+    method: 'PATCH',
+    headers: {
+      'content-type': 'application/json',
+      'x-agent-key': current.whatsAgentKey,
+    },
+    body: JSON.stringify({ enabled: Boolean(payload.enabled) }),
+  });
+
+  if (!payload.enabled) {
+    stopWhatsAppWorker();
+  }
+  return readSettings();
 });
 
 // Individual agent controls

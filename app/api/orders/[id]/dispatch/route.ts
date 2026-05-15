@@ -3,7 +3,7 @@ import { query } from '@/lib/db';
 import { claimLocalAutomationDispatch } from '@/lib/local-automation';
 import { requireTenantSession } from '@/lib/tenant-auth';
 import { enqueueOrderPrintJob, prepareOrderPrintJobs } from '@/lib/printing';
-import { enqueueOrderWhatsappJob, prepareOrderWhatsappJob } from '@/lib/whatsapp';
+import { enqueueOrderWhatsappJob, prepareOrderWhatsappJob, type OrderWhatsappEventType } from '@/lib/whatsapp';
 import type { PrintJobEventType } from '@/lib/print-settings';
 
 type OrderRow = {
@@ -11,7 +11,7 @@ type OrderRow = {
 };
 
 const allowedPrintEvents = new Set<PrintJobEventType>(['new_order', 'status_update', 'manual_receipt']);
-const allowedWhatsappEvents = new Set(['new_order', 'status_update']);
+const allowedWhatsappEvents = new Set<OrderWhatsappEventType>(['new_order', 'status_update', 'status_cancelled']);
 
 export async function POST(request: Request, { params }: { params: Promise<{ id: string }> }) {
   const { session, response } = await requireTenantSession(['admin', 'staff']);
@@ -31,7 +31,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
   const printEventTypes = (Array.isArray(body.printEventTypes) ? body.printEventTypes : [body.printEventType])
     .map((eventType) => String(eventType || '').trim() as PrintJobEventType)
     .filter((eventType) => allowedPrintEvents.has(eventType));
-  const whatsappEventType = String(body.whatsappEventType || '').trim();
+  const whatsappEventType = String(body.whatsappEventType || '').trim() as OrderWhatsappEventType;
   const shouldQueuePrint = printEventTypes.length > 0;
   const shouldQueueWhatsapp = allowedWhatsappEvents.has(whatsappEventType);
 
@@ -156,7 +156,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
             const whatsappJob = await prepareOrderWhatsappJob(
               session.tenantId,
               id,
-              whatsappEventType as 'new_order' | 'status_update',
+              whatsappEventType,
               undefined,
               { requireActiveHub: false },
             );
@@ -166,7 +166,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
           const whatsappJob = await prepareOrderWhatsappJob(
             session.tenantId,
             id,
-            whatsappEventType as 'new_order' | 'status_update',
+            whatsappEventType,
             undefined,
             { requireActiveHub: false },
           );
@@ -199,7 +199,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
       )).then((results) => results.some(Boolean))
       : Promise.resolve(false),
     shouldQueueWhatsapp
-      ? enqueueOrderWhatsappJob(session.tenantId, id, whatsappEventType as 'new_order' | 'status_update').catch((error) => {
+      ? enqueueOrderWhatsappJob(session.tenantId, id, whatsappEventType).catch((error) => {
         console.error('whatsapp dispatch failed', error);
         return false;
       })

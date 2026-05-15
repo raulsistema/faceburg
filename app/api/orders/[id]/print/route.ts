@@ -69,7 +69,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
   }
 
   if (!isHubActive(String(agent.connection_status || ''), agent.last_seen_at || null)) {
-    return NextResponse.json({ error: 'Agente local de impressao offline. Verifique o agente local antes de imprimir.' }, { status: 409 });
+    return NextResponse.json({ error: 'Hub local de impressao offline. Verifique o Hub local antes de imprimir.' }, { status: 409 });
   }
 
   const queued = await enqueueOrderPrintJob(session.tenantId, id, 'manual_receipt');

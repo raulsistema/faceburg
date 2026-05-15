@@ -168,7 +168,7 @@ export async function PATCH(request: Request) {
   const message = !enabled
     ? 'WhatsApp automatico desativado.'
     : activationPending
-      ? 'WhatsApp ativado. No agente local deste computador, abra o WhatsApp e conecte a conta da empresa para concluir.'
+      ? 'WhatsApp ativado. No Hub local deste computador, abra o WhatsApp e conecte a conta da empresa para concluir.'
       : 'WhatsApp ativado e conectado.';
 
   return NextResponse.json({

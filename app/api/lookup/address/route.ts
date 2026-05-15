@@ -26,6 +26,19 @@ type NominatimSuggestion = {
   address?: Record<string, unknown>;
 };
 
+type PhotonFeature = {
+  properties?: {
+    name?: string;
+    street?: string;
+    city?: string;
+    state?: string;
+    postcode?: string;
+    country?: string;
+    osm_key?: string;
+    osm_value?: string;
+  };
+};
+
 type TenantStateRow = {
   id: string;
   status: string;
@@ -203,6 +216,44 @@ function stripLeadingStreetType(rawStreet: string) {
     .trim();
 }
 
+function streetNameMatchesRequestedType(streetName: string, requestedType: string) {
+  if (!requestedType) return true;
+  const normalized = normalizeSearchText(streetName);
+  if (requestedType === 'avenida') return /^(av\.?|avenida)\b/.test(normalized);
+  if (requestedType === 'rua') return /^(r\.?|rua)\b/.test(normalized);
+  if (requestedType === 'travessa') return /^(tv\.?|travessa)\b/.test(normalized);
+  if (requestedType === 'rodovia') return /^(rod\.?|rodovia)\b/.test(normalized);
+  return true;
+}
+
+function buildPhotonStreetQueries(state: string, rawStreet: string, streetVariants: string[]) {
+  const seen = new Set<string>();
+  const queries: string[] = [];
+  const requestedType = detectRequestedStreetType(rawStreet);
+  const requestedName = stripLeadingStreetType(rawStreet);
+
+  function pushQuery(value: string) {
+    const normalized = collapseSpaces(value);
+    if (normalized.length < 3) return;
+    const key = normalizeSearchText(normalized);
+    if (seen.has(key)) return;
+    seen.add(key);
+    queries.push(`${normalized} ${state}`);
+  }
+
+  pushQuery(rawStreet);
+  for (const streetVariant of streetVariants) {
+    pushQuery(streetVariant);
+  }
+  if (!requestedType && requestedName.length >= 3) {
+    pushQuery(`Rua ${requestedName}`);
+    pushQuery(`Avenida ${requestedName}`);
+    pushQuery(`Travessa ${requestedName}`);
+  }
+
+  return queries;
+}
+
 function sortSuggestionsForStreet(items: AddressSuggestion[], rawStreet: string) {
   const requestedType = detectRequestedStreetType(rawStreet);
   const requestedName = stripLeadingStreetType(rawStreet);
@@ -305,6 +356,17 @@ function stateCodeFromNominatimAddress(address: Record<string, unknown>) {
   return STATE_NAME_TO_CODE[stateName] || '';
 }
 
+function stateCodeFromPhotonState(value: unknown) {
+  const raw = text(value).toUpperCase();
+  if (/^[A-Z]{2}$/.test(raw)) return raw;
+  return STATE_NAME_TO_CODE[normalizeSearchText(text(value))] || '';
+}
+
+function isPhotonBrazilResult(value: unknown) {
+  const country = normalizeSearchText(text(value));
+  return country === 'brasil' || country === 'brazil';
+}
+
 function mapNominatimSuggestion(item: NominatimSuggestion): AddressSuggestion | null {
   const address = item.address || {};
   const street = text(address.road) || text(address.pedestrian) || text(address.footway) || text(item.name);
@@ -392,6 +454,82 @@ async function loadNominatimSuggestions(state: string, city: string, streetVaria
   return dedupeSuggestions(items);
 }
 
+async function loadPhotonSuggestionsByState(state: string, rawStreet: string, streetVariants: string[]) {
+  if (!/^[A-Z]{2}$/.test(state)) return [];
+
+  const queries = buildPhotonStreetQueries(state, rawStreet, streetVariants).slice(0, 4);
+  const requestedType = detectRequestedStreetType(rawStreet);
+  const requestedName = stripLeadingStreetType(rawStreet);
+  const suggestions: AddressSuggestion[] = [];
+  const seen = new Set<string>();
+
+  for (const queryText of queries) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 5000);
+    try {
+      const params = new URLSearchParams({ q: queryText, limit: '10' });
+      const response = await fetch(`https://photon.komoot.io/api/?${params.toString()}`, {
+        cache: 'no-store',
+        headers: {
+          accept: 'application/json',
+          'user-agent': 'Faceburg Address Lookup/1.0',
+        },
+        signal: controller.signal,
+      });
+
+      if (!response.ok) continue;
+
+      let data: unknown = null;
+      try {
+        data = await response.json();
+      } catch {
+        data = null;
+      }
+
+      const features = Array.isArray((data as { features?: unknown[] } | null)?.features)
+        ? ((data as { features?: PhotonFeature[] }).features || [])
+        : [];
+      for (const feature of features) {
+        const props = feature.properties || {};
+        const name = text(props.name) || text(props.street);
+        const normalizedName = normalizeSearchText(name);
+        const highwayValue = text(props.osm_value);
+        if (
+          !name ||
+          props.osm_key !== 'highway' ||
+          ['bus_stop', 'crossing', 'traffic_signals', 'street_lamp'].includes(highwayValue) ||
+          !isPhotonBrazilResult(props.country) ||
+          stateCodeFromPhotonState(props.state) !== state ||
+          !streetNameMatchesRequestedType(name, requestedType) ||
+          (requestedName && !normalizedName.includes(requestedName))
+        ) {
+          continue;
+        }
+        const key = normalizedName;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        suggestions.push({
+          street: name,
+          neighborhood: '',
+          city: text(props.city),
+          state,
+          zipCode: text(props.postcode),
+          complement: '',
+        });
+        if (suggestions.length >= 8) break;
+      }
+
+      if (suggestions.length >= 8) break;
+    } catch {
+      // Busca auxiliar: se falhar, mantem os provedores principais.
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
+  return suggestions;
+}
+
 export async function GET(request: NextRequest) {
   const requestedState = text(request.nextUrl.searchParams.get('state')).toUpperCase();
   const requestedCity = text(request.nextUrl.searchParams.get('city'));
@@ -443,16 +581,32 @@ export async function GET(request: NextRequest) {
     }
 
     if (streetVariants.some((streetVariant) => streetVariant.length >= 3) && effectiveState.length === 2 && remoteSuggestions.length < 8) {
-      const wideSuggestions = await loadNominatimSuggestions(effectiveState, effectiveCity, streetVariants);
+      const stateOnlyShortSearch = !effectiveCity && stripLeadingStreetType(street).length <= 5;
+      const earlyPhotonSuggestions = stateOnlyShortSearch
+        ? await loadPhotonSuggestionsByState(effectiveState, street, streetVariants)
+        : [];
+      const wideSuggestions = earlyPhotonSuggestions.length > 0
+        ? []
+        : await loadNominatimSuggestions(effectiveState, effectiveCity, streetVariants);
+      const latePhotonSuggestions =
+        !effectiveCity && !stateOnlyShortSearch && remoteSuggestions.length + wideSuggestions.length < 8
+          ? await loadPhotonSuggestionsByState(effectiveState, street, streetVariants)
+          : [];
       const officialSuggestionsFromInferredCities: AddressSuggestion[] = [];
-      if (!effectiveCity && wideSuggestions.length > 0) {
+      if (!effectiveCity && wideSuggestions.length > 0 && wideSuggestions.length < 8) {
         for (const scope of getUniqueCityScopes(wideSuggestions).slice(0, 3)) {
           officialSuggestionsFromInferredCities.push(
             ...(await loadRemoteSuggestionsWithVariants(scope.state, scope.city, streetVariants)),
           );
         }
       }
-      remoteSuggestions = dedupeSuggestions([...remoteSuggestions, ...officialSuggestionsFromInferredCities, ...wideSuggestions]);
+      remoteSuggestions = dedupeSuggestions([
+        ...remoteSuggestions,
+        ...officialSuggestionsFromInferredCities,
+        ...wideSuggestions,
+        ...earlyPhotonSuggestions,
+        ...latePhotonSuggestions,
+      ]);
     }
 
     return NextResponse.json({

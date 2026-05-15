@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from 'react';
 
 type OrderStatus = 'pending' | 'processing' | 'delivering' | 'completed' | 'cancelled';
 type PrintEventType = 'new_order' | 'status_update' | 'manual_receipt';
-type WhatsappEventType = 'new_order' | 'status_update';
+type WhatsappEventType = 'new_order' | 'status_update' | 'status_cancelled';
 
 type OrderDetailResponse = {
   order?: {
@@ -94,13 +94,6 @@ type LocalDispatchPayload = {
   skipped?: string[];
 };
 
-type DispatchFallbackResponse = {
-  ok?: boolean;
-  printQueued?: boolean;
-  whatsappQueued?: boolean;
-  error?: string;
-};
-
 type OrderEventPayload = {
   event?: string;
   orderId?: string;
@@ -117,7 +110,6 @@ type NavigatorWithLocks = Navigator & {
   };
 };
 
-const LOCAL_AGENT_URL = 'http://127.0.0.1:9787';
 const LOCK_NAME = 'faceburg-local-automation';
 const LEADER_STORAGE_KEY = 'faceburg:localAutomation:leader:v2';
 const PROCESSED_STORAGE_KEY = 'faceburg:localAutomation:processed:v2';
@@ -198,25 +190,6 @@ async function fetchJson<T>(url: string, init?: RequestInit) {
   return data;
 }
 
-async function requestLocalAgent<T>(path: string, init: RequestInit = {}, timeoutMs = 1200) {
-  const controller = new AbortController();
-  const timeoutId = window.setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    const response = await fetch(`${LOCAL_AGENT_URL}${path}`, {
-      ...init,
-      cache: 'no-store',
-      signal: controller.signal,
-    });
-    const data = (await response.json().catch(() => ({}))) as T & { error?: string };
-    if (!response.ok) {
-      throw new Error(data.error || `HTTP ${response.status}`);
-    }
-    return data;
-  } finally {
-    window.clearTimeout(timeoutId);
-  }
-}
-
 async function probeLocalAgent(): Promise<LocalAgentProbe> {
   const desktopBridge = getDesktopBridge();
   if (desktopBridge?.isDesktopApp) {
@@ -235,28 +208,14 @@ async function probeLocalAgent(): Promise<LocalAgentProbe> {
     };
   }
 
-  try {
-    const health = await requestLocalAgent<LocalAgentHealth>('/api/health', {}, 900);
-    const whatsappStatus = String(health.whatsapp?.status || 'disconnected');
-    const printAvailable = Boolean(health.online);
-    return {
-      available: printAvailable || whatsappStatus === 'ready',
-      printAvailable,
-      whatsappReady: whatsappStatus === 'ready',
-      whatsappStatus,
-      printerName: String(health.printerName || ''),
-      terminalId: String(health.terminalId || ''),
-    };
-  } catch {
-    return {
-      available: false,
-      printAvailable: false,
-      whatsappReady: false,
-      whatsappStatus: 'disconnected',
-      printerName: '',
-      terminalId: '',
-    };
-  }
+  return {
+    available: false,
+    printAvailable: false,
+    whatsappReady: false,
+    whatsappStatus: 'disconnected',
+    printerName: '',
+    terminalId: '',
+  };
 }
 
 function buildOwnerLabel(localAgent: LocalAgentProbe) {
@@ -266,21 +225,6 @@ function buildOwnerLabel(localAgent: LocalAgentProbe) {
   if (terminal) return terminal;
   if (printer) return printer;
   return 'Computador da loja';
-}
-
-async function queueOrderDispatchFallback(
-  orderId: string,
-  payload: {
-    printEventType?: PrintEventType;
-    printEventTypes?: PrintEventType[];
-    whatsappEventType?: WhatsappEventType;
-  },
-) {
-  return fetchJson<DispatchFallbackResponse>(`/api/orders/${orderId}/dispatch`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify(payload),
-  });
 }
 
 async function ackOrderDispatchLocal(
@@ -310,13 +254,7 @@ async function runLocalPrintJobs(printJobs: LocalPrintJob[]) {
     return;
   }
 
-  for (const job of printJobs) {
-    await requestLocalAgent('/api/print', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(job),
-    }, 12000);
-  }
+  throw new Error('Hub local nao esta logado neste computador.');
 }
 
 async function runLocalWhatsappJobs(whatsappJobs: LocalWhatsappJob[]) {
@@ -328,13 +266,7 @@ async function runLocalWhatsappJobs(whatsappJobs: LocalWhatsappJob[]) {
     return;
   }
 
-  for (const job of whatsappJobs) {
-    await requestLocalAgent('/api/whatsapp/send', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(job),
-    }, 35000);
-  }
+  throw new Error('Hub local nao esta logado neste computador.');
 }
 
 async function dispatchLocalJobs(
@@ -408,12 +340,7 @@ async function dispatchLocalJobs(
 
   if (!failures.length) return;
 
-  await queueOrderDispatchFallback(orderId, {
-    printEventType: failedPrintEvents.length === 1 ? failedPrintEvents[0] : undefined,
-    printEventTypes: failedPrintEvents.length > 1 ? failedPrintEvents : undefined,
-    whatsappEventType: whatsappFailed ? 'new_order' : undefined,
-  });
-
+  console.warn(`Faceburg local dispatch failed for ${orderId}: ${failures.join(' e ')}`);
   for (const eventType of failedPrintEvents) {
     markCompleted.print?.(eventType);
   }
@@ -562,7 +489,7 @@ function useLocalAutomationProbe({
         };
 
         if (!capabilities.print && !capabilities.whatsapp) {
-          setError(probedAgent.available ? 'Automacao local aguardando recurso' : 'Agente local offline');
+          setError(probedAgent.available ? 'Automacao local aguardando recurso' : 'Hub local nao logado');
           return;
         }
 
@@ -592,7 +519,7 @@ function useLocalAutomationProbe({
     localAgent,
     checking,
     error,
-    isAutomationLeader: Boolean(localLeader),
+    isAutomationLeader: Boolean(localLeader && localAgent?.available),
   };
 }
 
@@ -685,25 +612,6 @@ export default function LocalAutomationBridge({
       }
     }
 
-    async function queueFallbackAndMark(
-      orderId: string,
-      printEvents: PrintEventType[],
-      whatsapp: boolean,
-    ) {
-      if (!printEvents.length && !whatsapp) return;
-      await queueOrderDispatchFallback(orderId, {
-        printEventType: printEvents.length === 1 ? printEvents[0] : undefined,
-        printEventTypes: printEvents.length > 1 ? printEvents : undefined,
-        whatsappEventType: whatsapp ? 'new_order' : undefined,
-      });
-      for (const eventType of printEvents) {
-        markPrintProcessed(orderId, eventType);
-      }
-      if (whatsapp) {
-        markWhatsappProcessed(orderId, 'new_order');
-      }
-    }
-
     async function dispatchNewOrder(orderId: string) {
       const normalizedOrderId = String(orderId || '').trim();
       if (!normalizedOrderId) return;
@@ -745,10 +653,14 @@ export default function LocalAutomationBridge({
 
         const canUseLocalPrint = Boolean(pendingPrintEvents.length && probedAgent.printAvailable);
         const canUseLocalWhatsapp = Boolean(pendingWhatsapp && probedAgent.whatsappReady);
-        const fallbackPrintEvents = canUseLocalPrint ? [] : pendingPrintEvents;
-        const fallbackWhatsapp = Boolean(pendingWhatsapp && !canUseLocalWhatsapp);
-
-        await queueFallbackAndMark(normalizedOrderId, fallbackPrintEvents, fallbackWhatsapp);
+        if (!canUseLocalPrint) {
+          for (const eventType of pendingPrintEvents) {
+            markPrintProcessed(normalizedOrderId, eventType);
+          }
+        }
+        if (pendingWhatsapp && !canUseLocalWhatsapp) {
+          markWhatsappProcessed(normalizedOrderId, 'new_order');
+        }
 
         const printEventTypes = canUseLocalPrint ? pendingPrintEvents : [];
         const shouldSendWhatsappLocal = Boolean(canUseLocalWhatsapp && pendingWhatsapp);
@@ -762,6 +674,8 @@ export default function LocalAutomationBridge({
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify({
             preferLocalAgent: true,
+            localAutomationOwnerId: ownerIdRef.current,
+            localAutomationOwnerLabel: buildOwnerLabel(probedAgent),
             printEventTypes,
             whatsappEventType: shouldSendWhatsappLocal ? 'new_order' : undefined,
           }),
@@ -785,12 +699,13 @@ export default function LocalAutomationBridge({
           ? allPrintEvents.filter((eventType) => !isProcessed(printProcessedKey(normalizedOrderId, eventType)))
           : [];
         const retryWhatsapp = wantsWhatsapp && !isProcessed(whatsappProcessedKey(normalizedOrderId, 'new_order'));
-        try {
-          await queueFallbackAndMark(normalizedOrderId, retryPrintEvents, retryWhatsapp);
-          markOrderIfComplete(normalizedOrderId, allPrintEvents, wantsWhatsapp);
-        } catch (fallbackError) {
-          console.warn('Faceburg local automation fallback failed', fallbackError);
+        for (const eventType of retryPrintEvents) {
+          markPrintProcessed(normalizedOrderId, eventType);
         }
+        if (retryWhatsapp) {
+          markWhatsappProcessed(normalizedOrderId, 'new_order');
+        }
+        markOrderIfComplete(normalizedOrderId, allPrintEvents, wantsWhatsapp);
       } finally {
         inFlightOrderIdsRef.current.delete(normalizedOrderId);
       }
@@ -895,7 +810,7 @@ export default function LocalAutomationBridge({
         ? 'Ponte local em outra aba'
         : localAgentAvailable
           ? 'Assumindo ponte local'
-          : 'Agente local offline';
+          : 'Hub local offline';
   const detail = isAutomationLeader
     ? buildOwnerLabel(localAgent || {
         available: false,

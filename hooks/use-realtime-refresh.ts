@@ -9,6 +9,7 @@ type UseRealtimeRefreshOptions = {
   fallbackRefreshMs?: number;
   dedupeMs?: number;
   initialLoader?: boolean;
+  pauseWhenHidden?: boolean;
 };
 
 export function useRealtimeRefresh({
@@ -18,6 +19,7 @@ export function useRealtimeRefresh({
   fallbackRefreshMs = 300000,
   dedupeMs = 1500,
   initialLoader = true,
+  pauseWhenHidden = true,
 }: UseRealtimeRefreshOptions) {
   const refreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -53,7 +55,7 @@ export function useRealtimeRefresh({
       if (disposed) return;
       if (!(delayMs > 0)) return;
       clearRefreshTimer();
-      if (document.hidden) return;
+      if (pauseWhenHidden && document.hidden) return;
       refreshTimerRef.current = setTimeout(() => {
         if (disposed) return;
         void runRefresh(false, true);
@@ -78,7 +80,7 @@ export function useRealtimeRefresh({
 
     function connectEventSource() {
       if (disposed || typeof window === 'undefined' || typeof EventSource === 'undefined') return;
-      if (document.hidden) return;
+      if (pauseWhenHidden && document.hidden) return;
       clearReconnectTimer();
       closeEventSource();
       eventSource = new EventSource(eventUrl);
@@ -88,9 +90,9 @@ export function useRealtimeRefresh({
       eventSource.onerror = () => {
         if (disposed) return;
         closeEventSource();
-        if (document.hidden) return;
+        if (pauseWhenHidden && document.hidden) return;
         reconnectTimerRef.current = setTimeout(() => {
-          if (disposed || document.hidden) return;
+          if (disposed || (pauseWhenHidden && document.hidden)) return;
           connectEventSource();
         }, 30000);
       };
@@ -115,7 +117,7 @@ export function useRealtimeRefresh({
         if (!eventSource || eventSource.readyState === EventSource.CLOSED) {
           connectEventSource();
         }
-      } else {
+      } else if (pauseWhenHidden) {
         clearRefreshTimer();
         clearReconnectTimer();
         closeEventSource();
@@ -133,7 +135,7 @@ export function useRealtimeRefresh({
       document.removeEventListener('visibilitychange', onVisibility);
       closeEventSource();
     };
-  }, [dedupeMs, eventName, eventUrl, fallbackRefreshMs, initialLoader, load]);
+  }, [dedupeMs, eventName, eventUrl, fallbackRefreshMs, initialLoader, load, pauseWhenHidden]);
 
   const refreshNow = useCallback((showLoader = false, force = true) => {
     refreshFnRef.current(showLoader, force);

@@ -55,6 +55,10 @@ function updateState(patch = {}) {
   });
 }
 
+function sendWsAgentState() {
+  // Cloud websocket bridge is disabled in this build; state is synced by the hub.
+}
+
 async function acquireSingleInstanceLock() {
   await new Promise((resolve, reject) => {
     const server = net.createServer();
@@ -75,20 +79,21 @@ async function acquireSingleInstanceLock() {
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
-function parseBooleanEnv(primary, fallback) {
-  const value = String(primary ?? '').trim().toLowerCase();
-  if (!value) return fallback;
-  if (['1', 'true', 'yes', 'y', 'on'].includes(value)) return true;
-  if (['0', 'false', 'no', 'n', 'off'].includes(value)) return false;
-  return fallback;
-}
-
 function normalizeTarget(target) {
   if (!target) return '';
   if (target.endsWith('@c.us')) return target;
   const digits = String(target).replace(/\D/g, '');
   if (!digits) return '';
   return digits.startsWith('55') ? `${digits}@c.us` : `55${digits}@c.us`;
+}
+
+function getMenuLink() {
+  if (!SLUG) return `${SERVER_URL}/cardapio`;
+  return `${SERVER_URL}/cardapio/${encodeURIComponent(SLUG)}`;
+}
+
+function personalizeAutoReply(text) {
+  return String(text || '').replace(/@LINK/g, getMenuLink());
 }
 
 function ensureDir(p) { fs.mkdirSync(p, { recursive: true }); return p; }
@@ -151,7 +156,7 @@ async function sendDirectWhatsappMessage(job) {
 }
 
 function isVisibleWhatsAppMode() {
-  return !parseBooleanEnv(process.env.HUB_WHATS_HEADLESS || process.env.WHATS_HEADLESS, false);
+  return true;
 }
 
 function buildPuppeteerArgs() {
@@ -196,6 +201,35 @@ async function focusClientPage(nextClient) {
   try {
     await page.bringToFront();
   } catch {}
+}
+
+async function markReadyFromConnectedPage(nextClient, source = 'fallback') {
+  if (ready || !nextClient?.pupPage || nextClient.pupPage.isClosed?.()) return false;
+  let pageState = '';
+  let hasBridge = false;
+  try {
+    const result = await nextClient.pupPage.evaluate(() => ({
+      appState: String(window.AuthStore?.AppState?.state || ''),
+      hasWWebJS: Boolean(window.WWebJS),
+      bodyHasContent: Boolean(document.body?.innerText?.trim()),
+    }));
+    pageState = String(result?.appState || '').toUpperCase();
+    hasBridge = Boolean(result?.hasWWebJS && result?.bodyHasContent);
+  } catch {
+    return false;
+  }
+
+  if (pageState !== 'CONNECTED' || !hasBridge) return false;
+
+  ready = true;
+  lastErrorMessage = '';
+  const phone = String(nextClient.info?.wid?.user || getCurrentPhoneNumber() || '');
+  bindBrowserDiagnostics(nextClient);
+  updateState({ status: 'ready', qrCode: '', phoneNumber: phone, lastError: '' });
+  void focusClientPage(nextClient);
+  sendLog(`WhatsApp Web conectado (${source}). Agente marcado como pronto${phone ? ` (${phone})` : ''}.`);
+  sendWsAgentState({ sessionStatus: 'ready', qrCode: '', phoneNumber: phone, lastError: '' });
+  return true;
 }
 
 function bindBrowserDiagnostics(nextClient) {
@@ -269,11 +303,7 @@ async function startClient(opts = {}) {
 
   const browserPath = getBrowserPath();
   const visibleWindow = isVisibleWhatsAppMode();
-  sendLog(
-    visibleWindow
-      ? `Abrindo WhatsApp Web em janela dedicada${browserPath ? ` com ${path.basename(browserPath)}` : ''}.`
-      : 'Iniciando WhatsApp em modo oculto.',
-  );
+  sendLog(`Abrindo WhatsApp Web em janela dedicada${browserPath ? ` com ${path.basename(browserPath)}` : ''}.`);
   const nextClient = new Client({
     authStrategy: new LocalAuth({ clientId: getClientId(), dataPath: AUTH_PATH }),
     takeoverOnConflict: true,
@@ -282,8 +312,8 @@ async function startClient(opts = {}) {
     browserName: 'Chrome',
     puppeteer: {
       executablePath: browserPath || undefined,
-      headless: !visibleWindow,
-      defaultViewport: visibleWindow ? null : undefined,
+      headless: false,
+      defaultViewport: null,
       timeout: INIT_TIMEOUT_MS,
       args: buildPuppeteerArgs(),
     },
@@ -296,7 +326,7 @@ async function startClient(opts = {}) {
     lastQrAt = Date.now();
     ready = false;
     const qrDataUrl = await QRCode.toDataURL(qr, { width: 280 }).catch(() => '');
-    updateState({ status: 'qr', qrCode: qrDataUrl, phoneNumber: '', lastError: '' });
+    updateState({ status: 'qr', qrCode: qrDataUrl, rawQrCode: qr, phoneNumber: '', lastError: '' });
     void focusClientPage(nextClient);
     sendLog('QR Code gerado. Escaneie com o WhatsApp.');
     sendWsAgentState({ sessionStatus: 'qr', qrCode: qr, phoneNumber: '', lastError: '' });
@@ -347,6 +377,11 @@ async function startClient(opts = {}) {
       return;
     }
 
+    if (stateLabel === 'CONNECTED') {
+      await markReadyFromConnectedPage(nextClient, 'estado conectado');
+      return;
+    }
+
     if (stateLabel === 'CONFLICT') {
       sendLog('Conflito detectado. Assumindo a sessao local automaticamente.');
       return;
@@ -377,8 +412,9 @@ async function startClient(opts = {}) {
       
       const autoReply = await processMessage(msg.body);
       if (autoReply) {
+        const replyText = personalizeAutoReply(autoReply);
         sendLog(`NLP Auto-reply para ${msg.from}`);
-        await msg.reply(autoReply);
+        await msg.reply(replyText);
       }
     } catch (err) {}
   });
@@ -404,14 +440,29 @@ async function startClient(opts = {}) {
   updateState({ status: 'connecting', qrCode: '', phoneNumber: '', lastError: '' });
   sendWsAgentState({ sessionStatus: 'connecting', qrCode: '', phoneNumber: '', lastError: '' });
 
+  let fallbackActive = true;
+  const connectedPageFallback = (async () => {
+    while (fallbackActive && !ready && client === nextClient && !shuttingDown) {
+      await sleep(2000);
+      if (await markReadyFromConnectedPage(nextClient, 'fallback inicializacao')) return;
+    }
+    await new Promise(() => {});
+  })();
+
   try {
+    const initialization = nextClient.initialize();
     await Promise.race([
-      nextClient.initialize(),
+      initialization,
+      connectedPageFallback,
       sleep(INIT_TIMEOUT_MS).then(() => { throw new Error('Timeout ao inicializar WhatsApp.'); }),
     ]);
     bindBrowserDiagnostics(nextClient);
+    await markReadyFromConnectedPage(nextClient, 'pos-inicializacao');
     void focusClientPage(nextClient);
-  } finally { startingClient = false; }
+  } finally {
+    fallbackActive = false;
+    startingClient = false;
+  }
 }
 
 /* ─── main ───────────────────────────────────────────────────────── */
@@ -442,6 +493,9 @@ async function main() {
     if (client?.pupPage?.isClosed?.()) {
       scheduleRestart('watchdog page closed', { wipeSession: false, delayMs: 3000 });
       return;
+    }
+    if (!ready) {
+      void markReadyFromConnectedPage(client, 'watchdog');
     }
     if (!ready && lastQrAt > 0 && Date.now() - lastQrAt > 5 * 60 * 1000) {
       scheduleRestart('watchdog qr stale', { wipeSession: false, delayMs: 3000 });

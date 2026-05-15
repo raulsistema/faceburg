@@ -46,10 +46,12 @@ type AgentConfigRow = {
 export type PreparedOrderWhatsappJob = {
   id: string;
   orderId: string;
-  eventType: 'new_order' | 'status_update';
+  eventType: OrderWhatsappEventType;
   targetPhone: string;
   payloadText: string;
 };
+
+export type OrderWhatsappEventType = 'new_order' | 'status_update' | 'status_cancelled';
 
 const HUB_HEARTBEAT_GRACE_MS = 2 * 60 * 1000;
 
@@ -305,10 +307,23 @@ function buildDeliveryStatusMessage(order: OrderHeaderRow) {
   ].filter(Boolean).join('\n\n');
 }
 
+function buildCancellationStatusMessage(order: OrderHeaderRow) {
+  const customerName = text(order.customer_name);
+  const greeting = customerName ? `Ola, ${customerName}` : 'Ola';
+  const storeName = text(order.issuer_trade_name) || text(order.tenant_name) || 'a loja';
+  const reason = text(order.cancellation_reason);
+
+  return [
+    `${greeting}, seu pedido #${order.id.slice(0, 8).toUpperCase()} foi cancelado.`,
+    reason ? `Motivo: ${reason}` : '',
+    `Qualquer duvida, fale com ${storeName}.`,
+  ].filter(Boolean).join('\n\n');
+}
+
 export async function buildOrderWhatsappText(
   tenantId: string,
   orderId: string,
-  eventType: 'new_order' | 'status_update',
+  eventType: OrderWhatsappEventType,
   executor: DbExecutor = { query },
 ) {
   const orderResult = await executor.query<OrderHeaderRow>(
@@ -358,6 +373,9 @@ export async function buildOrderWhatsappText(
   if (eventType === 'status_update' && order.status !== 'delivering') {
     return null;
   }
+  if (eventType === 'status_cancelled' && order.status !== 'cancelled') {
+    return null;
+  }
 
   const targetPhone = normalizeWhatsappTarget(order.customer_phone);
   if (!targetPhone) return null;
@@ -381,16 +399,19 @@ export async function buildOrderWhatsappText(
 
   return {
     targetPhone,
-    payloadText: eventType === 'new_order'
-      ? buildNewOrderMessage(order, itemsResult.rows)
-      : buildDeliveryStatusMessage(order),
+    payloadText:
+      eventType === 'new_order'
+        ? buildNewOrderMessage(order, itemsResult.rows)
+        : eventType === 'status_cancelled'
+          ? buildCancellationStatusMessage(order)
+          : buildDeliveryStatusMessage(order),
   };
 }
 
 export async function enqueueOrderWhatsappJob(
   tenantId: string,
   orderId: string,
-  eventType: 'new_order' | 'status_update',
+  eventType: OrderWhatsappEventType,
   executor: DbExecutor = { query },
   options: { initialDelaySeconds?: number } = {},
 ) {
@@ -429,7 +450,7 @@ export async function enqueueOrderWhatsappJob(
 export async function prepareOrderWhatsappJob(
   tenantId: string,
   orderId: string,
-  eventType: 'new_order' | 'status_update',
+  eventType: OrderWhatsappEventType,
   executor: DbExecutor = { query },
   options: { requireActiveHub?: boolean; disableWhenOffline?: boolean } = {},
 ) {

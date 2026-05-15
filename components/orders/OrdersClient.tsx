@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import DashboardShell from '@/components/layout/DashboardShell';
 import LocalAutomationBridge from '@/components/local-automation/LocalAutomationBridge';
-import { AlertTriangle, Banknote, Clock, CreditCard, Hash, MapPin, MessageCircle, Search, Settings, ShoppingBag, Printer, RefreshCw, Menu, ChevronDown, Eye, Ban, X, Bike, Plus, Minus, Trash2, Volume2, VolumeX } from 'lucide-react';
+import { AlertTriangle, Banknote, Clock, CreditCard, Hash, MapPin, MessageCircle, Search, SlidersHorizontal, ShoppingBag, Printer, RefreshCw, Menu, ChevronDown, Eye, Ban, X, Bike, Plus, Minus, Trash2, Volume2, VolumeX, Play, Save, Square } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useRealtimeRefresh } from '@/hooks/use-realtime-refresh';
 import { formatBusinessDateTime } from '@/lib/business-time';
@@ -153,6 +153,7 @@ type DesktopBridgeState = {
   isDesktopApp?: boolean;
   whatsRunning?: boolean;
   printRunning?: boolean;
+  hasLocalWhatsappSession?: boolean;
   whatsapp?: DesktopWhatsappState | null;
   print?: DesktopPrintState | null;
 };
@@ -200,29 +201,13 @@ type LocalHttpAgentProbe = {
   printerName: string;
 };
 
-type LocalWhatsappControlResponse = {
-  ok?: boolean;
-  status?: {
-    status?: string;
-    phoneNumber?: string;
-    qrCode?: string;
-    lastError?: string;
-    updatedAt?: string;
-  };
-  error?: string;
-};
-
-type DispatchFallbackResponse = {
-  ok?: boolean;
-  printQueued?: boolean;
-  whatsappQueued?: boolean;
-  error?: string;
-};
-
 type FaceburgDesktopBridge = {
   isDesktopApp: boolean;
   getState: () => Promise<DesktopBridgeState>;
   syncSession: () => Promise<DesktopSessionSyncResponse>;
+  listPrinters?: () => Promise<string[]>;
+  updatePrintConfig?: (payload: { printerName?: string; enabled?: boolean }) => Promise<unknown>;
+  updateWhatsAppConfig?: (payload: { enabled?: boolean }) => Promise<unknown>;
   startWhatsApp: () => Promise<{ ok: boolean }>;
   stopWhatsApp: () => Promise<{ ok: boolean }>;
   restartWhatsApp: () => Promise<{ ok: boolean }>;
@@ -256,7 +241,6 @@ const columns: Array<{ key: string; title: string; statuses: OrderStatus[]; drop
   { key: 'finished', title: 'Finalizados', statuses: ['completed', 'cancelled'], dropStatus: 'completed' },
 ];
 
-const FACEBURG_LOCAL_AGENT_URL = 'http://127.0.0.1:9787';
 const ORDER_CARD_ACTION_BUTTON_CLASS =
   'flex-1 bg-sky-500 text-white py-1.5 rounded-md text-[10px] font-bold uppercase tracking-wider hover:bg-sky-600 transition-colors shadow-sm disabled:opacity-50 disabled:cursor-not-allowed';
 const ORDER_CARD_STATUS_CLASS =
@@ -595,11 +579,13 @@ function isPrintDesktopOnline(lastSeenAt: string | null) {
 
 function isLocalWhatsappSessionActive(sessionStatus: string, lastSeenAt: string | null) {
   if (!['ready', 'qr', 'connecting'].includes(sessionStatus)) return false;
+  if (sessionStatus === 'ready') return true;
   return isWhatsappDesktopOnline(lastSeenAt);
 }
 
 function isLocalPrintAgentActive(status: string, lastSeenAt: string | null) {
   if (!['ready', 'connecting'].includes(status)) return false;
+  if (status === 'ready') return true;
   return isPrintDesktopOnline(lastSeenAt);
 }
 
@@ -611,17 +597,17 @@ function getWhatsappStatusLabel(
   localAgent?: LocalHttpAgentProbe | null,
 ) {
   if (localAgent?.available) {
-    if (localAgent.whatsappStatus === 'ready') return 'Conectado no agente local';
-    if (localAgent.whatsappStatus === 'qr') return 'QR aberto no agente local';
-    if (localAgent.whatsappStatus === 'connecting') return 'Agente local conectando';
-    return enabled ? 'Agente local online' : 'Agente local online';
+    if (localAgent.whatsappStatus === 'ready') return 'Conectado no Hub local';
+    if (localAgent.whatsappStatus === 'qr') return 'QR aberto no Hub local';
+    if (localAgent.whatsappStatus === 'connecting') return 'Hub local conectando';
+    return enabled ? 'Hub local online' : 'Hub local online';
   }
   if (!enabled) return 'Desligado';
-  if (sessionStatus === 'ready' && isWhatsappDesktopOnline(lastSeenAt)) return 'Conectado';
+  if (sessionStatus === 'ready') return desktopAppAvailable || isWhatsappDesktopOnline(lastSeenAt) ? 'Conectado' : 'Abra o Hub local';
   if (sessionStatus === 'qr') return 'Escaneie o QR';
   if (sessionStatus === 'connecting') return desktopAppAvailable ? 'Abrindo no computador' : 'Aguardando o app';
   if (sessionStatus === 'auth_failure') return 'Reconecte o WhatsApp';
-  return desktopAppAvailable ? 'Preparando conexao' : 'Abra o agente local';
+  return desktopAppAvailable ? 'Preparando conexao' : 'Abra o Hub local';
 }
 
 function getPrintStatusLabel(
@@ -632,15 +618,16 @@ function getPrintStatusLabel(
   localAgent?: LocalHttpAgentProbe | null,
 ) {
   if (localAgent?.available) {
-    if (!enabled) return 'Agente local conectado (automacao desligada)';
+    if (!enabled) return 'Hub local conectado (automacao desligada)';
     return localAgent.printerName
-      ? `Agente local conectado (${localAgent.printerName})`
-      : 'Agente local conectado';
+      ? `Hub local conectado (${localAgent.printerName})`
+      : 'Hub local conectado';
   }
   if (!enabled) return 'Desligado';
+  if (status === 'ready') return desktopAppAvailable || isPrintDesktopOnline(lastSeenAt) ? 'Conectado' : 'Abra o Hub local';
   if (isLocalPrintAgentActive(status, lastSeenAt)) return status === 'connecting' ? 'Abrindo no computador' : 'Conectado';
   if (status === 'error') return 'Erro no agente';
-  return desktopAppAvailable ? 'Preparando impressao' : 'Abra o agente local';
+  return desktopAppAvailable ? 'Preparando impressao' : 'Abra o Hub local';
 }
 
 export default function PedidosPage() {
@@ -698,6 +685,7 @@ export default function PedidosPage() {
   const [printPrinterName, setPrintPrinterName] = useState('');
   const [printLastSeenAt, setPrintLastSeenAt] = useState<string | null>(null);
   const [desktopPrintRunning, setDesktopPrintRunning] = useState(false);
+  const [desktopPrintDirectAvailable, setDesktopPrintDirectAvailable] = useState(false);
   const [desktopPrintLastError, setDesktopPrintLastError] = useState('');
   const [desktopAppAvailable, setDesktopAppAvailable] = useState(false);
   const [localHttpAgentState, setLocalHttpAgentState] = useState<LocalHttpAgentProbe | null>(null);
@@ -706,6 +694,10 @@ export default function PedidosPage() {
   const [prepTimeSaving, setPrepTimeSaving] = useState(false);
   const [quickSettingsOpen, setQuickSettingsOpen] = useState(false);
   const [quickSoundExpanded, setQuickSoundExpanded] = useState(false);
+  const [quickPrinters, setQuickPrinters] = useState<string[]>([]);
+  const [quickPrintersLoading, setQuickPrintersLoading] = useState(false);
+  const [quickPrinterSaving, setQuickPrinterSaving] = useState(false);
+  const [quickHubAction, setQuickHubAction] = useState('');
   const [soundSaving, setSoundSaving] = useState(false);
   const [orderSequenceInput, setOrderSequenceInput] = useState('');
   const [orderSequenceSaving, setOrderSequenceSaving] = useState(false);
@@ -739,7 +731,15 @@ export default function PedidosPage() {
     );
   }, []);
 
-  const applyDesktopPrintState = useCallback((state?: DesktopPrintState | null, running?: boolean) => {
+  const applyDesktopPrintState = useCallback((state?: DesktopPrintState | null, running?: boolean, directAvailable?: boolean) => {
+    if (directAvailable) {
+      setDesktopPrintDirectAvailable(true);
+      setPrintConnectionStatus('ready');
+      setPrintLastSeenAt(new Date().toISOString());
+      setDesktopPrintLastError('');
+      setDesktopPrintRunning(true);
+      return;
+    }
     if (!state) return;
     const nextStatus = String(state.status || 'disconnected');
     setPrintConnectionStatus(nextStatus);
@@ -817,6 +817,7 @@ export default function PedidosPage() {
     desktopPrintStartRef.current = (async () => {
       setDesktopAppAvailable(true);
       if (desktopBridge.printDirect) {
+        setDesktopPrintDirectAvailable(true);
         setDesktopPrintRunning(true);
         setPrintConnectionStatus('ready');
         setPrintLastSeenAt(new Date().toISOString());
@@ -868,6 +869,194 @@ export default function PedidosPage() {
 
     return desktopPrintStartRef.current;
   }, [applyDesktopPrintState, syncDesktopSession]);
+
+  const loadQuickPrinters = useCallback(async () => {
+    const desktopBridge = getFaceburgDesktopBridge();
+    if (!desktopBridge?.isDesktopApp || !desktopBridge.listPrinters) {
+      setQuickPrinters([]);
+      return;
+    }
+
+    setQuickPrintersLoading(true);
+    try {
+      const printerList = await desktopBridge.listPrinters();
+      setQuickPrinters(Array.isArray(printerList) ? printerList.filter(Boolean) : []);
+    } catch {
+      setQuickPrinters([]);
+    } finally {
+      setQuickPrintersLoading(false);
+    }
+  }, []);
+
+  async function saveQuickPrinter() {
+    if (quickPrinterSaving) return;
+    const desktopBridge = getFaceburgDesktopBridge();
+    const printerName = printPrinterName.trim();
+
+    setQuickPrinterSaving(true);
+    setOperationalMessage(null);
+    try {
+      if (desktopBridge?.isDesktopApp) {
+        await syncDesktopSession(desktopBridge);
+      }
+
+      const response = await fetch('/api/print/config', {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ printerName }),
+      });
+      const data = (await response.json().catch(() => ({}))) as PrintConfigResponse;
+      if (!response.ok) {
+        setOperationalMessage({
+          tone: 'error',
+          text: data.error || 'Falha ao salvar impressora.',
+        });
+        return;
+      }
+
+      setPrintPrinterName(String(data.printerName || printerName));
+      setPrintConnectionStatus(String(data.connectionStatus || printConnectionStatus));
+      setPrintLastSeenAt(data.lastSeenAt || null);
+      setDesktopPrintLastError(String(data.lastError || ''));
+
+      if (desktopBridge?.isDesktopApp) {
+        await desktopBridge.updatePrintConfig?.({ printerName }).catch((reason) => {
+          throw new Error(errorMessage(reason) || 'Falha ao salvar impressora no Hub.');
+        });
+        if (desktopPrintRunning) {
+          await desktopBridge.restartPrint?.().catch(() => null);
+        }
+      }
+
+      setOperationalMessage({
+        tone: 'success',
+        text: 'Impressora salva para o Hub local.',
+      });
+    } catch (reason) {
+      setOperationalMessage({
+        tone: 'error',
+        text: errorMessage(reason) || 'Falha ao salvar impressora no Hub.',
+      });
+    } finally {
+      setQuickPrinterSaving(false);
+    }
+  }
+
+  async function runQuickPrintHub(action: 'start' | 'stop') {
+    if (quickHubAction) return;
+    const desktopBridge = getFaceburgDesktopBridge();
+    if (!desktopBridge?.isDesktopApp) {
+      setOperationalMessage({
+        tone: 'error',
+        text: 'Abra a tela de pedidos dentro do Hub local para controlar a impressao deste PC.',
+      });
+      return;
+    }
+
+    const printerName = printPrinterName.trim();
+    setQuickHubAction(`print-${action}`);
+    setOperationalMessage(null);
+    try {
+      await syncDesktopSession(desktopBridge);
+
+      if (action === 'start') {
+        if (!printEnabled) {
+          const response = await fetch('/api/print/config', {
+            method: 'PATCH',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ enabled: true, printerName }),
+          });
+          const data = (await response.json().catch(() => ({}))) as PrintConfigResponse;
+          if (!response.ok) {
+            throw new Error(data.error || 'Falha ao ativar impressao.');
+          }
+          setPrintEnabled(Boolean(data.enabled));
+          setPrintHasAgentKey(Boolean(data.hasAgentKey));
+          setPrintPrinterName(String(data.printerName || printerName));
+        }
+
+        await desktopBridge.updatePrintConfig?.({ enabled: true, printerName }).catch((reason) => {
+          throw new Error(errorMessage(reason) || 'Falha ao atualizar impressao no Hub.');
+        });
+        await desktopBridge.startPrint?.();
+        setDesktopPrintRunning(true);
+        setPrintConnectionStatus('connecting');
+        setPrintLastSeenAt(new Date().toISOString());
+        setOperationalMessage({ tone: 'success', text: 'Impressao iniciando no Hub local.' });
+        return;
+      }
+
+      await desktopBridge.stopPrint?.();
+      setDesktopPrintRunning(false);
+      setPrintConnectionStatus('stopped');
+      setPrintLastSeenAt(null);
+      setOperationalMessage({ tone: 'warning', text: 'Impressao parada neste Hub local.' });
+    } catch (reason) {
+      setOperationalMessage({
+        tone: 'error',
+        text: errorMessage(reason) || 'Falha ao controlar impressao no Hub.',
+      });
+    } finally {
+      setQuickHubAction('');
+    }
+  }
+
+  async function runQuickWhatsappHub(action: 'start' | 'stop') {
+    if (quickHubAction) return;
+    const desktopBridge = getFaceburgDesktopBridge();
+    if (!desktopBridge?.isDesktopApp) {
+      setOperationalMessage({
+        tone: 'error',
+        text: 'Abra a tela de pedidos dentro do Hub local para controlar o WhatsApp deste PC.',
+      });
+      return;
+    }
+
+    setQuickHubAction(`whatsapp-${action}`);
+    setOperationalMessage(null);
+    try {
+      await syncDesktopSession(desktopBridge);
+
+      if (action === 'start') {
+        if (!whatsappEnabled) {
+          const response = await fetch('/api/whatsapp/config', {
+            method: 'PATCH',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ enabled: true }),
+          });
+          const data = (await response.json().catch(() => ({}))) as WhatsappConfigResponse;
+          if (!response.ok) {
+            throw new Error(data.error || 'Falha ao ativar WhatsApp.');
+          }
+          setWhatsappEnabled(Boolean(data.enabled));
+          setWhatsappHasAgentKey(Boolean(data.hasAgentKey));
+          setWhatsappSessionStatus(String(data.sessionStatus || 'disconnected'));
+          setWhatsappLastSeenAt(data.lastSeenAt || null);
+        }
+
+        await desktopBridge.updateWhatsAppConfig?.({ enabled: true }).catch((reason) => {
+          throw new Error(errorMessage(reason) || 'Falha ao atualizar WhatsApp no Hub.');
+        });
+        await desktopBridge.startWhatsApp();
+        setWhatsappSessionStatus('connecting');
+        setWhatsappLastSeenAt(new Date().toISOString());
+        setOperationalMessage({ tone: 'success', text: 'WhatsApp abrindo no Hub local.' });
+        return;
+      }
+
+      await desktopBridge.stopWhatsApp();
+      setWhatsappSessionStatus('stopped');
+      setWhatsappLastSeenAt(null);
+      setOperationalMessage({ tone: 'warning', text: 'WhatsApp parado neste Hub local.' });
+    } catch (reason) {
+      setOperationalMessage({
+        tone: 'error',
+        text: errorMessage(reason) || 'Falha ao controlar WhatsApp no Hub.',
+      });
+    } finally {
+      setQuickHubAction('');
+    }
+  }
 
   useEffect(() => {
     if (!operationalMessage || operationalMessage.tone !== 'success') return;
@@ -1040,6 +1229,8 @@ export default function PedidosPage() {
   const loadOperationalStatus = useCallback(async () => {
     try {
       const desktopBridge = getFaceburgDesktopBridge();
+      const desktopPrintDirectReady = Boolean(desktopBridge?.isDesktopApp && desktopBridge.printDirect);
+      setDesktopPrintDirectAvailable(desktopPrintDirectReady);
       const [settingsResponse, whatsappResponse, printResponse, desktopState, localAgentHealth] = await Promise.all([
         fetch('/api/cardapio/settings', {
           cache: 'no-store',
@@ -1062,11 +1253,7 @@ export default function PedidosPage() {
         desktopBridge?.isDesktopApp
           ? desktopBridge.getState().catch(() => null)
           : Promise.resolve(null),
-        !desktopBridge?.isDesktopApp
-          ? fetch(`${FACEBURG_LOCAL_AGENT_URL}/api/health`, { cache: 'no-store' })
-              .then(async (response) => (response.ok ? response.json() : null))
-              .catch(() => null)
-          : Promise.resolve(null),
+        Promise.resolve(null),
       ]);
 
       const settingsData = (await settingsResponse.json().catch(() => ({}))) as CardapioSettingsResponse;
@@ -1100,15 +1287,7 @@ export default function PedidosPage() {
       }
 
       if (!desktopBridge?.isDesktopApp) {
-        const localProbe = localAgentHealth && typeof localAgentHealth === 'object'
-          ? {
-              checkedAt: Date.now(),
-              available: Boolean((localAgentHealth as { online?: boolean }).online),
-              whatsappReady: String((localAgentHealth as { whatsapp?: { status?: string } }).whatsapp?.status || '') === 'ready',
-              whatsappStatus: String((localAgentHealth as { whatsapp?: { status?: string } }).whatsapp?.status || 'disconnected'),
-              printerName: String((localAgentHealth as { printerName?: string }).printerName || ''),
-            }
-          : { checkedAt: Date.now(), available: false, whatsappReady: false, whatsappStatus: 'disconnected', printerName: '' };
+        const localProbe = { checkedAt: Date.now(), available: false, whatsappReady: false, whatsappStatus: 'disconnected', printerName: '' };
         localHttpAgentRef.current = localProbe;
         setLocalHttpAgentState(localProbe);
       }
@@ -1116,24 +1295,30 @@ export default function PedidosPage() {
       if (desktopState?.isDesktopApp) {
         setDesktopAppAvailable(true);
         applyDesktopWhatsappState(desktopState.whatsapp);
-        applyDesktopPrintState(desktopState.print, Boolean(desktopState.printRunning));
+        if (desktopPrintDirectReady && Boolean(printData.enabled)) {
+          setDesktopPrintRunning(true);
+          setPrintConnectionStatus('ready');
+          setPrintLastSeenAt(new Date().toISOString());
+          setDesktopPrintLastError('');
+        } else {
+          applyDesktopPrintState(desktopState.print, Boolean(desktopState.printRunning));
+        }
         const desktopStatus = String(desktopState.whatsapp?.status || 'disconnected');
         const desktopLooksActive = Boolean(desktopState.whatsRunning)
           && ['ready', 'qr', 'connecting'].includes(desktopStatus);
-        const shouldAutoStart =
+        const shouldSyncDesktopWhatsapp =
           Boolean(whatsappData.enabled)
           && !desktopLooksActive
           && Date.now() - lastDesktopAutoStartAtRef.current > 15000;
 
-        if (shouldAutoStart) {
+        if (shouldSyncDesktopWhatsapp && desktopBridge?.isDesktopApp) {
           lastDesktopAutoStartAtRef.current = Date.now();
-          void ensureDesktopWhatsappStarted({
-            forceRestart: Boolean(desktopState.whatsRunning),
-          });
+          void syncDesktopSession(desktopBridge);
         }
 
         const desktopPrintStatus = String(desktopState.print?.status || 'disconnected');
-        const desktopPrintLooksActive = Boolean(desktopState.printRunning)
+        const desktopPrintLooksActive = Boolean(desktopBridge?.printDirect && printData.enabled)
+          || Boolean(desktopState.printRunning)
           && ['ready', 'connecting'].includes(desktopPrintStatus);
         const shouldAutoStartPrint =
           Boolean(printData.enabled)
@@ -1152,7 +1337,7 @@ export default function PedidosPage() {
     } catch {
       // No-op: the screen can keep running with orders even if status probes fail.
     }
-  }, [applyDesktopPrintState, applyDesktopWhatsappState, ensureDesktopPrintStarted, ensureDesktopWhatsappStarted]);
+  }, [applyDesktopPrintState, applyDesktopWhatsappState, ensureDesktopPrintStarted, syncDesktopSession]);
 
   const loadPaymentOptions = useCallback(async () => {
     setPaymentOptionsLoading(true);
@@ -1206,7 +1391,11 @@ export default function PedidosPage() {
     }
   }, []);
 
-  const { refreshNow } = useRealtimeRefresh({ load: loadOrders, fallbackRefreshMs: 0 });
+  const { refreshNow } = useRealtimeRefresh({
+    load: loadOrders,
+    fallbackRefreshMs: 15000,
+    pauseWhenHidden: false,
+  });
 
   useEffect(() => {
     let active = true;
@@ -1234,14 +1423,17 @@ export default function PedidosPage() {
     const desktopBridge = getFaceburgDesktopBridge();
     if (desktopBridge?.isDesktopApp) {
       setDesktopAppAvailable(true);
+      setDesktopPrintDirectAvailable(Boolean(desktopBridge.printDirect));
       return;
     }
+    setDesktopPrintDirectAvailable(false);
     void loadOperationalStatus();
   }, [loadOperationalStatus]);
 
   useEffect(() => {
     const desktopBridge = getFaceburgDesktopBridge();
     if (!desktopBridge?.isDesktopApp) return;
+    setDesktopPrintDirectAvailable(Boolean(desktopBridge.printDirect));
 
     let active = true;
     void syncDesktopSession(desktopBridge)
@@ -1268,7 +1460,7 @@ export default function PedidosPage() {
 
     const unsubscribePrint = desktopBridge.onPrintState?.((state) => {
       if (!active) return;
-      applyDesktopPrintState(state);
+      applyDesktopPrintState(state, undefined, Boolean(desktopBridge.printDirect && printEnabled));
     });
 
     void desktopBridge.getState()
@@ -1276,7 +1468,7 @@ export default function PedidosPage() {
         if (!active || !state?.isDesktopApp) return;
         setDesktopAppAvailable(true);
         applyDesktopWhatsappState(state.whatsapp);
-        applyDesktopPrintState(state.print, Boolean(state.printRunning));
+        applyDesktopPrintState(state.print, Boolean(state.printRunning), Boolean(desktopBridge.printDirect && printEnabled));
       })
       .catch(() => {});
 
@@ -1289,7 +1481,7 @@ export default function PedidosPage() {
         unsubscribePrint();
       }
     };
-  }, [applyDesktopPrintState, applyDesktopWhatsappState, loadOperationalStatus, syncDesktopSession]);
+  }, [applyDesktopPrintState, applyDesktopWhatsappState, loadOperationalStatus, printEnabled, syncDesktopSession]);
 
   useEffect(() => {
     void loadPaymentOptions();
@@ -1352,29 +1544,20 @@ export default function PedidosPage() {
     setWhatsappUpdating(true);
     setOperationalMessage(null);
     try {
-      const probedLocalAgent = usingDesktopApp ? null : await probeLocalHttpAgent(true).catch(() => null);
-      const localHttpWhatsappActive = Boolean(
-        probedLocalAgent?.available &&
-        ['ready', 'qr', 'connecting'].includes(probedLocalAgent.whatsappStatus),
-      );
       const shouldReconnectLocalAgent =
+        usingDesktopApp &&
         whatsappEnabled &&
-        !localHttpWhatsappActive &&
         !isLocalWhatsappSessionActive(whatsappSessionStatus, whatsappLastSeenAt);
 
       if (shouldReconnectLocalAgent) {
-        const started = usingDesktopApp
-          ? await ensureDesktopWhatsappStarted({
-              forceRestart: ['auth_failure', 'error', 'disconnected', 'stopped'].includes(whatsappSessionStatus),
-            })
-          : probedLocalAgent?.available
-            ? await startLocalHttpWhatsapp().then(() => true).catch(() => false)
-            : false;
+        const started = await ensureDesktopWhatsappStarted({
+          forceRestart: ['auth_failure', 'error', 'disconnected', 'stopped'].includes(whatsappSessionStatus),
+        });
         setOperationalMessage({
           tone: started ? 'warning' : 'error',
           text: started
-            ? 'WhatsApp automatico ja estava ON. Iniciei a sessao no agente local.'
-            : 'WhatsApp esta ON, mas nao consegui iniciar o agente local neste computador.',
+            ? 'WhatsApp automatico ja estava ON. Iniciei a sessao no Hub local.'
+            : 'WhatsApp esta ON, mas nao consegui iniciar o Hub local neste computador.',
         });
         return;
       }
@@ -1428,29 +1611,6 @@ export default function PedidosPage() {
         return;
       }
 
-      const localAgent = usingDesktopApp ? null : probedLocalAgent || await probeLocalHttpAgent(true);
-      if (localAgent?.whatsappReady) {
-        setOperationalMessage({
-          tone: 'success',
-          text: 'WhatsApp conectado no agente local. Mensagens automaticas ativas.',
-        });
-        return;
-      }
-      if (localAgent?.available) {
-        const localStatus = await startLocalHttpWhatsapp().catch(() => '');
-        if (localStatus) {
-          setOperationalMessage({
-            tone: localStatus === 'ready' ? 'success' : 'warning',
-            text: localStatus === 'qr'
-              ? 'WhatsApp iniciado no agente local. Escaneie o QR para conectar.'
-              : localStatus === 'ready'
-                ? 'WhatsApp iniciado no agente local. Mensagens automaticas ativas.'
-                : 'WhatsApp iniciando no agente local.',
-          });
-          return;
-        }
-      }
-
       if (usingDesktopApp) {
         const startResult = await ensureDesktopWhatsappStarted();
         if (!startResult) {
@@ -1473,7 +1633,7 @@ export default function PedidosPage() {
             patchMessage ||
             (usingDesktopApp
               ? 'WhatsApp ativado. Se o WhatsApp Web abrir neste computador, conecte a conta da empresa para concluir.'
-              : 'WhatsApp ativado. Abra o agente local neste computador para concluir a conexao.'),
+              : 'WhatsApp ativado. Abra o Hub local neste computador para concluir a conexao.'),
         });
         return;
       }
@@ -1778,101 +1938,17 @@ export default function PedidosPage() {
     }
   }
 
-  async function queueOrderDispatchFallback(
-    orderId: string,
-    payload: {
-      printEventType?: 'new_order' | 'status_update' | 'manual_receipt';
-      printEventTypes?: Array<'new_order' | 'status_update' | 'manual_receipt'>;
-      whatsappEventType?: 'new_order' | 'status_update';
-    },
-  ) {
-    const response = await fetch(`/api/orders/${orderId}/dispatch`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(payload),
-    });
-    return (await response.json().catch(() => ({}))) as DispatchFallbackResponse;
-  }
-
-  async function requestLocalHttpAgent<TResponse>(
-    path: string,
-    options: RequestInit = {},
-    timeoutMs = 1200,
-  ) {
-    const controller = new AbortController();
-    const timeoutId = window.setTimeout(() => controller.abort(), timeoutMs);
-    try {
-      const response = await fetch(`${FACEBURG_LOCAL_AGENT_URL}${path}`, {
-        ...options,
-        cache: 'no-store',
-        signal: controller.signal,
-      });
-      const data = (await response.json().catch(() => ({}))) as TResponse & { error?: string };
-      if (!response.ok) {
-        throw new Error(data.error || `HTTP ${response.status}`);
-      }
-      return data;
-    } finally {
-      window.clearTimeout(timeoutId);
-    }
-  }
-
-  async function startLocalHttpWhatsapp() {
-    const response = await requestLocalHttpAgent<LocalWhatsappControlResponse>(
-      '/api/whatsapp/start',
-      { method: 'POST', headers: { 'content-type': 'application/json' } },
-      15000,
-    );
-    const status = String(response.status?.status || 'connecting');
-    const currentProbe = localHttpAgentRef.current;
-    const nextProbe: LocalHttpAgentProbe = {
+  async function probeLocalHttpAgent() {
+    const next = {
       checkedAt: Date.now(),
-      available: true,
-      whatsappReady: status === 'ready',
-      whatsappStatus: status,
-      printerName: currentProbe?.printerName || '',
+      available: false,
+      whatsappReady: false,
+      whatsappStatus: 'disconnected',
+      printerName: '',
     };
-    localHttpAgentRef.current = nextProbe;
-    setLocalHttpAgentState(nextProbe);
-    setWhatsappSessionStatus(status);
-    setWhatsappLastSeenAt(new Date().toISOString());
-    return status;
-  }
-
-  async function probeLocalHttpAgent(force = false) {
-    const cached = localHttpAgentRef.current;
-    if (!force && cached && Date.now() - cached.checkedAt < 5000) {
-      return cached;
-    }
-
-    try {
-      const health = await requestLocalHttpAgent<{
-        online?: boolean;
-        printerName?: string;
-        whatsapp?: { status?: string };
-      }>('/api/health', {}, 900);
-      const next = {
-        checkedAt: Date.now(),
-        available: Boolean(health.online),
-        whatsappReady: String(health.whatsapp?.status || '') === 'ready',
-        whatsappStatus: String(health.whatsapp?.status || 'disconnected'),
-        printerName: String(health.printerName || ''),
-      };
-      localHttpAgentRef.current = next;
-      setLocalHttpAgentState(next);
-      return next;
-    } catch {
-      const next = {
-        checkedAt: Date.now(),
-        available: false,
-        whatsappReady: false,
-        whatsappStatus: 'disconnected',
-        printerName: '',
-      };
-      localHttpAgentRef.current = next;
-      setLocalHttpAgentState(next);
-      return next;
-    }
+    localHttpAgentRef.current = next;
+    setLocalHttpAgentState(next);
+    return next;
   }
 
   async function runLocalPrintJobs(printJobs: LocalPrintJob[]) {
@@ -1886,18 +1962,7 @@ export default function PedidosPage() {
       return;
     }
 
-    const localAgent = await probeLocalHttpAgent(true);
-    if (!localAgent.available) {
-      throw new Error('Agente .NET local nao esta disponivel em 127.0.0.1:9787.');
-    }
-
-    for (const job of printJobs) {
-      await requestLocalHttpAgent('/api/print', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify(job),
-      }, 12000);
-    }
+    throw new Error('Hub local nao esta logado neste computador.');
   }
 
   async function runLocalWhatsappJobs(whatsappJobs: LocalWhatsappJob[]) {
@@ -1911,31 +1976,13 @@ export default function PedidosPage() {
       return;
     }
 
-    const localAgent = await probeLocalHttpAgent(true);
-    if (!localAgent.available) {
-      throw new Error('Agente .NET local nao esta disponivel em 127.0.0.1:9787.');
-    }
-    if (!localAgent.whatsappReady) {
-      throw new Error('WhatsApp do agente .NET ainda nao esta conectado.');
-    }
-
-    for (const job of whatsappJobs) {
-      await requestLocalHttpAgent('/api/whatsapp/send', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify(job),
-      }, 35000);
-    }
+    throw new Error('Hub local nao esta logado neste computador.');
   }
 
   async function dispatchLocalOrderJobs(
     orderId: string,
     localDispatch: LocalDispatchPayload | undefined,
     expected: { print?: boolean; whatsapp?: boolean },
-    fallbackEvents: {
-      print?: 'new_order' | 'status_update' | 'manual_receipt' | Array<'new_order' | 'status_update' | 'manual_receipt'>;
-      whatsapp?: 'new_order' | 'status_update';
-    } = {},
   ) {
     const printJobs = Array.isArray(localDispatch?.printJobs) ? localDispatch.printJobs : [];
     const whatsappJobs = Array.isArray(localDispatch?.whatsappJobs) ? localDispatch.whatsappJobs : [];
@@ -1984,27 +2031,9 @@ export default function PedidosPage() {
 
     if (!failures.length) return;
 
-    const printFallbackEvents = fallbackEvents.print || 'status_update';
-    const fallback = await queueOrderDispatchFallback(orderId, {
-      printEventType: printFailed && !Array.isArray(printFallbackEvents) ? printFallbackEvents : undefined,
-      printEventTypes: printFailed && Array.isArray(printFallbackEvents) ? printFallbackEvents : undefined,
-      whatsappEventType: whatsappFailed ? fallbackEvents.whatsapp || 'status_update' : undefined,
-    }).catch((error) => ({
-      ok: false,
-      printQueued: false,
-      whatsappQueued: false,
-      error: errorMessage(error),
-    }) satisfies DispatchFallbackResponse);
-
-    const fallbackOk =
-      (!printFailed || Boolean(fallback.printQueued)) &&
-      (!whatsappFailed || Boolean(fallback.whatsappQueued));
-
     setOperationalMessage({
-      tone: fallbackOk ? 'warning' : 'error',
-      text: fallbackOk
-        ? `Envio local falhou em ${failures.join(' e ')}. Deixei na fila do servidor.`
-        : `Envio local falhou em ${failures.join(' e ')} e nao consegui deixar na fila.`,
+      tone: 'error',
+      text: `Envio local falhou em ${failures.join(' e ')}. Verifique o Hub deste computador.`,
     });
   }
 
@@ -2014,13 +2043,13 @@ export default function PedidosPage() {
     if (!previousOrder) return;
 
     const desktopBridge = getFaceburgDesktopBridge();
-    const localHttpAgent = desktopBridge?.isDesktopApp ? null : await probeLocalHttpAgent();
     const canUseLocalPrint =
       nextStatus === 'processing' &&
       printEnabled &&
-      Boolean((desktopBridge?.isDesktopApp && desktopBridge.printDirect) || localHttpAgent?.available);
+      Boolean(desktopBridge?.isDesktopApp && desktopBridge.printDirect);
+    const shouldSendStatusWhatsapp = nextStatus === 'delivering' || nextStatus === 'cancelled';
     const canUseLocalWhatsapp =
-      nextStatus === 'delivering' &&
+      shouldSendStatusWhatsapp &&
       whatsappEnabled &&
       Boolean(
         (
@@ -2028,13 +2057,10 @@ export default function PedidosPage() {
           isLocalWhatsappSessionActive(whatsappSessionStatus, whatsappLastSeenAt) &&
           desktopBridge?.isDesktopApp &&
           desktopBridge.sendWhatsAppDirect
-        ) ||
-        localHttpAgent?.whatsappReady,
+        ),
       );
     const useLocalPrint = canUseLocalPrint
-      ? desktopBridge?.isDesktopApp
-        ? await ensureDesktopPrintStarted().catch(() => false)
-        : true
+      ? await ensureDesktopPrintStarted().catch(() => false)
       : false;
     const useLocalWhatsapp = canUseLocalWhatsapp;
     const preferLocalDispatch = Boolean(useLocalPrint || useLocalWhatsapp);
@@ -2581,15 +2607,12 @@ export default function PedidosPage() {
     try {
       const desktopBridge = getFaceburgDesktopBridge();
       const usingDesktopApp = Boolean(desktopBridge?.isDesktopApp);
-      const localHttpAgent = usingDesktopApp ? null : await probeLocalHttpAgent();
 
-      if ((usingDesktopApp && printEnabled && desktopBridge?.printDirect) || localHttpAgent?.available) {
-        if (usingDesktopApp) {
-          const localPrintActive = isLocalPrintAgentActive(printConnectionStatus, printLastSeenAt);
-          await ensureDesktopPrintStarted({
-            forceRestart: desktopPrintRunning && !localPrintActive,
-          });
-        }
+      if (usingDesktopApp && printEnabled && desktopBridge?.printDirect) {
+        const localPrintActive = Boolean(desktopBridge.printDirect) || isLocalPrintAgentActive(printConnectionStatus, printLastSeenAt);
+        await ensureDesktopPrintStarted({
+          forceRestart: desktopPrintRunning && !localPrintActive,
+        });
 
         const localResponse = await fetch(`/api/orders/${order.id}/print`, {
           method: 'POST',
@@ -2617,52 +2640,17 @@ export default function PedidosPage() {
           });
           return;
         } catch (error) {
-          const fallback = await queueOrderDispatchFallback(order.id, { printEventType: 'manual_receipt' })
-            .catch((fallbackError) => ({
-              ok: false,
-              printQueued: false,
-              whatsappQueued: false,
-              error: errorMessage(fallbackError),
-            }) satisfies DispatchFallbackResponse);
           setOperationalMessage({
-            tone: fallback.printQueued ? 'warning' : 'error',
-            text: fallback.printQueued
-              ? `Impressao local falhou (${errorMessage(error)}). Recibo ficou na fila do servidor.`
-              : `Impressao local falhou (${errorMessage(error)}) e nao consegui deixar na fila.`,
+            tone: 'error',
+            text: `Impressao local falhou (${errorMessage(error)}). Verifique o Hub deste computador.`,
           });
           return;
         }
       }
 
-      const sendPrintRequest = async () => {
-        const response = await fetch(`/api/orders/${order.id}/print`, {
-          method: 'POST',
-        });
-        const data = (await response.json().catch(() => ({}))) as { error?: string };
-        return { response, data };
-      };
-
-      let { response, data } = await sendPrintRequest();
-
-      if (!response.ok && usingDesktopApp && /hub de impressao offline|agente local de impressao offline/i.test(String(data.error || ''))) {
-        const restarted = await ensureDesktopPrintStarted({ forceRestart: true });
-        if (restarted) {
-          await new Promise((resolve) => window.setTimeout(resolve, 1200));
-          ({ response, data } = await sendPrintRequest());
-        }
-      }
-
-      if (!response.ok) {
-        setOperationalMessage({
-          tone: 'error',
-          text: data.error || 'Nao foi possivel enviar o recibo para a impressora.',
-        });
-        return;
-      }
-
       setOperationalMessage({
-        tone: 'success',
-        text: `Recibo do pedido #${order.id.slice(0, 8)} enviado para impressao.`,
+        tone: 'error',
+        text: 'Abra este pedido dentro do Hub local para imprimir.',
       });
     } catch {
       setOperationalMessage({
@@ -2701,21 +2689,58 @@ export default function PedidosPage() {
     isLocalWhatsappSessionActive(whatsappSessionStatus, whatsappLastSeenAt);
   const whatsappNeedsLocalStart = whatsappEnabled && (desktopAppAvailable || localHttpAgentAvailable) && !whatsappLocalActive;
   const whatsappQuickActionLabel = whatsappNeedsLocalStart ? 'Iniciar' : whatsappEnabled ? 'Desligar' : 'Ligar';
+  const desktopPrintDirectReady = printEnabled && desktopPrintDirectAvailable;
   const printLocalActive =
+    desktopPrintDirectReady ||
     localHttpAgentAvailable ||
     isLocalPrintAgentActive(printConnectionStatus, printLastSeenAt);
 
   useEffect(() => {
     if (!quickSettingsOpen) return;
     void loadCashStatus();
-  }, [loadCashStatus, quickSettingsOpen]);
+    void loadQuickPrinters();
+  }, [loadCashStatus, loadQuickPrinters, quickSettingsOpen]);
 
   return (
     <DashboardShell overlaySidebar>
-      <div className="flex justify-between items-center mb-6">
-        <div>
-          <h2 className="text-xl font-bold text-slate-900">Gerenciador de Pedidos</h2>
-          <p className="text-sm text-slate-500">Pedidos do cardapio e PDV em tempo real.</p>
+      <div className="mb-6 flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+        <div className="flex min-w-0 flex-1 flex-col gap-2 md:flex-row md:items-start md:gap-6">
+          <div className="shrink-0">
+            <h2 className="text-xl font-bold text-slate-900">Gerenciador de Pedidos</h2>
+            <p className="text-sm text-slate-500">Pedidos do cardapio e PDV em tempo real.</p>
+          </div>
+          <div className="min-w-0 pt-0.5 text-xs text-slate-500 md:border-l md:border-slate-200 md:pl-4">
+            <p>
+              Status do WhatsApp:{' '}
+              <span className="font-semibold text-slate-700">
+                {getWhatsappStatusLabel(whatsappSessionStatus, whatsappLastSeenAt, whatsappEnabled, desktopAppAvailable, localHttpAgentState)}
+              </span>
+              {whatsappHasAgentKey
+                ? ''
+                : desktopAppAvailable
+                  ? ' (primeira conexao deste computador)'
+                  : ' (abra o Hub local neste computador)'}
+            </p>
+            <p className="mt-1">
+              Status da impressao:{' '}
+              <span className="font-semibold text-slate-700">
+                {getPrintStatusLabel(
+                  desktopPrintDirectReady ? 'ready' : printConnectionStatus,
+                  printLastSeenAt,
+                  printEnabled,
+                  desktopAppAvailable,
+                  localHttpAgentState,
+                )}
+              </span>
+              {printHasAgentKey
+                ? ''
+                : desktopAppAvailable
+                  ? ' (primeira conexao deste computador)'
+                  : ' (abra o Hub local neste computador)'}
+              {desktopPrintLastError ? <span className="text-red-500"> - {desktopPrintLastError}</span> : null}
+              {printEnabled && desktopAppAvailable && !printLocalActive ? <span className="text-amber-600"> - vou tentar abrir ao imprimir</span> : null}
+            </p>
+          </div>
         </div>
         <div className="flex flex-wrap items-center justify-end gap-2">
           <LocalAutomationBridge
@@ -2728,18 +2753,6 @@ export default function PedidosPage() {
             className="btn-secondary flex items-center gap-2"
             type="button"
             onClick={() => {
-              setQuickSettingsOpen(true);
-              void loadOperationalStatus();
-              void loadCashStatus();
-            }}
-          >
-            <Settings className="h-4 w-4" />
-            Config rapida
-          </button>
-          <button
-            className="btn-secondary flex items-center gap-2"
-            type="button"
-            onClick={() => {
               refreshNow(true, true);
               void loadOperationalStatus();
             }}
@@ -2747,38 +2760,21 @@ export default function PedidosPage() {
             <RefreshCw className="w-4 h-4" />
             Atualizar
           </button>
+          <button
+            className="inline-flex h-10 w-12 items-center justify-center rounded-md border border-slate-200 bg-white text-black shadow-sm transition-colors hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-slate-300"
+            type="button"
+            aria-label="Config rapida"
+            title="Config rapida"
+            onClick={() => {
+              setQuickSettingsOpen(true);
+              void loadOperationalStatus();
+              void loadCashStatus();
+              void loadQuickPrinters();
+            }}
+          >
+            <SlidersHorizontal size={18} strokeWidth={2.8} />
+          </button>
         </div>
-      </div>
-
-      <div className="mb-3">
-        <p className="text-xs text-slate-500">
-          Status do WhatsApp:{' '}
-          <span className="font-semibold text-slate-700">
-            {getWhatsappStatusLabel(whatsappSessionStatus, whatsappLastSeenAt, whatsappEnabled, desktopAppAvailable, localHttpAgentState)}
-          </span>
-          {localHttpAgentAvailable
-            ? ' (127.0.0.1:9787)'
-            : whatsappHasAgentKey
-              ? ''
-              : desktopAppAvailable
-                ? ' (primeira conexao deste computador)'
-                : ' (abra o agente local neste computador)'}
-        </p>
-        <p className="mt-1 text-xs text-slate-500">
-          Status da impressao:{' '}
-          <span className="font-semibold text-slate-700">
-            {getPrintStatusLabel(printConnectionStatus, printLastSeenAt, printEnabled, desktopAppAvailable, localHttpAgentState)}
-          </span>
-          {localHttpAgentAvailable
-            ? ' (127.0.0.1:9787)'
-            : printHasAgentKey
-              ? ''
-              : desktopAppAvailable
-                ? ' (primeira conexao deste computador)'
-                : ' (abra o agente local neste computador)'}
-          {desktopPrintLastError ? <span className="text-red-500"> - {desktopPrintLastError}</span> : null}
-          {printEnabled && desktopAppAvailable && !printLocalActive ? <span className="text-amber-600"> - vou tentar abrir ao imprimir</span> : null}
-        </p>
       </div>
 
       {operationalMessage ? (
@@ -2868,6 +2864,21 @@ export default function PedidosPage() {
                   </p>
                 </div>
               </section>
+
+              {operationalMessage ? (
+                <p
+                  className={cn(
+                    'rounded-xl border px-3 py-2 text-sm font-semibold',
+                    operationalMessage.tone === 'success'
+                      ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
+                      : operationalMessage.tone === 'warning'
+                        ? 'border-amber-200 bg-amber-50 text-amber-700'
+                        : 'border-rose-200 bg-rose-50 text-rose-700',
+                  )}
+                >
+                  {operationalMessage.text}
+                </p>
+              ) : null}
 
               <section className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
                 <div className="flex items-start justify-between gap-3">
@@ -2990,6 +3001,36 @@ export default function PedidosPage() {
                     {whatsappUpdating ? '...' : whatsappQuickActionLabel}
                   </button>
                 </div>
+                <div className="mt-4 space-y-3">
+                  <div className="rounded-xl border border-slate-100 bg-slate-50 px-3 py-2 text-xs text-slate-500">
+                    <span className="font-bold text-slate-700">Hub local:</span>{' '}
+                    {desktopAppAvailable
+                      ? whatsappLocalActive
+                        ? 'WhatsApp ativo neste PC.'
+                        : 'WhatsApp parado neste PC.'
+                      : 'Abra esta tela pelo Hub local.'}
+                  </div>
+                  <div className="grid grid-cols-2 gap-2">
+                    <button
+                      type="button"
+                      onClick={() => void runQuickWhatsappHub('start')}
+                      disabled={!desktopAppAvailable || Boolean(quickHubAction)}
+                      className="inline-flex items-center justify-center gap-2 rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs font-black text-emerald-700 transition hover:bg-emerald-100 disabled:cursor-not-allowed disabled:opacity-60"
+                    >
+                      <Play className="h-3.5 w-3.5" />
+                      {quickHubAction === 'whatsapp-start' ? 'Abrindo...' : 'Abrir Hub'}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => void runQuickWhatsappHub('stop')}
+                      disabled={!desktopAppAvailable || Boolean(quickHubAction)}
+                      className="inline-flex items-center justify-center gap-2 rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-black text-slate-600 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
+                    >
+                      <Square className="h-3.5 w-3.5" />
+                      {quickHubAction === 'whatsapp-stop' ? 'Parando...' : 'Parar Hub'}
+                    </button>
+                  </div>
+                </div>
               </section>
 
               <section className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
@@ -3017,6 +3058,74 @@ export default function PedidosPage() {
                   >
                     {printUpdating ? '...' : printEnabled ? 'ON' : 'OFF'}
                   </button>
+                </div>
+                <div className="mt-4 space-y-3">
+                  <div className="grid grid-cols-[1fr_auto_auto] gap-2">
+                    <select
+                      value={printPrinterName}
+                      onChange={(event) => setPrintPrinterName(event.target.value)}
+                      disabled={!desktopAppAvailable || quickPrintersLoading || quickPrinterSaving}
+                      className="min-w-0 rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-bold text-slate-700 outline-none focus:border-sky-300 focus:ring-2 focus:ring-sky-100 disabled:bg-slate-50 disabled:text-slate-400"
+                    >
+                      <option value="">
+                        {quickPrintersLoading ? 'Buscando impressoras...' : 'Selecione a impressora'}
+                      </option>
+                      {quickPrinters.map((printer) => (
+                        <option key={printer} value={printer}>
+                          {printer}
+                        </option>
+                      ))}
+                      {printPrinterName && !quickPrinters.includes(printPrinterName) ? (
+                        <option value={printPrinterName}>{printPrinterName}</option>
+                      ) : null}
+                    </select>
+                    <button
+                      type="button"
+                      onClick={() => void loadQuickPrinters()}
+                      disabled={!desktopAppAvailable || quickPrintersLoading || quickPrinterSaving}
+                      className="inline-flex items-center justify-center rounded-xl border border-slate-200 bg-white px-3 py-2 text-slate-600 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
+                      aria-label="Buscar impressoras do Hub"
+                    >
+                      <RefreshCw className={cn('h-4 w-4', quickPrintersLoading ? 'animate-spin' : '')} />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => void saveQuickPrinter()}
+                      disabled={!desktopAppAvailable || quickPrinterSaving || Boolean(quickHubAction)}
+                      className="inline-flex items-center justify-center rounded-xl border border-slate-200 bg-white px-3 py-2 text-slate-600 transition hover:bg-slate-50 disabled:cursor-wait disabled:opacity-60"
+                      aria-label="Salvar impressora no Hub"
+                    >
+                      <Save className="h-4 w-4" />
+                    </button>
+                  </div>
+                  <div className="rounded-xl border border-slate-100 bg-slate-50 px-3 py-2 text-xs text-slate-500">
+                    <span className="font-bold text-slate-700">Hub local:</span>{' '}
+                    {desktopAppAvailable
+                      ? printLocalActive
+                        ? 'Impressao pronta neste PC.'
+                        : 'Impressao parada neste PC.'
+                      : 'Abra esta tela pelo Hub local.'}
+                  </div>
+                  <div className="grid grid-cols-2 gap-2">
+                    <button
+                      type="button"
+                      onClick={() => void runQuickPrintHub('start')}
+                      disabled={!desktopAppAvailable || Boolean(quickHubAction)}
+                      className="inline-flex items-center justify-center gap-2 rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs font-black text-emerald-700 transition hover:bg-emerald-100 disabled:cursor-not-allowed disabled:opacity-60"
+                    >
+                      <Play className="h-3.5 w-3.5" />
+                      {quickHubAction === 'print-start' ? 'Ligando...' : 'Ligar Hub'}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => void runQuickPrintHub('stop')}
+                      disabled={!desktopAppAvailable || Boolean(quickHubAction)}
+                      className="inline-flex items-center justify-center gap-2 rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-black text-slate-600 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
+                    >
+                      <Square className="h-3.5 w-3.5" />
+                      {quickHubAction === 'print-stop' ? 'Parando...' : 'Parar Hub'}
+                    </button>
+                  </div>
                 </div>
               </section>
 
@@ -3983,6 +4092,7 @@ export default function PedidosPage() {
               <textarea
                 value={cancelReasonInput}
                 onChange={(event) => setCancelReasonInput(event.target.value)}
+                maxLength={500}
                 rows={4}
                 className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm"
                 placeholder="Ex.: cliente solicitou cancelamento, falta de item, endereco fora de area..."
